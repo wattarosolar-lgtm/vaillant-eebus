@@ -174,7 +174,7 @@
       </p>
       <DumpButton enabled={true} />
       <div class="actions">
-        <button type="button" class="button" onclick={onFinish}>Weiter zu den Einstellungen</button>
+        <button type="button" class="button" onclick={onFinish}>Weiter zur Übersicht</button>
       </div>
     </div>
   {/if}

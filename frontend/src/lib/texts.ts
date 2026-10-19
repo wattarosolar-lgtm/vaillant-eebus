@@ -24,6 +24,41 @@ export const BRIDGE_PROBLEMS: Partial<Record<ConnectionState, string>> = {
   foreign_bridge: `Unter der Adresse dieser App antwortet eine fremde EEBUS-Bridge. ${OTHER_EEBUS_APP} Danach diese App neu starten.`,
 };
 
+/** Operation modes in the order of the design's segment buttons. */
+export const MODE_ORDER = ['off', 'auto', 'on', 'eco'];
+
+export const MODE_LABELS: Record<string, string> = {
+  off: 'Aus',
+  auto: 'Auto',
+  on: 'Ein',
+  eco: 'Eco',
+};
+
+/** SPINE operating states (deviceDiagnosisStateData). */
+const OPERATING_STATES: Record<string, string> = {
+  normalOperation: 'Normalbetrieb',
+  standby: 'Bereitschaft',
+  failure: 'Störung',
+  serviceNeeded: 'Wartung nötig',
+  overrideDetected: 'Übersteuert',
+  inAlarm: 'Alarm',
+  notReachable: 'Nicht erreichbar',
+  finished: 'Beendet',
+  temporarilyNotReady: 'Vorübergehend nicht bereit',
+  off: 'Aus',
+};
+
+export function operatingStateName(state: string): string {
+  return OPERATING_STATES[state] ?? state;
+}
+
+export const BOOST_LABELS: Record<string, string> = {
+  inactive: 'Aus',
+  active: 'Angefordert',
+  running: 'Läuft',
+  finished: 'Beendet',
+};
+
 const DEVICE_TYPES: Record<string, string> = {
   EnergyManagementSystem: 'Energiemanager',
   HeatGenerationSystem: 'Wärmeerzeuger',
@@ -35,9 +70,31 @@ export function deviceTypeName(deviceType: string): string {
   return DEVICE_TYPES[deviceType] ?? deviceType;
 }
 
+/** SHIP device categories (SHIP Requirements for Installation Process). */
+const CATEGORIES: Record<number, string> = {
+  1: 'Netzanschlusspunkt',
+  2: 'Energiemanager',
+  3: 'E-Mobilität',
+  4: 'Heizung/Klima',
+  5: 'Wechselrichter',
+  6: 'Haushaltsgerät',
+  7: 'Messgerät',
+};
+
+export function categoryNames(categories: number[]): string {
+  return categories.map((category) => CATEGORIES[category] ?? `Kategorie ${category}`).join(', ');
+}
+
+/** Best available name: brand and model, else mDNS instance name, SHIP id or category. */
+export function gatewayName(gateway: Gateway): string {
+  const model = [gateway.brand, gateway.model].filter(Boolean).join(' ');
+  return model || gateway.name || gateway.ship_id || categoryNames(gateway.categories) || 'EEBUS-Gerät';
+}
+
 /** Secondary line for a gateway: only the details the device announced. */
 export function gatewayDetails(gateway: Gateway): string {
   return [
+    gateway.categories.length > 0 && categoryNames(gateway.categories),
     gateway.device_type && `Gerätetyp ${deviceTypeName(gateway.device_type)}`,
     gateway.serial && `Seriennummer ${gateway.serial}`,
     gateway.host && `Adresse ${gateway.host}`,
@@ -53,9 +110,4 @@ export function groupedSki(ski: string): string {
 
 export function skiEnding(ski: string): string {
   return ski.slice(-6);
-}
-
-export function gatewayName(gateway: Gateway): string {
-  const name = [gateway.brand, gateway.model].filter(Boolean).join(' ');
-  return name || 'Unbekanntes EEBUS-Gerät';
 }

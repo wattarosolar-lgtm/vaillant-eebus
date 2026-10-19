@@ -1,7 +1,7 @@
 // HTTP access to the backend. All paths are relative because Home Assistant
 // ingress serves the app below a token path.
 
-import type { PairingStatus } from './types';
+import type { ApiState, PairingStatus } from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -69,4 +69,23 @@ export async function downloadDump(): Promise<void> {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+export async function getState(): Promise<ApiState> {
+  return (await send('api/state')).json() as Promise<ApiState>;
+}
+
+/**
+ * Follows the backend's server-sent events. The browser reconnects by itself
+ * after an interruption; onOpenChange reports whether the stream is up.
+ * Returns a function that closes the stream.
+ */
+export function subscribeState(onState: (state: ApiState) => void, onOpenChange: (open: boolean) => void): () => void {
+  const source = new EventSource('api/events');
+  source.addEventListener('state', (event: MessageEvent<string>) => {
+    onState(JSON.parse(event.data) as ApiState);
+  });
+  source.addEventListener('open', () => onOpenChange(true));
+  source.addEventListener('error', () => onOpenChange(false));
+  return () => source.close();
 }

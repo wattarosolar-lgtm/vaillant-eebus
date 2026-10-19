@@ -1,57 +1,74 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
+  import HeaderStatus from './components/HeaderStatus.svelte';
   import StatusPill from './components/StatusPill.svelte';
-  import { ApiError, getPairing } from './lib/api';
+  import { ApiError, getPairing, subscribeState } from './lib/api';
   import { BRIDGE_PROBLEMS } from './lib/texts';
-  import type { PairingStatus } from './lib/types';
+  import type { ApiState, PairingStatus } from './lib/types';
+  import Overview from './pages/Overview.svelte';
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
 
-  // Live updates via server-sent events follow in phase 3; until then the
-  // pairing status is polled.
-  const POLL_INTERVAL_MS = 3000;
+  type Route = 'uebersicht' | 'einstellungen' | 'einrichtung';
 
-  let status = $state<PairingStatus | null>(null);
+  // The pairing status drives setup and settings; the heat pump values arrive
+  // live over server-sent events.
+  const PAIRING_POLL_MS = 3000;
+
+  let pairing = $state<PairingStatus | null>(null);
+  let live = $state<ApiState | null>(null);
+  let streamOpen = $state(true);
   let loadError = $state<string | null>(null);
-  let route = $state(currentRoute());
+  let route = $state<Route | ''>(currentRoute());
 
-  function currentRoute(): string {
-    return window.location.hash.replace(/^#\/?/, '');
+  function currentRoute(): Route | '' {
+    const hash = window.location.hash.replace(/^#\/?/, '');
+    return hash === 'uebersicht' || hash === 'einstellungen' || hash === 'einrichtung' ? hash : '';
   }
 
-  function navigate(target: 'einrichtung' | 'einstellungen'): void {
+  function navigate(target: Route): void {
     window.location.hash = `#/${target}`;
   }
 
-  async function refresh(): Promise<void> {
+  async function refreshPairing(): Promise<void> {
     try {
-      status = await getPairing();
+      pairing = await getPairing();
       loadError = null;
     } catch (err) {
       loadError = err instanceof ApiError ? err.message : 'Der Status der App konnte nicht geladen werden.';
     }
   }
 
-  const showSetup = $derived(route === 'einrichtung');
-
-  // Without a paired gateway the app starts in the setup wizard. Switching the
-  // route keeps the wizard open after pairing until the user leaves it.
+  // Start page: the setup wizard without a paired gateway, the overview otherwise.
+  // Switching the route keeps the wizard open after pairing until the user leaves it.
   $effect(() => {
-    if (status !== null && status.paired === null && route === '') {
-      navigate('einrichtung');
+    if (pairing !== null && route === '') {
+      navigate(pairing.paired === null ? 'einrichtung' : 'uebersicht');
     }
   });
 
+  const connection = $derived(live?.connection ?? pairing?.state ?? null);
+  const problem = $derived(connection ? BRIDGE_PROBLEMS[connection] : undefined);
+
   onMount(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    void refreshPairing();
+    const timer = window.setInterval(() => void refreshPairing(), PAIRING_POLL_MS);
+    const closeStream = subscribeState(
+      (state) => {
+        live = state;
+      },
+      (open) => {
+        streamOpen = open;
+      },
+    );
     const onHashChange = (): void => {
       route = currentRoute();
     };
     window.addEventListener('hashchange', onHashChange);
     return () => {
       window.clearInterval(timer);
+      closeStream();
       window.removeEventListener('hashchange', onHashChange);
     };
   });
@@ -63,26 +80,37 @@
       <h1>Wärmepumpe</h1>
       <p class="secondary">Vaillant · lokal über EEBUS</p>
     </div>
-    {#if status}
-      <StatusPill connection={status.state} />
+    {#if route === 'uebersicht' && live}
+      <HeaderStatus {live} />
+    {:else if connection}
+      <StatusPill {connection} />
     {/if}
   </header>
 
+  {#if pairing?.paired && route !== 'einrichtung'}
+    <nav aria-label="Seiten">
+      <a href="#/uebersicht" aria-current={route === 'uebersicht' ? 'page' : undefined}>Übersicht</a>
+      <a href="#/einstellungen" aria-current={route === 'einstellungen' ? 'page' : undefined}>Einstellungen</a>
+    </nav>
+  {/if}
+
   {#if loadError}
     <p class="banner error" role="alert">{loadError}</p>
-  {:else if status && BRIDGE_PROBLEMS[status.state]}
-    <p class="banner error" role="alert">{BRIDGE_PROBLEMS[status.state]}</p>
+  {:else if problem}
+    <p class="banner error" role="alert">{problem}</p>
   {/if}
 
   <main>
-    {#if status === null}
+    {#if pairing === null}
       {#if !loadError}
         <p class="secondary" role="status">Status wird geladen …</p>
       {/if}
-    {:else if showSetup}
-      <Setup {status} onChange={(next) => (status = next)} onFinish={() => navigate('einstellungen')} />
+    {:else if route === 'einrichtung'}
+      <Setup status={pairing} onChange={(next) => (pairing = next)} onFinish={() => navigate('uebersicht')} />
+    {:else if route === 'einstellungen'}
+      <Settings status={pairing} onRepair={() => navigate('einrichtung')} />
     {:else}
-      <Settings {status} onRepair={() => navigate('einrichtung')} />
+      <Overview {live} {streamOpen} />
     {/if}
   </main>
 </div>
@@ -120,6 +148,38 @@
 
   .title .secondary {
     font-size: 14px;
+  }
+
+  nav {
+    display: flex;
+    gap: 4px;
+    padding: 4px;
+    background: var(--segment-bg);
+    border-radius: 12px;
+    align-self: flex-start;
+  }
+
+  nav a {
+    min-height: 40px;
+    padding: 0 16px;
+    display: inline-flex;
+    align-items: center;
+    border-radius: 9px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  nav a[aria-current='page'] {
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  nav a:focus-visible {
+    outline: 3px solid var(--info-text);
+    outline-offset: 2px;
   }
 
   @media (max-width: 600px) {
