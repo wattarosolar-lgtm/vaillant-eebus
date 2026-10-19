@@ -13,7 +13,7 @@ from tests.fake_bridge import FAKE_SKI, GATEWAY_SKI, FakeBridge
 from tests.support import FAST_BACKOFF, eventually, free_port
 from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.main import BackendConfig, run_backend
-from vaillant_eebus.settings import Settings, SettingsStore
+from vaillant_eebus.settings import OperatingMode, Settings, SettingsStore
 
 
 def test_config_from_environment() -> None:
@@ -118,3 +118,27 @@ async def test_event_stream_delivers_the_heat_pump_state(fake_bridge: FakeBridge
             backend.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await backend
+
+
+async def test_the_chosen_mode_survives_a_restart_of_the_backend(fake_bridge: FakeBridge, tmp_path: Path) -> None:
+    SettingsStore(tmp_path).save(Settings(paired_ski=GATEWAY_SKI, operating_mode=OperatingMode.LIVE))
+    port = free_port()
+    config = BackendConfig(
+        data_dir=tmp_path, http_host="127.0.0.1", http_port=port, trusted_clients=frozenset({"127.0.0.1"})
+    )
+    async with BridgeClient(fake_bridge.address, FAST_BACKOFF) as bridge:
+        backend = asyncio.create_task(run_backend(config, bridge))
+        try:
+            await eventually(lambda: fake_bridge.device.register_calls != [])
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+                mode = (await http.get("/api/mode")).json()
+                log = (await http.get("/api/log", params={"category": "mode"})).json()
+        finally:
+            backend.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await backend
+
+    assert mode == {"mode": "live"}
+    assert [entry["message"] for entry in log["entries"]] == ["App gestartet im Live-Betrieb."]
+    # Nothing is written on its own after a start in live mode.
+    assert fake_bridge.device.write_calls == []
