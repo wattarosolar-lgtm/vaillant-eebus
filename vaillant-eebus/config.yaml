@@ -1,5 +1,5 @@
 name: Vaillant EEBUS
-version: "0.1.0"
+version: "0.2.0"
 slug: vaillant_eebus
 description: Vaillant-Wärmepumpe lokal über EEBUS – ohne Cloud und ohne eBUS-Adapter.
 url: https://github.com/wattarosolar-lgtm/vaillant-eebus
@@ -14,6 +14,14 @@ init: false
 startup: services
 # Required: EEBUS discovery uses mDNS, and the gateway connects to port 4712.
 host_network: true
+# The UI behind the Home Assistant login. With host networking this port is
+# opened on the host; the backend binds it to the hassio network address only.
+# Keep in sync with HTTP_PORT in rootfs/etc/s6-overlay/s6-rc.d/backend/run.
+ingress: true
+ingress_port: 8714
+ingress_panel: true
+panel_title: Wärmepumpe
+panel_icon: mdi:heat-pump
 options:
   log_level: info
 schema:

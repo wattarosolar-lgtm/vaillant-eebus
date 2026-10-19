@@ -6,6 +6,12 @@
 LOG_LEVEL="$(bashio::config 'log_level')"
 export LOG_LEVEL
 export BRIDGE_ADDRESS="127.0.0.1:50051"
+export DATA_DIR="/data"
+# Ingress: the Supervisor connects to the host's address in the hassio network
+# and is the only accepted client. HTTP_PORT must match ingress_port in config.yaml.
+export HTTP_HOST="172.30.32.1"
+export HTTP_PORT="8714"
+export TRUSTED_CLIENTS="172.30.32.2"
 
 bashio::log.info "Starting backend"
 exec /opt/venv/bin/python -m vaillant_eebus

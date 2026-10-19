@@ -35,7 +35,17 @@ COPY bridge/eebus-bridge/proto/ bridge/eebus-bridge/proto/
 COPY backend/scripts/ backend/scripts/
 RUN /opt/tools/bin/python backend/scripts/generate_proto.py
 
-# 3. Runtime: Home Assistant base image (s6-overlay, bashio) with Python 3.13.
+# 3. Web UI (Svelte). The output is static files, so this stage also runs
+#    natively on the build host.
+# hadolint ignore=DL3029
+FROM --platform=$BUILDPLATFORM node:24.22.0-alpine3.24 AS frontend
+WORKDIR /src
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
+# 4. Runtime: Home Assistant base image (s6-overlay, bashio) with Python 3.13.
 FROM ${BASE_IMAGE}
 COPY backend/requirements.lock /tmp/requirements.lock
 RUN python3 -m venv /opt/venv \
@@ -46,14 +56,22 @@ COPY --from=bridge /out/eebus-bridge /usr/local/bin/eebus-bridge
 COPY bridge/LICENSE /usr/share/licenses/eebus-bridge/LICENSE
 COPY --from=proto /build/backend/gen/eebus/ /opt/backend/eebus/
 COPY backend/src/vaillant_eebus/ /opt/backend/vaillant_eebus/
+COPY --from=frontend /src/dist/ /opt/frontend/
 COPY vaillant-eebus/rootfs/ /
 RUN chmod a+x /etc/s6-overlay/s6-rc.d/*/run /etc/s6-overlay/s6-rc.d/*/finish
 
+ARG BUILD_VERSION=dev
 ENV PYTHONPATH=/opt/backend \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    STATIC_DIR=/opt/frontend \
+    APP_VERSION=${BUILD_VERSION}
 
-ARG BUILD_VERSION=dev
+# Smoke test: import the whole backend in the target image, for every
+# architecture. Fails the build if a compiled dependency does not load on
+# Alpine (musl) or the generated stubs do not match the backend.
+RUN /opt/venv/bin/python -c "import vaillant_eebus.main"
+
 LABEL io.hass.type="addon" \
       io.hass.version="${BUILD_VERSION}" \
       org.opencontainers.image.title="Vaillant EEBUS" \
