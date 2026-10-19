@@ -19,10 +19,12 @@
     mode: OperatingMode;
     /** Mode sent in live mode that the device has not reported yet. */
     pending: string | null;
-    send: (mode: string) => Promise<WriteResult>;
+    /** Sends the operation mode chosen while shown was the operating mode on screen. */
+    send: (mode: string, shown: OperatingMode) => Promise<WriteResult>;
   } = $props();
 
   const feedback = new WriteFeedback<string>();
+  $effect(() => feedback.follow(mode));
 
   // Only the modes the device offers, in the design's order (eco only if offered).
   const modes = $derived([
@@ -38,7 +40,8 @@
 
   function choose(candidate: string): void {
     if (candidate !== shown) {
-      void feedback.submit(candidate, send);
+      const onScreen = mode;
+      void feedback.submit(candidate, (chosen) => send(chosen, onScreen));
     }
   }
 </script>

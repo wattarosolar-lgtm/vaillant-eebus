@@ -89,8 +89,8 @@
             pendingSetpoint={pending('zone_setpoint', zone.id) as number | null}
             pendingMode={pending('zone_mode', zone.id) as string | null}
             setpointNote={zone.mode === 'auto' ? AUTO_MODE_SETPOINT_NOTE : null}
-            sendSetpoint={(value) => setZoneSetpoint(zone.id, value)}
-            sendMode={(mode) => setZoneMode(zone.id, mode)}
+            sendSetpoint={(value, shown) => setZoneSetpoint(zone.id, value, shown)}
+            sendMode={(mode, shown) => setZoneMode(zone.id, mode, shown)}
             color="var(--heat)"
             textColor="var(--heat-text)"
           />

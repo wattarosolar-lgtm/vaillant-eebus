@@ -39,8 +39,8 @@
     pendingSetpoint: number | null;
     pendingMode: string | null;
     setpointNote?: string | null;
-    sendSetpoint: (value: number) => Promise<WriteResult>;
-    sendMode: (mode: string) => Promise<WriteResult>;
+    sendSetpoint: (value: number, shown: OperatingMode) => Promise<WriteResult>;
+    sendMode: (mode: string, shown: OperatingMode) => Promise<WriteResult>;
     color: string;
     textColor: string;
     children?: Snippet;

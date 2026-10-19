@@ -3,7 +3,7 @@
 // device; a preview only stands for a few seconds (spec 9).
 
 import { ApiError } from './api';
-import type { WriteResult } from './types';
+import type { OperatingMode, WriteResult } from './types';
 
 /** How long a demo preview and a note stay visible. */
 export const PREVIEW_MS = 5000;
@@ -15,6 +15,15 @@ export class WriteFeedback<T> {
   error = $state<string | null>(null);
   busy = $state(false);
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #mode: OperatingMode | null = null;
+
+  /** Call with the operating mode on screen: what was shown in one mode is cleared when it changes. */
+  follow(mode: OperatingMode): void {
+    if (this.#mode !== null && this.#mode !== mode) {
+      this.reset();
+    }
+    this.#mode = mode;
+  }
 
   async submit(value: T, send: (value: T) => Promise<WriteResult>): Promise<void> {
     this.reset();

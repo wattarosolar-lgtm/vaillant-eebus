@@ -15,10 +15,12 @@
     mode: OperatingMode;
     /** Switch position sent in live mode that the device has not reported yet. */
     pending: boolean | null;
-    send: (active: boolean) => Promise<WriteResult>;
+    /** Sends the switch position chosen while shown was the operating mode on screen. */
+    send: (active: boolean, shown: OperatingMode) => Promise<WriteResult>;
   } = $props();
 
   const feedback = new WriteFeedback<boolean>();
+  $effect(() => feedback.follow(mode));
 
   const active = $derived(boost === 'active' || boost === 'running');
   const shown = $derived(feedback.preview ?? active);
@@ -49,7 +51,10 @@
     aria-checked={shown}
     aria-labelledby="boost-title"
     disabled={!enabled}
-    onclick={() => void feedback.submit(!shown, send)}
+    onclick={() => {
+      const onScreen = mode;
+      void feedback.submit(!shown, (chosen) => send(chosen, onScreen));
+    }}
   >
     <span class="knob"></span>
   </button>

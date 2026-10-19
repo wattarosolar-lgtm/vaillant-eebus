@@ -22,7 +22,8 @@
     pending: number | null;
     /** Explanation shown under the value, e.g. what the setpoint means in auto mode. */
     note?: string | null;
-    send: (value: number) => Promise<WriteResult>;
+    /** Sends value as decided while shown was the operating mode on screen. */
+    send: (value: number, shown: OperatingMode) => Promise<WriteResult>;
   } = $props();
 
   /** Clicks are collected and sent once after this pause. */
@@ -30,7 +31,19 @@
 
   const feedback = new WriteFeedback<number>();
   let draft = $state<number | null>(null);
+  // The operating mode on screen when the draft was started.
+  let draftMode: OperatingMode | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
+
+  // A change made in one mode is never sent in the other: switching drops it.
+  $effect(() => {
+    feedback.follow(mode);
+    if (draftMode !== null && mode !== draftMode) {
+      clearTimeout(timer);
+      draft = null;
+      draftMode = null;
+    }
+  });
 
   const shown = $derived(draft ?? feedback.preview ?? setpoint?.value ?? null);
   const enabled = $derived(setpoint !== null && setpoint.writable && !feedback.busy);
@@ -50,23 +63,27 @@
     }
     feedback.reset();
     draft = next;
+    draftMode = mode;
     clearTimeout(timer);
     timer = setTimeout(() => void commit(), SEND_AFTER_MS);
   }
 
   async function commit(): Promise<void> {
     const value = draft;
-    if (value === null || !setpoint) {
+    const shown = draftMode;
+    if (value === null || shown === null || !setpoint) {
       return;
     }
     if (value === setpoint.value && pending === null) {
       draft = null;
+      draftMode = null;
       return;
     }
     try {
-      await feedback.submit(value, send);
+      await feedback.submit(value, (chosen) => send(chosen, shown));
     } finally {
       draft = null;
+      draftMode = null;
     }
   }
 

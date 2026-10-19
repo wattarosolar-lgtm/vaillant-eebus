@@ -65,24 +65,27 @@ function zonePath(zoneId: string, what: 'setpoint' | 'mode'): string {
   return `api/zones/${encodeURIComponent(zoneId)}/${what}`;
 }
 
-export async function setZoneSetpoint(zoneId: string, value: number): Promise<WriteResult> {
-  return post<WriteResult>(zonePath(zoneId, 'setpoint'), { value });
+// Every write names the operating mode the user saw when making the change
+// (shown); the backend refuses it if the mode changed since.
+
+export async function setZoneSetpoint(zoneId: string, value: number, shown: OperatingMode): Promise<WriteResult> {
+  return post<WriteResult>(zonePath(zoneId, 'setpoint'), { value, operating_mode: shown });
 }
 
-export async function setZoneMode(zoneId: string, mode: string): Promise<WriteResult> {
-  return post<WriteResult>(zonePath(zoneId, 'mode'), { mode });
+export async function setZoneMode(zoneId: string, mode: string, shown: OperatingMode): Promise<WriteResult> {
+  return post<WriteResult>(zonePath(zoneId, 'mode'), { mode, operating_mode: shown });
 }
 
-export async function setHotWaterSetpoint(value: number): Promise<WriteResult> {
-  return post<WriteResult>('api/dhw/setpoint', { value });
+export async function setHotWaterSetpoint(value: number, shown: OperatingMode): Promise<WriteResult> {
+  return post<WriteResult>('api/dhw/setpoint', { value, operating_mode: shown });
 }
 
-export async function setHotWaterMode(mode: string): Promise<WriteResult> {
-  return post<WriteResult>('api/dhw/mode', { mode });
+export async function setHotWaterMode(mode: string, shown: OperatingMode): Promise<WriteResult> {
+  return post<WriteResult>('api/dhw/mode', { mode, operating_mode: shown });
 }
 
-export async function setHotWaterBoost(active: boolean): Promise<WriteResult> {
-  return post<WriteResult>('api/dhw/boost', { active });
+export async function setHotWaterBoost(active: boolean, shown: OperatingMode): Promise<WriteResult> {
+  return post<WriteResult>('api/dhw/boost', { active, operating_mode: shown });
 }
 
 /** Protocol entries, newest first; before continues after the last entry of a page. */
