@@ -153,6 +153,7 @@ async def test_state_contains_connection_and_heat_pump(
     assert after["connection"] == "connected"
     heat_pump = after["heat_pump"]
     assert heat_pump["measurements"]["power_consumption"]["value"] == 532
-    assert heat_pump["zones"][0]["label"] == "Zone 1"
+    assert [(zone["id"], zone["label"]) for zone in heat_pump["zones"]] == [("5.1.1", "Zone 1"), ("6.1.1", "Zone 2")]
     assert heat_pump["zones"][0]["room_temperature"] is None
+    assert heat_pump["zones"][1]["setpoint"]["value"] == 23
     assert heat_pump["hot_water"]["setpoint"]["max"] == 70

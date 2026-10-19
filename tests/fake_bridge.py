@@ -47,7 +47,12 @@ from eebus.v1.device_service_pb2 import (
 )
 from eebus.v1.device_service_pb2_grpc import DeviceServiceServicer, add_DeviceServiceServicer_to_server
 from eebus.v1.dhw_service_pb2 import DHW_BOOST_STATUS_INACTIVE, DHWSetpoint, DHWSystemFunctionState
-from eebus.v1.hvac_service_pb2 import RoomHeatingSetpoint, RoomHeatingState, RoomHeatingSystemFunction
+from eebus.v1.hvac_service_pb2 import (
+    RoomHeatingSetpoint,
+    RoomHeatingState,
+    RoomHeatingSystemFunction,
+    RoomHeatingZone,
+)
 from eebus.v1.lpc_service_pb2 import HeartbeatStatus
 from eebus.v1.monitoring_service_pb2 import DeviceDiagnosticsData
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -140,6 +145,21 @@ def _timestamp(value: str = FAKE_CAPTURED_AT) -> Timestamp:
 
 def _normalize(ski: str) -> str:
     return ski.replace(" ", "").upper()
+
+
+def _room(label: str, setpoint: float, temperature: float | None) -> RoomHeatingState:
+    room = RoomHeatingState(
+        setpoint=RoomHeatingSetpoint(
+            value_celsius=setpoint, min_celsius=5, max_celsius=30, step_celsius=0.5, writable=True
+        ),
+        system_function=RoomHeatingSystemFunction(
+            operation_mode="auto", available_modes=["auto", "on", "off"], mode_writable=True
+        ),
+        zone_label=label,
+    )
+    if temperature is not None:
+        room.current_temperature_celsius = temperature
+    return room
 
 
 class FakeDeviceService(DeviceServiceServicer):
@@ -252,18 +272,13 @@ class FakeDeviceService(DeviceServiceServicer):
             )
         )
         snapshot.dhw_system_function_state = SNAPSHOT_VALUE_STATE_AVAILABLE
-        room = RoomHeatingState(
-            setpoint=RoomHeatingSetpoint(
-                value_celsius=21, min_celsius=5, max_celsius=30, step_celsius=0.5, writable=True
-            ),
-            system_function=RoomHeatingSystemFunction(
-                operation_mode="auto", available_modes=["auto", "on", "off"], mode_writable=True
-            ),
-            zone_label="Zone 1",
-        )
-        if self.room_temperature is not None:
-            room.current_temperature_celsius = self.room_temperature
-        snapshot.room_heating.CopyFrom(room)
+        # Two zones like the Vaillant gateway; Zone 2 has no room sensor.
+        zones = [
+            RoomHeatingZone(zone_id="5.1.1", state=_room("Zone 1", 21, self.room_temperature)),
+            RoomHeatingZone(zone_id="6.1.1", state=_room("Zone 2", 23, None)),
+        ]
+        snapshot.room_heating_zones.extend(zones)
+        snapshot.room_heating.CopyFrom(zones[0].state)
         snapshot.room_heating_state = SNAPSHOT_VALUE_STATE_AVAILABLE
         return snapshot
 

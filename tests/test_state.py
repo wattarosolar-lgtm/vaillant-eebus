@@ -5,6 +5,8 @@ import contextlib
 from collections.abc import AsyncIterator
 
 import pytest
+from eebus.v1.device_service_pb2 import SNAPSHOT_VALUE_STATE_AVAILABLE, DeviceSnapshot
+from eebus.v1.hvac_service_pb2 import RoomHeatingSetpoint, RoomHeatingState, RoomHeatingZone
 
 from tests.fake_bridge import GATEWAY_SKI, FakeBridge
 from tests.support import eventually
@@ -46,11 +48,14 @@ def test_snapshot_maps_to_state_without_inventing_values(fake_bridge: FakeBridge
     # Not reported by the device: never filled with substitutes.
     assert "flow_temperature" not in state.measurements
     assert "energy_consumed" not in state.measurements
-    [zone] = state.zones
-    assert (zone.id, zone.label, zone.room_temperature) == ("1", "Zone 1", None)
-    assert zone.setpoint is not None
-    assert (zone.setpoint.value, zone.setpoint.min, zone.setpoint.max, zone.setpoint.step) == (21, 5, 30, 0.5)
-    assert (zone.mode, zone.available_modes) == ("auto", ["auto", "on", "off"])
+    zone1, zone2 = state.zones
+    assert (zone1.id, zone1.label, zone1.room_temperature) == ("5.1.1", "Zone 1", None)
+    assert zone1.setpoint is not None
+    assert (zone1.setpoint.value, zone1.setpoint.min, zone1.setpoint.max, zone1.setpoint.step) == (21, 5, 30, 0.5)
+    assert (zone1.mode, zone1.available_modes) == ("auto", ["auto", "on", "off"])
+    # Each zone with its own values, never those of another zone.
+    assert (zone2.id, zone2.label, zone2.room_temperature) == ("6.1.1", "Zone 2", None)
+    assert zone2.setpoint is not None and zone2.setpoint.value == 23
     assert state.hot_water is not None
     assert state.hot_water.temperature is not None and state.hot_water.temperature.value == 48
     assert state.hot_water.setpoint is not None and state.hot_water.setpoint.value == 55
@@ -61,9 +66,26 @@ def test_room_temperature_is_used_when_the_device_reports_it(fake_bridge: FakeBr
     fake_bridge.device.connected.add(GATEWAY_SKI)
     fake_bridge.device.room_temperature = 21.5
 
-    [zone] = state_from_snapshot(fake_bridge.device.snapshot(GATEWAY_SKI)).zones
+    zone1, zone2 = state_from_snapshot(fake_bridge.device.snapshot(GATEWAY_SKI)).zones
 
-    assert zone.room_temperature is not None and zone.room_temperature.value == 21.5
+    assert zone1.room_temperature is not None and zone1.room_temperature.value == 21.5
+    # Zone 2 has no room sensor: nothing is borrowed from Zone 1.
+    assert zone2.room_temperature is None
+
+
+def test_zones_without_a_name_are_numbered() -> None:
+    room = RoomHeatingState(setpoint=RoomHeatingSetpoint(value_celsius=20, min_celsius=5, max_celsius=30))
+    snapshot = DeviceSnapshot(
+        room_heating_zones=[
+            RoomHeatingZone(zone_id="2.1.1", state=room),
+            RoomHeatingZone(zone_id="10.1.1", state=room),
+        ],
+        room_heating_state=SNAPSHOT_VALUE_STATE_AVAILABLE,
+    )
+
+    zones = state_from_snapshot(snapshot).zones
+
+    assert [(zone.id, zone.label) for zone in zones] == [("2.1.1", "Zone 1"), ("10.1.1", "Zone 2")]
 
 
 def test_compressor_counts_as_off_at_low_power(fake_bridge: FakeBridge) -> None:

@@ -27,6 +27,7 @@ from eebus.v1.dhw_service_pb2 import (
     DHW_BOOST_STATUS_INACTIVE,
     DHW_BOOST_STATUS_RUNNING,
 )
+from eebus.v1.hvac_service_pb2 import RoomHeatingState
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from vaillant_eebus.bridge_client import RETRYABLE_CODES, BridgeClient
@@ -92,7 +93,7 @@ class Setpoint:
 
 @dataclass(frozen=True, slots=True)
 class Zone:
-    # Until the bridge reports several zones (phase 4) there is a single zone "1".
+    # The bridge's zone ID, the SPINE address of the zone's room entity, e.g. "5.1.1".
     id: str
     label: str
     room_temperature: Reading | None
@@ -146,9 +147,15 @@ def _compressor_active(measurements: dict[str, Reading]) -> bool | None:
 
 
 def _zones(snapshot: DeviceSnapshot, captured_at: datetime | None) -> list[Zone]:
-    if snapshot.room_heating_state != SNAPSHOT_VALUE_STATE_AVAILABLE or not snapshot.HasField("room_heating"):
+    if snapshot.room_heating_state != SNAPSHOT_VALUE_STATE_AVAILABLE:
         return []
-    room = snapshot.room_heating
+    return [
+        _zone(entry.zone_id, position, entry.state, captured_at)
+        for position, entry in enumerate(snapshot.room_heating_zones, start=1)
+    ]
+
+
+def _zone(zone_id: str, position: int, room: RoomHeatingState, captured_at: datetime | None) -> Zone:
     temperature = (
         Reading(value=room.current_temperature_celsius, unit="degC", updated_at=captured_at)
         if room.HasField("current_temperature_celsius")
@@ -166,16 +173,15 @@ def _zones(snapshot: DeviceSnapshot, captured_at: datetime | None) -> list[Zone]
         else None
     )
     function = room.system_function if room.HasField("system_function") else None
-    return [
-        Zone(
-            id="1",
-            label=room.zone_label if room.HasField("zone_label") and room.zone_label else "Zone 1",
-            room_temperature=temperature,
-            setpoint=setpoint,
-            mode=function.operation_mode or None if function else None,
-            available_modes=list(function.available_modes) if function else [],
-        )
-    ]
+    return Zone(
+        id=zone_id,
+        # Zones without a name of their own are numbered in the bridge's order.
+        label=room.zone_label if room.HasField("zone_label") and room.zone_label else f"Zone {position}",
+        room_temperature=temperature,
+        setpoint=setpoint,
+        mode=function.operation_mode or None if function else None,
+        available_modes=list(function.available_modes) if function else [],
+    )
 
 
 def _hot_water(snapshot: DeviceSnapshot, measurements: dict[str, Reading]) -> HotWater | None:
