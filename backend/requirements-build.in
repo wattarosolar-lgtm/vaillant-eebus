@@ -1,0 +1,4 @@
+# Build-time only: generates the Python gRPC stubs from bridge/eebus-bridge/proto.
+# Constrained to the runtime lock so generated code and protobuf runtime match.
+-c requirements.lock
+grpcio-tools>=1.84,<2

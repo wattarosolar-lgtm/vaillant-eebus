@@ -1,0 +1,12 @@
+# Development and CI: tests, linters, typed stub generation.
+-c requirements.lock
+-c requirements-build.lock
+-r requirements.in
+-r requirements-build.in
+mypy
+mypy-protobuf
+pytest
+pytest-asyncio
+ruff
+types-grpcio
+types-protobuf

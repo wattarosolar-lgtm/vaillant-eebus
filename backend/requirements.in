@@ -1,0 +1,4 @@
+# Runtime dependencies of the backend. Pinned with hashes in requirements.lock
+# (README.md, "Lock-Dateien", describes how to regenerate the lock files).
+grpcio>=1.84,<2
+protobuf>=7.36,<8
