@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install pinned tools
+        run: python -m pip install --require-hashes -r backend/requirements-dev.lock
+      - name: Generate gRPC stubs
+        run: python backend/scripts/generate_proto.py --typed
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy
+      - run: pytest
+
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge/eebus-bridge
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: bridge/eebus-bridge/go.mod
+          cache-dependency-path: bridge/eebus-bridge/go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Lint app config
+        uses: frenck/action-addon-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7 # v2.21.1
+        with:
+          path: ./vaillant-eebus
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: vaillant-eebus/Dockerfile
+      - name: Lint s6 service scripts
+        run: shellcheck vaillant-eebus/rootfs/etc/s6-overlay/s6-rc.d/*/run vaillant-eebus/rootfs/etc/s6-overlay/s6-rc.d/*/finish
+
+  image:
+    needs: [python, go, app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - name: Read versions
+        id: meta
+        run: |
+          version="$(sed -n 's/^version: "\(.*\)"$/\1/p' vaillant-eebus/config.yaml)"
+          test -n "${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "bridge=$(git -C bridge rev-parse --short=12 HEAD)" >> "${GITHUB_OUTPUT}"
+      - name: Tag must match config.yaml version
+        if: env.PUBLISH == 'true'
+        run: test "${GITHUB_REF_NAME#v}" = "${{ steps.meta.outputs.version }}"
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: env.PUBLISH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: vaillant-eebus/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ghcr.io/${{ github.repository_owner }}/vaillant-eebus:${{ steps.meta.outputs.version }}
+          build-args: |
+            BUILD_VERSION=${{ steps.meta.outputs.version }}
+            BRIDGE_VERSION=${{ steps.meta.outputs.bridge }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
