@@ -40,12 +40,19 @@ class BackendConfig:
     trusted_clients: frozenset[str] = frozenset({INGRESS_CLIENT})
     app_version: str = "dev"
     log_level: str = "info"
+    # EEBUS serial file written by the bridge's s6 service; None skips the
+    # bridge identity check (development against the fake bridge).
+    bridge_serial_file: Path | None = None
+    # SHIP port of this app's bridge, probed for another listener while the bridge is down.
+    ship_port: int | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> BackendConfig:
         defaults = cls()
         static_dir = env.get("STATIC_DIR")
         trusted = env.get("TRUSTED_CLIENTS")
+        serial_file = env.get("BRIDGE_SERIAL_FILE")
+        ship_port = env.get("SHIP_PORT")
         return cls(
             bridge_address=env.get("BRIDGE_ADDRESS", defaults.bridge_address),
             data_dir=Path(env.get("DATA_DIR", str(defaults.data_dir))),
@@ -59,6 +66,8 @@ class BackendConfig:
             ),
             app_version=env.get("APP_VERSION", defaults.app_version),
             log_level=env.get("LOG_LEVEL", defaults.log_level),
+            bridge_serial_file=Path(serial_file) if serial_file else None,
+            ship_port=int(ship_port) if ship_port else None,
         )
 
 
@@ -71,7 +80,13 @@ def configure_logging(level_name: str) -> None:
 
 async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
     """Serve the ingress UI and keep the bridge pairing alive until stopped."""
-    pairing = PairingService(bridge, SettingsStore(config.data_dir), config.app_version)
+    pairing = PairingService(
+        bridge,
+        SettingsStore(config.data_dir),
+        config.app_version,
+        bridge_serial_file=config.bridge_serial_file,
+        ship_port=config.ship_port,
+    )
     app = create_app(pairing, static_dir=config.static_dir, trusted_clients=config.trusted_clients)
     server = uvicorn.Server(
         uvicorn.Config(

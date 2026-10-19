@@ -8,7 +8,9 @@ import pytest
 
 from tests.fake_bridge import GATEWAY_SKI, FakeBridge
 from vaillant_eebus.api import INGRESS_CLIENT, create_app
+from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.pairing import PairingService
+from vaillant_eebus.settings import SettingsStore
 
 
 def _client(
@@ -96,3 +98,27 @@ async def test_ui_is_served_from_the_static_directory(pairing: PairingService, t
 
     assert response.status_code == 200
     assert "Wärmepumpe" in response.text
+
+
+async def test_bridge_errors_name_the_grpc_code(client: httpx.AsyncClient) -> None:
+    await client.post("/api/pairing/register", json={"ski": GATEWAY_SKI})
+
+    response = await client.get("/api/diagnostics/dump")
+
+    assert response.json()["detail"].endswith("(Fehlercode UNAVAILABLE)")
+
+
+async def test_pairing_through_a_foreign_bridge_is_refused(
+    bridge_client: BridgeClient, settings_store: SettingsStore, tmp_path: Path, fake_bridge: FakeBridge
+) -> None:
+    serial_file = tmp_path / "serial"
+    serial_file.write_text("0000000000000000", encoding="utf-8")
+    pairing = PairingService(bridge_client, settings_store, "test", bridge_serial_file=serial_file)
+    async with _client(pairing) as http:
+        status = (await http.get("/api/pairing")).json()
+        response = await http.post("/api/pairing/register", json={"ski": GATEWAY_SKI})
+
+    assert status["state"] == "foreign_bridge"
+    assert response.status_code == 409
+    assert "fremde EEBUS-Bridge" in response.json()["detail"]
+    assert fake_bridge.device.register_calls == []

@@ -25,6 +25,8 @@ def test_config_from_environment() -> None:
             "TRUSTED_CLIENTS": "127.0.0.1, 172.30.32.2",
             "APP_VERSION": "0.2.0",
             "LOG_LEVEL": "debug",
+            "BRIDGE_SERIAL_FILE": "/data/eebus/serial",
+            "SHIP_PORT": "4712",
         }
     )
 
@@ -37,6 +39,8 @@ def test_config_from_environment() -> None:
         trusted_clients=frozenset({"127.0.0.1", "172.30.32.2"}),
         app_version="0.2.0",
         log_level="debug",
+        bridge_serial_file=Path("/data/eebus/serial"),
+        ship_port=4712,
     )
 
 
@@ -46,6 +50,8 @@ def test_config_defaults_bind_ingress_only() -> None:
     assert (config.http_host, config.http_port) == ("172.30.32.1", 8714)
     assert config.trusted_clients == frozenset({"172.30.32.2"})
     assert config.static_dir is None
+    assert config.bridge_serial_file is None
+    assert config.ship_port is None
 
 
 async def test_run_backend_serves_the_api_and_logs_the_bridge_ski(

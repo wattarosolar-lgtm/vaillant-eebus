@@ -5,7 +5,12 @@
 
 LOG_LEVEL="$(bashio::config 'log_level')"
 export LOG_LEVEL
-export BRIDGE_ADDRESS="127.0.0.1:50051"
+# Must match grpc.port in ../eebus-bridge/run.
+export BRIDGE_ADDRESS="127.0.0.1:50471"
+# The bridge must report this serial, so the backend never talks to another
+# EEBUS app's bridge by mistake.
+export BRIDGE_SERIAL_FILE="/data/eebus/serial"
+export SHIP_PORT="4712"
 export DATA_DIR="/data"
 # Ingress: the Supervisor connects to the host's address in the hassio network
 # and is the only accepted client. HTTP_PORT must match ingress_port in config.yaml.

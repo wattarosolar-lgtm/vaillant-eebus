@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from vaillant_eebus.pairing import NotPairedError, PairingService, PairingStatus
+from vaillant_eebus.pairing import ForeignBridgeError, NotPairedError, PairingService, PairingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +28,10 @@ _BRIDGE_ERRORS: dict[grpc.StatusCode, tuple[int, str]] = {
     grpc.StatusCode.NOT_FOUND: (404, "Die EEBUS-Bridge kennt das gekoppelte Gateway nicht."),
 }
 _BRIDGE_ERROR_DEFAULT = (502, "Die EEBUS-Bridge hat einen Fehler gemeldet.")
+FOREIGN_BRIDGE_MESSAGE = (
+    "Unter der Adresse dieser App antwortet eine fremde EEBUS-Bridge. Vermutlich läuft eine andere EEBUS-App; "
+    "bitte diese stoppen und diese App neu starten."
+)
 
 
 class RegisterRequest(BaseModel):
@@ -67,11 +71,15 @@ def create_app(pairing: PairingService, *, static_dir: Path | None, trusted_clie
         code = exc.code() if isinstance(exc, grpc.aio.AioRpcError) else grpc.StatusCode.UNKNOWN
         status, message = _BRIDGE_ERRORS.get(code, _BRIDGE_ERROR_DEFAULT)
         _LOGGER.warning("Bridge call failed: %s", code.name)
-        return JSONResponse({"detail": message}, status_code=status)
+        return JSONResponse({"detail": f"{message} (Fehlercode {code.name})"}, status_code=status)
 
     @app.exception_handler(NotPairedError)
     async def not_paired(_request: Request, _exc: Exception) -> JSONResponse:
         return JSONResponse({"detail": "Es ist noch kein Gateway gekoppelt."}, status_code=409)
+
+    @app.exception_handler(ForeignBridgeError)
+    async def foreign_bridge(_request: Request, _exc: Exception) -> JSONResponse:
+        return JSONResponse({"detail": FOREIGN_BRIDGE_MESSAGE}, status_code=409)
 
     if static_dir is not None:
         if static_dir.is_dir():

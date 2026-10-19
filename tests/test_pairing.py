@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 from eebus.v1.device_service_pb2 import DEVICE_READINESS_UNTRUSTED
 
-from tests.fake_bridge import FAKE_SKI, GATEWAY_SKI, FakeBridge
+from tests.fake_bridge import FAKE_SERIAL, FAKE_SKI, GATEWAY_SKI, FakeBridge
 from tests.support import FAST_BACKOFF, eventually, free_port
 from vaillant_eebus.bridge_client import BridgeClient
-from vaillant_eebus.pairing import ConnectionState, NotPairedError, PairingService
+from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService
 from vaillant_eebus.settings import Settings, SettingsStore
 
 OTHER_SKI = "0123456789ABCDEF0123456789ABCDEF01234567"
@@ -160,3 +160,96 @@ async def test_diagnostic_dump_wraps_the_bridge_structure(pairing: PairingServic
     assert document["gateway"]["model"] == "VR940f"
     assert document["gateway"]["ski"] == "…7D9F02"
     assert [entity["address"] for entity in document["device"]["entities"]] == ["2:1", "2:2"]
+
+
+def _serial_file(tmp_path: Path, serial: str) -> Path:
+    path = tmp_path / "serial"
+    path.write_text(serial + "\n", encoding="utf-8")
+    return path
+
+
+async def test_own_bridge_is_recognised_by_its_serial(
+    bridge_client: BridgeClient, settings_store: SettingsStore, tmp_path: Path
+) -> None:
+    pairing = PairingService(
+        bridge_client, settings_store, "test", bridge_serial_file=_serial_file(tmp_path, FAKE_SERIAL)
+    )
+
+    status = await pairing.status()
+
+    assert status.state is ConnectionState.NOT_PAIRED
+    assert status.bridge.ski == FAKE_SKI
+
+
+async def test_foreign_bridge_is_reported_and_never_used(
+    bridge_client: BridgeClient, fake_bridge: FakeBridge, settings_store: SettingsStore, tmp_path: Path
+) -> None:
+    settings_store.save(Settings(paired_ski=GATEWAY_SKI))
+    fake_bridge.device.registered.add(GATEWAY_SKI)
+    fake_bridge.device.connected.add(GATEWAY_SKI)
+    pairing = PairingService(
+        bridge_client, settings_store, "test", bridge_serial_file=_serial_file(tmp_path, "0000000000000000")
+    )
+
+    status = await pairing.status()
+    assert status.state is ConnectionState.FOREIGN_BRIDGE
+    # The foreign bridge's SKI must not be offered for trusting in myVAILLANT.
+    assert status.bridge.ski == ""
+    assert status.discovered == []
+
+    with pytest.raises(ForeignBridgeError):
+        await pairing.pair(OTHER_SKI)
+    with pytest.raises(ForeignBridgeError):
+        await pairing.diagnostic_dump()
+    assert fake_bridge.device.register_calls == []
+
+
+async def test_missing_serial_file_counts_as_foreign(
+    bridge_client: BridgeClient, settings_store: SettingsStore, tmp_path: Path
+) -> None:
+    pairing = PairingService(bridge_client, settings_store, "test", bridge_serial_file=tmp_path / "missing")
+
+    assert (await pairing.status()).state is ConnectionState.FOREIGN_BRIDGE
+
+
+async def test_run_does_not_register_with_a_foreign_bridge(
+    bridge_client: BridgeClient,
+    fake_bridge: FakeBridge,
+    settings_store: SettingsStore,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings_store.save(Settings(paired_ski=GATEWAY_SKI))
+    pairing = PairingService(
+        bridge_client, settings_store, "test", bridge_serial_file=_serial_file(tmp_path, "0000000000000000")
+    )
+    runner = asyncio.create_task(pairing.run())
+    try:
+        await eventually(lambda: "is not this app's bridge" in caplog.text)
+        await asyncio.sleep(0.1)
+        assert fake_bridge.device.register_calls == []
+        assert fake_bridge.device.subscriber_count == 0
+    finally:
+        runner.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runner
+
+
+async def test_unreachable_bridge_with_busy_ship_port_reports_the_conflict(tmp_path: Path) -> None:
+    ship_port = free_port()
+    listener = await asyncio.start_server(lambda _r, w: w.close(), "127.0.0.1", ship_port)
+    try:
+        async with BridgeClient(f"127.0.0.1:{free_port()}", FAST_BACKOFF) as unreachable:
+            status = await PairingService(unreachable, SettingsStore(tmp_path), "test", ship_port=ship_port).status()
+    finally:
+        listener.close()
+        await listener.wait_closed()
+
+    assert status.state is ConnectionState.SHIP_PORT_IN_USE
+
+
+async def test_unreachable_bridge_with_free_ship_port_is_just_unavailable(tmp_path: Path) -> None:
+    async with BridgeClient(f"127.0.0.1:{free_port()}", FAST_BACKOFF) as unreachable:
+        status = await PairingService(unreachable, SettingsStore(tmp_path), "test", ship_port=free_port()).status()
+
+    assert status.state is ConnectionState.BRIDGE_UNAVAILABLE

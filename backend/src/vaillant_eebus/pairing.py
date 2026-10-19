@@ -3,17 +3,23 @@
 The bridge forgets registered SKIs when it restarts. The backend therefore
 stores the paired gateway in the settings and registers it again after every
 bridge start, and whenever the bridge reports the device as unknown.
+
+All apps with host networking share the host's ports. Before trusting a bridge
+the backend checks that it is this app's own bridge: it must report the EEBUS
+serial that this app generated in /data.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import UTC
 from enum import StrEnum
+from pathlib import Path
 
 import grpc
 from eebus.v1.device_service_pb2 import (
@@ -25,6 +31,7 @@ from eebus.v1.device_service_pb2 import (
     DeviceEvent,
     DiscoveredDevice,
     PairedDevice,
+    ServerInfo,
 )
 
 from vaillant_eebus.bridge_client import RETRYABLE_CODES, BridgeClient
@@ -39,6 +46,11 @@ _SKI_SEPARATORS = re.compile(r"[\s:-]")
 class ConnectionState(StrEnum):
     NOT_PAIRED = "not_paired"
     BRIDGE_UNAVAILABLE = "bridge_unavailable"
+    # This app's bridge is down and something else holds the EEBUS port,
+    # usually another EEBUS app.
+    SHIP_PORT_IN_USE = "ship_port_in_use"
+    # A bridge answers on this app's gRPC address, but it is not this app's.
+    FOREIGN_BRIDGE = "foreign_bridge"
     DISCONNECTED = "disconnected"
     CONNECTED = "connected"
     # The gateway withdrew its trust, e.g. in the myVAILLANT app.
@@ -84,6 +96,10 @@ class NotPairedError(Exception):
     """No gateway is paired yet."""
 
 
+class ForeignBridgeError(Exception):
+    """The bridge on this app's gRPC address is not this app's own bridge."""
+
+
 def normalize_ski(ski: str) -> str:
     """Upper-case hex without separators, as the bridge stores SKIs."""
     return _SKI_SEPARATORS.sub("", ski).upper()
@@ -95,11 +111,24 @@ def short_ski(ski: str) -> str:
 
 
 class PairingService:
-    def __init__(self, bridge: BridgeClient, store: SettingsStore, app_version: str) -> None:
+    def __init__(
+        self,
+        bridge: BridgeClient,
+        store: SettingsStore,
+        app_version: str,
+        *,
+        bridge_serial_file: Path | None = None,
+        ship_port: int | None = None,
+    ) -> None:
+        """bridge_serial_file holds the EEBUS serial this app's bridge announces;
+        None skips the identity check (development against the fake bridge).
+        ship_port is checked for another listener while the bridge is down."""
         self._bridge = bridge
         self._store = store
         self._settings = store.load()
         self._app_version = app_version
+        self._bridge_serial_file = bridge_serial_file
+        self._ship_port = ship_port
 
     @property
     def paired_ski(self) -> str | None:
@@ -117,6 +146,15 @@ class PairingService:
                 info.api_minor,
                 info.local_ski,
             )
+            if not self._is_own_bridge(info):
+                _LOGGER.error(
+                    "The bridge at %s is not this app's bridge (serial %r). Another EEBUS app is probably running; "
+                    "stop it and restart this app. The gateway is not registered with the foreign bridge.",
+                    self._bridge.address,
+                    info.device_serial,
+                )
+                await asyncio.sleep(self._bridge.backoff.maximum)
+                continue
             await self._register_paired()
             try:
                 async for event in self._bridge.device_events():
@@ -135,9 +173,18 @@ class PairingService:
         except grpc.aio.AioRpcError as err:
             if err.code() not in RETRYABLE_CODES:
                 raise
+            in_use = self._ship_port is not None and await _port_accepts_connections(self._ship_port)
             return PairingStatus(
                 bridge=BridgeInfo(reachable=False),
-                state=ConnectionState.BRIDGE_UNAVAILABLE,
+                state=ConnectionState.SHIP_PORT_IN_USE if in_use else ConnectionState.BRIDGE_UNAVAILABLE,
+                paired=Gateway(ski=ski) if ski else None,
+                discovered=[],
+            )
+        if not self._is_own_bridge(info):
+            # Never show the foreign bridge's SKI: the user would trust it in myVAILLANT.
+            return PairingStatus(
+                bridge=BridgeInfo(reachable=True),
+                state=ConnectionState.FOREIGN_BRIDGE,
                 paired=Gateway(ski=ski) if ski else None,
                 discovered=[],
             )
@@ -158,6 +205,7 @@ class PairingService:
         ski = normalize_ski(ski)
         if not _SKI_PATTERN.fullmatch(ski):
             raise ValueError("SKI must be 40 hexadecimal characters")
+        await self._require_own_bridge()
         previous = self._settings.paired_ski
         if previous is not None and previous != ski:
             try:
@@ -176,8 +224,8 @@ class PairingService:
         ski = self._settings.paired_ski
         if ski is None:
             raise NotPairedError
+        info = await self._require_own_bridge()
         dump = await self._bridge.get_structure_dump(ski)
-        info = await self._bridge.get_server_info()
         gateway = await self._paired_gateway(ski, [])
         captured_at = dump.captured_at.ToDatetime(tzinfo=UTC)
         document = {
@@ -199,6 +247,22 @@ class PairingService:
             filename=f"vaillant-eebus-diagnose-{captured_at:%Y%m%d-%H%M%S}.json",
             content=(json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
         )
+
+    def _is_own_bridge(self, info: ServerInfo) -> bool:
+        if self._bridge_serial_file is None:
+            return True
+        try:
+            expected = self._bridge_serial_file.read_text(encoding="utf-8").strip()
+        except OSError as err:
+            _LOGGER.error("Cannot read this app's bridge serial from %s: %s", self._bridge_serial_file, err)
+            return False
+        return bool(expected) and info.device_serial == expected
+
+    async def _require_own_bridge(self) -> ServerInfo:
+        info = await self._bridge.get_server_info()
+        if not self._is_own_bridge(info):
+            raise ForeignBridgeError
+        return info
 
     async def _register_paired(self) -> None:
         ski = self._settings.paired_ski
@@ -234,6 +298,18 @@ class PairingService:
             if normalize_ski(device.ski) == ski:
                 return _gateway_from_paired(device, host)
         return next((gateway for gateway in discovered if gateway.ski == ski), Gateway(ski=ski))
+
+
+async def _port_accepts_connections(port: int) -> bool:
+    """True if something listens on the loopback port."""
+    try:
+        _reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout=1.0)
+    except (OSError, TimeoutError):
+        return False
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return True
 
 
 def _gateway_from_discovered(device: DiscoveredDevice) -> Gateway:

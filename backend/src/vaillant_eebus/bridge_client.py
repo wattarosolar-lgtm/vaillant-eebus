@@ -27,10 +27,13 @@ from eebus.v1.device_service_pb2_grpc import DeviceServiceStub
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_ADDRESS = "127.0.0.1:50051"
+# Not the upstream default 50051, so another EEBUS bridge on the same host does not collide.
+DEFAULT_ADDRESS = "127.0.0.1:50471"
 RPC_TIMEOUT = 5.0  # seconds
 # The bridge waits up to 10 s for the device's answers before it builds the dump.
 DUMP_TIMEOUT = 30.0  # seconds
+# The structure dump of a large installation can exceed gRPC's 4 MB default.
+MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 
 # Codes that mean "bridge not (yet) reachable". Anything else is a real error
 # and is raised instead of being retried forever.
@@ -63,6 +66,7 @@ class BridgeClient:
                 # Let the channel reconnect on the same schedule as our retries.
                 ("grpc.initial_reconnect_backoff_ms", int(self._backoff.initial * 1000)),
                 ("grpc.max_reconnect_backoff_ms", int(self._backoff.maximum * 1000)),
+                ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
             ],
         )
         self._device = DeviceServiceStub(self._channel)

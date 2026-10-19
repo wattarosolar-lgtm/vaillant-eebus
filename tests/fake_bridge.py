@@ -8,7 +8,7 @@ each phase.
 
 Standalone, e.g. to click through the setup wizard without hardware (the fake
 gateway "accepts" the pairing a few seconds after it was registered):
-    PYTHONPATH=backend/gen python -m tests.fake_bridge --port 50051
+    PYTHONPATH=backend/gen python -m tests.fake_bridge --port 50471
 """
 
 from __future__ import annotations
@@ -45,6 +45,8 @@ from google.protobuf.timestamp_pb2 import Timestamp
 
 FAKE_SKI = "4a1f9c2e7b3d8065f1a2c4e6b8d0f2a4c6e8b0d2"
 FAKE_BUILD_VERSION = "fake"
+# EEBUS serial the fake bridge reports in ServerInfo.device_serial.
+FAKE_SERIAL = "a1b2c3d4e5f60718"
 GATEWAY_SKI = "6C2B9E41D7A0F3851E2C4B6D8F0A1C3E5B7D9F02"
 
 FAKE_GATEWAY = DiscoveredDevice(
@@ -121,6 +123,7 @@ class FakeDeviceService(DeviceServiceServicer):
             api_minor=0,
             bridge_build_version=FAKE_BUILD_VERSION,
             local_ski=FAKE_SKI,
+            device_serial=FAKE_SERIAL,
         )
         # When set, GetServerInfo fails with this status code.
         self.fail_with: grpc.StatusCode | None = None
@@ -276,7 +279,7 @@ async def _serve(port: int, connect_after: float) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fake EEBUS bridge (gRPC) for development without a heat pump")
-    parser.add_argument("--port", type=int, default=50051)
+    parser.add_argument("--port", type=int, default=50471)
     parser.add_argument(
         "--connect-after", type=float, default=5.0, help="seconds until the fake gateway accepts a pairing"
     )

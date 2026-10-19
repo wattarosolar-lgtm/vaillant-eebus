@@ -26,10 +26,12 @@ if bashio::config.equals 'log_level' 'debug'; then
 fi
 
 # The serial is hex only, so it is safe inside the YAML quotes. gRPC stays on
-# loopback in plaintext: only the backend in this container talks to it.
+# loopback in plaintext: only the backend in this container talks to it. The
+# port is not the upstream default 50051, so another EEBUS bridge on the host
+# (all host-network apps share ports) does not collide with this one.
 cat > "${CONFIG_FILE}" <<EOF
 grpc:
-  port: 50051
+  port: 50471
   bind: "127.0.0.1"
   enable_reflection: false
   security:
@@ -51,5 +53,5 @@ experimental:
   mgcp_provider: false
 EOF
 
-bashio::log.info "Starting EEBUS bridge (gRPC 127.0.0.1:50051, SHIP port 4712)"
+bashio::log.info "Starting EEBUS bridge (gRPC 127.0.0.1:50471, SHIP port 4712)"
 exec /usr/local/bin/eebus-bridge --config "${CONFIG_FILE}"
