@@ -67,7 +67,7 @@
             title={zone.label}
             label="Raumtemperatur"
             current={temperature(zone.room_temperature)}
-            subline={zone.room_temperature ? 'Raumfühler' : 'Kein Raumfühler über EEBUS'}
+            subline={zone.room_temperature ? 'Raumfühler (EEBUS)' : 'Kommt später aus Home Assistant'}
             setpoint={zone.setpoint}
             mode={zone.mode}
             availableModes={zone.available_modes}
