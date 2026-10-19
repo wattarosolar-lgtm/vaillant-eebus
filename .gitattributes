@@ -1,0 +1,2 @@
+# Shell scripts and s6 service files run inside a Linux container; CRLF breaks them.
+* text=auto eol=lf

@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.tools/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Generated from bridge/eebus-bridge/proto by backend/scripts/generate_proto.py
+backend/gen/
