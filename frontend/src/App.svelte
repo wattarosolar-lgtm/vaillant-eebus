@@ -17,8 +17,9 @@
   const ROUTES: Route[] = ['uebersicht', 'einstellungen', 'protokoll', 'einrichtung'];
 
   // The pairing status drives setup and settings; the heat pump values arrive
-  // live over server-sent events.
+  // live over server-sent events. While connected the pairing rarely changes.
   const PAIRING_POLL_MS = 3000;
+  const PAIRING_POLL_CONNECTED_MS = 30000;
 
   let pairing = $state<PairingStatus | null>(null);
   let live = $state<ApiState | null>(null);
@@ -83,8 +84,13 @@
   const problem = $derived(connection ? BRIDGE_PROBLEMS[connection] : undefined);
 
   onMount(() => {
-    void refreshPairing();
-    const timer = window.setInterval(() => void refreshPairing(), PAIRING_POLL_MS);
+    let timer: number | undefined;
+    const poll = async (): Promise<void> => {
+      await refreshPairing();
+      const connected = pairing?.state === 'connected' && route !== 'einrichtung';
+      timer = window.setTimeout(() => void poll(), connected ? PAIRING_POLL_CONNECTED_MS : PAIRING_POLL_MS);
+    };
+    void poll();
     const closeStream = subscribeState(
       (state) => {
         live = state;
@@ -98,7 +104,7 @@
     };
     window.addEventListener('hashchange', onHashChange);
     return () => {
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
       closeStream();
       window.removeEventListener('hashchange', onHashChange);
     };
