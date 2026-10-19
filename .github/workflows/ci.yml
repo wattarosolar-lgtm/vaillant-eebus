@@ -95,6 +95,13 @@ jobs:
           test -n "${version}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "bridge=$(git -C bridge rev-parse --short=12 HEAD)" >> "${GITHUB_OUTPUT}"
+      - name: Version files must agree with config.yaml
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          test "$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)" = "${VERSION}"
+          test "$(sed -n 's/^  "version": "\(.*\)",$/\1/p' frontend/package.json)" = "${VERSION}"
+          grep -qx "## ${VERSION}" vaillant-eebus/CHANGELOG.md
       - name: Tag must match config.yaml version
         if: env.PUBLISH == 'true'
         run: test "${GITHUB_REF_NAME#v}" = "${{ steps.meta.outputs.version }}"
