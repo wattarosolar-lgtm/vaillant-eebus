@@ -11,7 +11,8 @@ folgen in den nächsten Versionen.
 
 ## Einrichtung
 
-1. App starten und in der Seitenleiste **Wärmepumpe** öffnen.
+1. App starten. Auf der App-Seite **In der Seitenleiste anzeigen** einschalten und dann in der Seitenleiste
+   **Wärmepumpe** öffnen (oder **Benutzeroberfläche öffnen** wählen).
 2. **Gateway auswählen:** Die App sucht im Netzwerk nach EEBUS-Geräten. Wählen Sie das Gateway Ihrer
    Wärmepumpe (VR921 oder VR940f).
 3. **In der myVAILLANT-App bestätigen:** *Einstellungen → Netzwerk → EEBUS*, dort diese App auf

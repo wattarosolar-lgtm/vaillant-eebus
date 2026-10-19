@@ -19,7 +19,8 @@ host_network: true
 # Keep in sync with HTTP_PORT in rootfs/etc/s6-overlay/s6-rc.d/backend/run.
 ingress: true
 ingress_port: 8714
-ingress_panel: true
+# Whether the panel appears in the sidebar is the user's choice ("Show in
+# sidebar" on the app page); the app config cannot preset it.
 panel_title: Wärmepumpe
 panel_icon: mdi:heat-pump
 options:
