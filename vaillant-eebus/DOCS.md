@@ -5,9 +5,9 @@ ohne eBUS-Adapter und ohne MQTT.
 
 ## Stand dieser Version
 
-Version 0.2.0 koppelt die App mit dem Gateway Ihrer Wärmepumpe und kann einen Diagnose-Dump erstellen.
-Die App liest nur; sie sendet nichts an die Wärmepumpe. Übersicht, Steuerung und Sensoren in Home Assistant
-folgen in den nächsten Versionen.
+Version 0.3.0 koppelt die App mit dem Gateway Ihrer Wärmepumpe und zeigt deren Werte live in einer Übersicht.
+Die App liest nur; sie sendet nichts an die Wärmepumpe. Steuerung und Sensoren in Home Assistant folgen in den
+nächsten Versionen.
 
 ## Einrichtung
 
@@ -20,6 +20,20 @@ folgen in den nächsten Versionen.
 4. Sobald die Verbindung steht, zeigt der Assistent **Verbunden**. Laden Sie dann den **Diagnose-Dump** herunter.
 
 Das gekoppelte Gateway steht in `/data/settings.json`. Die App meldet es nach jedem Neustart selbst wieder an.
+
+## Übersicht
+
+Die Seite **Übersicht** zeigt für jede Heizzone und für das Warmwasser ein Rundinstrument: den gemessenen Wert,
+die Solltemperatur auf dem Bogen mit ihrem erlaubten Bereich und die aktive Betriebsart. Darunter stehen Leistung,
+Energie und Temperaturen. Oben sieht man, ob das Gateway verbunden ist, ob die Wärmepumpe ihren Heartbeat sendet,
+ihren Betriebszustand, die Außentemperatur und ob der Verdichter läuft (ab 100 W Leistungsaufnahme).
+
+Die Werte aktualisieren sich von selbst, sobald die Wärmepumpe etwas meldet, spätestens nach einer Minute.
+In dieser Version ist die Übersicht nur eine Anzeige.
+
+Was die Wärmepumpe über EEBUS nicht liefert, steht als **nicht verfügbar** da. Dazu gehört bei Vaillant die
+Raumtemperatur: Der Raumfühler meldet über EEBUS keinen gültigen Wert. Eine spätere Version kann sie aus einem
+Sensor in Home Assistant übernehmen.
 
 ## Diagnose-Dump
 

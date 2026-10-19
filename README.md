@@ -29,6 +29,11 @@ und `backend` (Python), das nur über gRPC mit der Bridge spricht. Das Backend l
 Host-Netzwerk teilen sich die Ports des Hosts; das Backend prüft deshalb, dass die Bridge auf seinem Port die
 eigene ist (sie muss die EEBUS-Seriennummer aus `/data/eebus/serial` melden).
 
+Die Oberfläche holt den Zustand der Wärmepumpe über `api/state` und bekommt jede Änderung per Server-Sent Events
+über `api/events`. Das Backend liest den Zustand neu, sobald die Bridge eine Änderung meldet, und spätestens jede
+Minute. Diese regelmäßige Leseanfrage braucht auch die Verbindungsüberwachung der Bridge: Bleibt sie aus, baut die
+Bridge die Verbindung zum Gateway nach zwei Minuten neu auf.
+
 ## Entwicklung
 
 Voraussetzungen: Git, Go 1.27, Python 3.13, Node.js 24. Kein Test spricht mit echter Hardware.
