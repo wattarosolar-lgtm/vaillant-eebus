@@ -1,0 +1,13 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# s6 restarts the bridge after this script. The backend notices the outage
+# itself because the bridge's gRPC API stops answering.
+
+readonly exit_code="${1}"
+readonly signal_number="${2}"
+
+if [ "${exit_code}" -eq 256 ]; then
+    bashio::log.info "EEBUS bridge stopped by signal ${signal_number}"
+elif [ "${exit_code}" -ne 0 ]; then
+    bashio::log.error "EEBUS bridge exited with code ${exit_code}, restarting"
+fi

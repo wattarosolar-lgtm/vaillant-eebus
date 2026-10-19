@@ -1,0 +1,24 @@
+name: Vaillant EEBUS
+version: "0.1.0"
+slug: vaillant_eebus
+description: Vaillant-Wärmepumpe lokal über EEBUS – ohne Cloud und ohne eBUS-Adapter.
+url: https://github.com/wattarosolar-lgtm/vaillant-eebus
+# Pre-built multi-arch image from GitHub Actions. The Supervisor never builds
+# this app itself: the Dockerfile needs the repository root as build context.
+image: ghcr.io/wattarosolar-lgtm/vaillant-eebus
+arch:
+  - amd64
+  - aarch64
+# s6-overlay from the base image is PID 1.
+init: false
+startup: services
+boot: auto
+# Required: EEBUS discovery uses mDNS, and the gateway connects to port 4712.
+host_network: true
+# /data holds the bridge certificates and serial. Losing them changes the
+# bridge SKI and forces re-pairing in the myVAILLANT app.
+backup: hot
+options:
+  log_level: info
+schema:
+  log_level: list(debug|info|warning|error)

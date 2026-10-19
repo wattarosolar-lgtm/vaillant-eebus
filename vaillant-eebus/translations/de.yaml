@@ -1,0 +1,6 @@
+configuration:
+  log_level:
+    name: Log-Stufe
+    description: >-
+      Wie ausführlich die App ins Log schreibt. „debug“ schaltet zusätzlich das
+      SHIP-Log der EEBUS-Bridge ein (für die Fehlersuche bei der Kopplung).

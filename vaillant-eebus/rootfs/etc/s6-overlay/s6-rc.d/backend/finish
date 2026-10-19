@@ -1,0 +1,12 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# s6 restarts the backend after this script.
+
+readonly exit_code="${1}"
+readonly signal_number="${2}"
+
+if [ "${exit_code}" -eq 256 ]; then
+    bashio::log.info "Backend stopped by signal ${signal_number}"
+elif [ "${exit_code}" -ne 0 ]; then
+    bashio::log.error "Backend exited with code ${exit_code}, restarting"
+fi

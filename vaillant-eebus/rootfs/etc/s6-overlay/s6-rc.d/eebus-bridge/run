@@ -1,0 +1,55 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# Starts the EEBUS bridge (Go). Its identity - certificates and serial - lives
+# in /data so it survives restarts, updates and backups. Losing it changes the
+# bridge SKI and forces re-pairing in the myVAILLANT app.
+
+readonly DATA_DIR="/data/eebus"
+readonly CERT_DIR="${DATA_DIR}/certs"
+readonly SERIAL_FILE="${DATA_DIR}/serial"
+readonly CONFIG_FILE="/etc/eebus-bridge/config.yaml"
+
+mkdir -p "${CERT_DIR}" "$(dirname "${CONFIG_FILE}")"
+
+# eebus-go rejects an empty serial. Generate it once; written atomically so a
+# crash cannot leave a truncated serial behind.
+if [ ! -s "${SERIAL_FILE}" ]; then
+    head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n' > "${SERIAL_FILE}.tmp"
+    mv "${SERIAL_FILE}.tmp" "${SERIAL_FILE}"
+    bashio::log.info "Generated EEBUS serial"
+fi
+serial="$(cat "${SERIAL_FILE}")"
+
+ship_log=false
+if bashio::config.equals 'log_level' 'debug'; then
+    ship_log=true
+fi
+
+# The serial is hex only, so it is safe inside the YAML quotes. gRPC stays on
+# loopback in plaintext: only the backend in this container talks to it.
+cat > "${CONFIG_FILE}" <<EOF
+grpc:
+  port: 50051
+  bind: "127.0.0.1"
+  enable_reflection: false
+  security:
+    mode: "loopback"
+eebus:
+  port: 4712
+  vendor: "HomeAssistant"
+  brand: "Vaillant EEBUS"
+  model: "ha-app"
+  serial: "${serial}"
+certificates:
+  auto_generate: true
+  storage_path: "${CERT_DIR}"
+logging:
+  ship_log: ${ship_log}
+ohpcf:
+  enabled: true
+experimental:
+  mgcp_provider: false
+EOF
+
+bashio::log.info "Starting EEBUS bridge (gRPC 127.0.0.1:50051, SHIP port 4712)"
+exec /usr/local/bin/eebus-bridge --config "${CONFIG_FILE}"

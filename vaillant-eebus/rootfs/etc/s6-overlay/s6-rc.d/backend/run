@@ -1,0 +1,11 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# Starts the Python backend. The s6 dependency on eebus-bridge only orders the
+# start; the backend itself waits until the bridge's gRPC API answers.
+
+LOG_LEVEL="$(bashio::config 'log_level')"
+export LOG_LEVEL
+export BRIDGE_ADDRESS="127.0.0.1:50051"
+
+bashio::log.info "Starting backend"
+exec /opt/venv/bin/python -m vaillant_eebus
