@@ -100,11 +100,18 @@ async def test_ui_is_served_from_the_static_directory(
     pairing: PairingService, state: StateService, tmp_path: Path
 ) -> None:
     (tmp_path / "index.html").write_text("<!doctype html><title>Wärmepumpe</title>", encoding="utf-8")
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "index-abc123.js").write_text("console.log(1);", encoding="utf-8")
     async with _client(pairing, state, static_dir=tmp_path) as http:
-        response = await http.get("/")
+        page = await http.get("/")
+        asset = await http.get("/assets/index-abc123.js")
 
-    assert response.status_code == 200
-    assert "Wärmepumpe" in response.text
+    assert page.status_code == 200
+    assert "Wärmepumpe" in page.text
+    # After an update the page must point to the new asset names at once.
+    assert page.headers["cache-control"] == "no-cache"
+    assert asset.status_code == 200
+    assert "immutable" in asset.headers["cache-control"]
 
 
 async def test_bridge_errors_name_the_grpc_code(client: httpx.AsyncClient) -> None:

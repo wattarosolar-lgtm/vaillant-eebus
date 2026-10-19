@@ -10,7 +10,7 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 
 import grpc
 from fastapi import FastAPI, Request, Response
@@ -18,6 +18,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.types import Scope
 
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
 from vaillant_eebus.state import HeatPumpState, StateService
@@ -45,6 +46,23 @@ SSE_KEEPALIVE = 15.0
 
 class RegisterRequest(BaseModel):
     ski: str = Field(pattern=r"^[0-9A-Fa-f]{40}$")
+
+
+class UiFiles(StaticFiles):
+    """Serves the built UI with cache rules that survive app updates.
+
+    Bundled assets carry a content hash in their name and never change; the page
+    itself must be revalidated, or a browser keeps referencing assets of an older
+    version that no longer exist.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        if PurePath(path).parts[:1] == ("assets",):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +156,7 @@ def create_app(
 
     if static_dir is not None:
         if static_dir.is_dir():
-            app.mount("/", StaticFiles(directory=static_dir, html=True), name="ui")
+            app.mount("/", UiFiles(directory=static_dir, html=True), name="ui")
         else:
             _LOGGER.warning("UI directory %s not found; serving the API only", static_dir)
     return app
