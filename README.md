@@ -38,6 +38,24 @@ Die Bridge liefert jede Heizzone einzeln (`room_heating_zones` im Snapshot, `Lis
 nach der SPINE-Adresse ihres Raum-Eintrags, z. B. `5.1.1`. Schreibende Aufrufe brauchen bei mehreren Zonen diese
 Zonen-ID; ohne sie lehnt die Bridge ab, statt eine Zone zu raten.
 
+**Schreiben:** Einzige Stelle, die an die Wärmepumpe schreibt, ist `backend/src/vaillant_eebus/write_gate.py`
+(ein Test stellt sicher, dass kein anderes Modul die Schreibmethoden des Bridge-Clients aufruft). Es prüft jeden
+Befehl gegen die Angaben des Geräts, sendet im Demo-Betrieb nichts und im Live-Betrieb höchstens einen Befehl je
+Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
+
+| Methode | Pfad | Zweck |
+|---|---|---|
+| GET/POST | `api/mode` | Demo/Live lesen und setzen (Live nur mit `"confirm": true`) |
+| POST | `api/zones/{zone_id}/setpoint`, `api/zones/{zone_id}/mode` | Solltemperatur (`value`), Betriebsart (`mode`) einer Zone |
+| POST | `api/dhw/setpoint`, `api/dhw/mode`, `api/dhw/boost` | Warmwasser: `value`, `mode`, `active` |
+| POST | `api/lpc`, `api/lpc/failsafe` | Leistungsdeckel und Failsafe-Grenze (nur API, im Demo-Betrieb gesperrt) |
+| POST | `api/ohpcf` | Verdichter-Flexibilität (`schedule`, `pause`, `resume`, `abort`; nur API, im Demo gesperrt) |
+| GET | `api/log` | Protokoll, seitenweise (`before`, `limit`) und nach `category` gefiltert |
+
+Antworten auf Schreibbefehle sagen immer, ob gesendet wurde: `{"sent": false, "mode": "demo", "message": "Würde
+senden: …", "would_send": {...}}` bzw. `{"sent": true, "mode": "live", "message": "Gesendet: …"}`. Abgelehnte
+Befehle antworten mit 4xx und einer deutschen Begründung in `detail`.
+
 ## Entwicklung
 
 Voraussetzungen: Git, Go 1.27, Python 3.13, Node.js 24. Kein Test spricht mit echter Hardware.

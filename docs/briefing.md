@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v0.4.0)
+# Briefing: Vaillant EEBUS (Stand v0.5.0)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -9,9 +9,9 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 0.4.0 (Tag `v0.4.0`), Phasen 1–4 von 7 erledigt.
-- **Die App liest derzeit nur.** Sie sendet keine Schreibbefehle an die Wärmepumpe. Die Bridge kann bereits
-  schreiben (getestet), die App nutzt das erst ab Phase 5 hinter einem Schreibschutz (Demo-/Live-Betrieb).
+- **Stand:** Version 0.5.0, Phasen 1–5 von 7 umgesetzt (Abnahme von Phase 5 an der Anlage offen).
+- **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
+  Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
 
 | Phase | Inhalt | Stand |
@@ -19,8 +19,8 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | 1 | Repository, Bridge-Fork, Dockerfile, App startet | erledigt (0.1.0) |
 | 2 | Kopplung, Diagnose-Dump, Einrichtungsassistent | erledigt (0.2.0/0.2.1) |
 | 3 | Lesen: Zustand, API, Übersicht, Live-Updates | erledigt (0.3.0) |
-| 4 | Mehrere Heizzonen in der Bridge, Eco nur wenn angeboten | erledigt (0.4.0), Abnahme an der Anlage offen |
-| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | offen |
+| 4 | Mehrere Heizzonen in der Bridge, Eco nur wenn angeboten | erledigt (0.4.0), an der Anlage abgenommen |
+| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0), Abnahme an der Anlage offen |
 | 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren), HA-Export als Sensoren | offen |
 | 7 | Einstellungs-/Protokollseite fertig, Doku, Release | offen |
 
@@ -28,11 +28,11 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 
 | Repo | Rolle |
 |---|---|
-| https://github.com/wattarosolar-lgtm/vaillant-eebus | **Die App** (dieses Repo). `main` = v0.4.0 (`5721b8b`). |
-| https://github.com/wattarosolar-lgtm/HEMS-EEBUS | **Fork der EEBUS-Bridge** (Go), eingebunden als Git-Submodul `bridge/`, fest auf Commit `69234ad` (Branch `feat/multi-zone`). Muss öffentlich bleiben, sonst kann die CI ihn nicht laden. |
+| https://github.com/wattarosolar-lgtm/vaillant-eebus | **Die App** (dieses Repo). Phase 5 auf Branch `phase-5/schreiben`. |
+| https://github.com/wattarosolar-lgtm/HEMS-EEBUS | **Fork der EEBUS-Bridge** (Go), eingebunden als Git-Submodul `bridge/`, fest auf Commit `78a1a5a` (Branch `feat/multi-zone`). Muss öffentlich bleiben, sonst kann die CI ihn nicht laden. |
 | https://github.com/volschin/eebus-ha-bridge | Original der Bridge (MIT-Lizenz). Der Fork-`main` (`25e061f`) entspricht dem Original. |
 
-**Eigener Code im Fork** sind nur diese vier Commits auf `25e061f`; alles andere ist Code des Originals:
+**Eigener Code im Fork** sind nur diese fünf Commits auf `25e061f`; alles andere ist Code des Originals:
 
 | Commit | Inhalt |
 |---|---|
@@ -40,8 +40,9 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | `e9baadc` | Gerätesuche liefert Marke/Modell/Seriennummer/Typ; `ServerInfo.device_serial` |
 | `47ce5ff` | Gerätesuche liefert mDNS-Name, SHIP-ID, Gerätekategorien |
 | `69234ad` | **Mehrere Heizzonen** (siehe Abschnitt 5) |
+| `78a1a5a` | Korrekturen aus der Prüfung von v0.4.0: Schreiben nie an eine andere Zone (auch bei nur einem Konfigurations-Kandidaten Adressvergleich; benannte Zone ohne Zonenliste → `NOT_FOUND`), Zonennamen ohne Entität verworfen |
 
-Prüfen: `git diff 25e061f..69234ad` im Fork, ohne die erzeugten Dateien (`*.pb.go`,
+Prüfen: `git diff 25e061f..78a1a5a` im Fork, ohne die erzeugten Dateien (`*.pb.go`,
 `custom_components/eebus/generated/`). Der Ordner `custom_components/` im Fork ist die HA-Integration des
 Originals und wird von dieser App **nicht** benutzt.
 
@@ -61,7 +62,7 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
   eigener gRPC-Port 50471 (statt 50051) und eine Identitätsprüfung: Das Backend spricht nur mit einer Bridge, die
   die EEBUS-Seriennummer aus `/data/eebus/serial` meldet (`ServerInfo.device_serial`).
 - Persistente Daten: `/data/eebus/` (Zertifikat und Seriennummer = SKI der App; Verlust erzwingt Neukopplung),
-  `/data/settings.json` (gekoppelte Gateway-SKI).
+  `/data/settings.json` (gekoppelte Gateway-SKI, Demo/Live), `/data/app.db` (Protokoll, SQLite).
 - Das Gateway erlaubt **nur eine EEBUS-Verbindung** gleichzeitig.
 - Image: `ghcr.io/wattarosolar-lgtm/vaillant-eebus:<version>` für amd64 und aarch64, von der CI gebaut; der
   Supervisor baut nicht selbst.
@@ -88,40 +89,67 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 
 | Modul | Aufgabe |
 |---|---|
-| `main.py` | Konfiguration aus Umgebungsvariablen (`BRIDGE_ADDRESS`, `DATA_DIR`, `HTTP_HOST`, `HTTP_PORT`, `TRUSTED_CLIENTS`, `STATIC_DIR`, `BRIDGE_SERIAL_FILE`, `SHIP_PORT`, …); startet uvicorn, `PairingService.run()` und `StateService.run()` in einer `asyncio.TaskGroup` |
-| `bridge_client.py` | gRPC-Client (`grpc.aio`): Server-Info, Gerätesuche, Kopplung, Gerätestatus, Snapshot, Ereignis-Streams, Struktur-Dump; Zeitlimits, Backoff, `RETRYABLE_CODES`, max. Nachrichtengröße 64 MB |
-| `pairing.py` | Kopplung und Verbindungszustand (`ConnectionState`); prüft, ob die eigene Bridge antwortet; erkennt fremde Bridge und belegten SHIP-Port; meldet das gekoppelte Gateway nach jedem Bridge-Neustart wieder an; `ConnectionLog` fasst abgelehnte Verbindungsversuche beim Start zusammen; Diagnose-Dump |
-| `state.py` | `StateService`: liest den Geräte-Snapshot nach jedem Zustandsereignis der Bridge (1 s gebündelt) und **spätestens jede Minute** – diese Leseanfrage braucht auch die Verbindungsüberwachung der Bridge (ohne Lesezugriff baut sie die Verbindung nach 2 min neu auf). Bildet `DeviceSnapshot` auf `HeatPumpState` ab (Messwerte, Zonen, Warmwasser, Status). Nicht gemeldete Werte bleiben `None`, nie Ersatzwerte. Verdichter gilt als aktiv ab 100 W. |
-| `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, Keep-alive alle 15 s), `POST api/pairing/register`, `GET api/diagnostics/dump`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `index.html` mit `no-cache`, Assets `immutable` |
-| `settings.py` | `settings.json` atomar schreiben; beschädigte Datei wird beiseitegelegt |
+| `main.py` | Konfiguration aus Umgebungsvariablen (`BRIDGE_ADDRESS`, `DATA_DIR`, `HTTP_HOST`, `HTTP_PORT`, `TRUSTED_CLIENTS`, `STATIC_DIR`, `BRIDGE_SERIAL_FILE`, `SHIP_PORT`, …; ungültige Ports → klare Fehlermeldung); startet uvicorn, `PairingService.run()`, `StateService.run()` und `WriteGate.run()` in einer `asyncio.TaskGroup`, schließt danach das Protokoll |
+| `bridge_client.py` | gRPC-Client (`grpc.aio`): Server-Info, Gerätesuche, Kopplung, Gerätestatus, Snapshot, Ereignis-Streams, Struktur-Dump; **Schreibmethoden** (`WRITE_METHODS`: Zone-Soll/-Betriebsart mit `zone_id`, Warmwasser-Soll/-Betriebsart/Einmalladung, Leistungsdeckel, Failsafe, Verdichter-Flexibilität) mit 15 s Zeitlimit (die Bridge wartet bis zu 10 s auf das Gerät); Backoff, `RETRYABLE_CODES`, max. Nachrichtengröße 64 MB |
+| `pairing.py` | Kopplung und Verbindungszustand (`ConnectionState`); prüft, ob die eigene Bridge antwortet; erkennt fremde Bridge und belegten SHIP-Port; meldet das gekoppelte Gateway nach jedem Bridge-Neustart wieder an; `ConnectionLog` fasst abgelehnte Verbindungsversuche beim Start zusammen und schreibt Verbindungsereignisse deutsch ins Protokoll; Diagnose-Dump |
+| `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a). |
+| `log_store.py` | Protokoll in SQLite (`/data/app.db`): `add()` kehrt sofort zurück, alle DB-Arbeit läuft geordnet in einem Worker-Thread; höchstens 10.000 Einträge; Kategorien `mode`, `write`, `connection`, `device`; beschädigte DB wird beiseitegelegt |
+| `state.py` | `StateService`: liest den Geräte-Snapshot nach jedem Zustandsereignis der Bridge (1 s gebündelt) und **spätestens jede Minute** – diese Leseanfrage braucht auch die Verbindungsüberwachung der Bridge (ohne Lesezugriff baut sie die Verbindung nach 2 min neu auf). Bildet `DeviceSnapshot` auf `HeatPumpState` ab (Messwerte, Zonen, Warmwasser, Status). Nicht gemeldete Werte bleiben `None`, nie Ersatzwerte. Verdichter gilt als aktiv ab 100 W. Liest auch `mode_writable`, Leistungsdeckel, Failsafe und Verdichter-Flexibilität. `refresh_now()` (nach einem Schreibvorgang) und `republish()` (Modus/offene Schreibvorgänge geändert). |
+| `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, Keep-alive alle 15 s; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
+| `settings.py` | `SettingsStore` ist alleiniger Besitzer der aktuellen Einstellungen (`current`, `update()`), damit Kopplung und Moduswechsel sich nicht überschreiben; `settings.json` atomar schreiben; beschädigte Datei wird beiseitegelegt (→ Demo) |
 
 ### Oberfläche (`frontend/src/`)
 
-Svelte 5 (Runes), Hash-Routing (`#/uebersicht`, `#/einstellungen`, `#/einrichtung`), nur relative URLs (Ingress-Pfad),
-Live-Daten über `EventSource('api/events')`. Seiten: `Overview.svelte` (Rundinstrumente je Zone und Warmwasser, Karten
-für Leistung/Energie und Temperaturen), `Setup.svelte` (Einrichtungsassistent), `Settings.svelte` (Kopplung, Diagnose-Dump).
-Komponenten: `Dial.svelte`, `HeaderStatus.svelte`, `StatusPill.svelte`, `DumpButton.svelte`. Texte in `lib/texts.ts`,
-Formatierung (de-DE) in `lib/format.ts`. Noch **keine Bedienelemente** zum Steuern.
+Svelte 5 (Runes), Hash-Routing (`#/uebersicht`, `#/protokoll`, `#/einstellungen`, `#/einrichtung`), nur relative URLs
+(Ingress-Pfad), Live-Daten über `EventSource('api/events')`. Seiten: `Overview.svelte` (Rundinstrumente je Zone und
+Warmwasser mit Bedienelementen, Karten für Leistung/Energie und Temperaturen), `Log.svelte` (Protokoll mit Filter und
+„Ältere laden“), `Setup.svelte` (Einrichtungsassistent), `Settings.svelte` (Kopplung, Diagnose-Dump).
+Komponenten: `Dial.svelte`, `SetpointControl.svelte` (−/+, Klicks werden 1,2 s gesammelt), `ModeSegments.svelte`,
+`BoostSwitch.svelte`, `ModeSwitch.svelte` (Demo | Live), `ModeBanner.svelte` (Banner, Bestätigung für Live),
+`HeaderStatus.svelte`, `StatusPill.svelte`, `DumpButton.svelte`. `lib/feedback.svelte.ts` hält Vorschau (nur Demo,
+5 s), Hinweis und Fehler eines Bedienelements. Texte in `lib/texts.ts`, Formatierung (de-DE) in `lib/format.ts`.
+Im Live-Betrieb zeigt die Oberfläche bis zur Bestätigung durch das Gerät den alten Wert mit „Wird gesendet …“.
 
-## 5. Mehrere Heizzonen (Bridge, Commit `69234ad`)
+## 5. Mehrere Heizzonen (Bridge, Commits `69234ad` und `78a1a5a`)
 
 Vorher nahm die Bridge pro Gerät die erste passende Raum-Entität und speicherte nur einen Zonennamen; bei zwei Zonen
 stand der Name der zweiten über den Werten der ersten, und Werte konnten aus verschiedenen Zonen stammen.
 
 - `internal/usecases/entity.go`: `compatibleEntities()` liefert alle Entitäten eines Geräts, numerisch nach Adresse
-  sortiert; `sameZoneEntity()` ordnet Entitäten verschiedener Use Cases über die Adresse zu.
+  sortiert; `sameZoneEntity()` ordnet Entitäten verschiedener Use Cases über die Adresse zu – seit `78a1a5a` auch
+  bei nur einem Kandidaten; unbekannte Adresse → keine Zuordnung (fail closed).
 - `internal/eebus/zones.go`: `ZoneID()` = SPINE-Adresse mit Punkten, z. B. `"5.1.1"`.
 - `internal/eebus/registry.go`: Zonennamen je `HeatingZone`-Entität; Zuordnung Raum → Zone über Adresspräfix
   (`5.1.1` gehört zu `5.1`), bei Mehrdeutigkeit kein Name.
-- `internal/usecases/classification.go`: Name wird je Zone gelesen und angefordert.
+- `internal/usecases/classification.go`: Name wird je Zone gelesen und angefordert; Namen ohne Entität werden
+  verworfen (`78a1a5a`).
 - `internal/grpc/hvac_service.go`: `ListRoomHeatingZones`; Lesen je Zone (Name, Raum-Ist, Sollwert mit Grenzen,
   Betriebsart); `GetRoomHeating` liefert weiter **eine** Zone (die erste nach Adresse) für ältere Clients.
   Schreiben mit optionaler `zone_id`: ohne sie nur bei genau einer Zone, sonst `FAILED_PRECONDITION`; unbekannte Zone
-  `NOT_FOUND`; Grenzen der jeweiligen Zone. Quellen ohne Zonenliste (Test-Doubles) laufen über den alten Einzelpfad.
+  `NOT_FOUND` (seit `78a1a5a` auch, solange noch keine Zone ausgehandelt ist); Grenzen der jeweiligen Zone. Quellen
+  ohne Zonenliste (Test-Doubles) laufen über den alten Einzelpfad.
 - Protos: `hvac_service.proto` (`RoomHeatingZone`, `RoomHeatingZoneList`, `zone_id`), `device_service.proto`
   (`DeviceSnapshot.room_heating_zones`, Feld 29).
 - Ereignisse tragen die Zonen-ID (`eebus.Event.ZoneID`).
 - Eco wird nur durchgereicht, wenn das Gerät es anbietet (Test).
+
+## 5a. Schreiben: `write_gate.py`
+
+- Befehle: `SetZoneSetpoint`, `SetZoneMode`, `SetHotWaterSetpoint`, `SetHotWaterMode`, `SetHotWaterBoost`,
+  `SetConsumptionLimit`, `SetFailsafeLimit`, `ControlCompressor`. `submit()` hält je Steuerung (Art + Zone) ein
+  `asyncio.Lock`.
+- Vorbedingungen: gekoppelt (`NotPairedError`), Zustand lesbar und verbunden (409).
+- Prüfung gegen die Gerätewerte **in beiden Modi**: Zone bekannt (404), schreibbar (409), Bereich und Schrittweite
+  (422; Schrittweite ≤ 0 → 409, fail closed), Betriebsart angeboten (422).
+- **Demo:** nichts senden. Zonen/Warmwasser → `WriteResult(sent=False, would_send=…)` und „Würde senden: …“ im
+  Protokoll; Leistungsdeckel/Failsafe/Verdichter → „Im Demo-Betrieb gesperrt“.
+- **Live:** gleicher Wert wie am Gerät oder wie ein noch offener Schreibvorgang → nicht senden; höchstens ein
+  Befehl je Steuerung alle 5 s (429, `Retry-After`); danach `refresh_now()`. Offene Schreibvorgänge (`pending`)
+  werden bestätigt, sobald der Snapshot den Wert zeigt, sonst nach 30 s „Nicht bestätigt“. `DEADLINE_EXCEEDED`
+  → „Ergebnis unbekannt“, kein automatischer Wiederholversuch.
+- `run()` protokolliert den Modus beim Start und erkennt Änderungen außerhalb der App (Kategorie `device`).
+- Moduswechsel: Live nur mit `confirm: true` (400 sonst); gespeichert in `settings.json`; Wechsel protokolliert.
+- Ein Strukturtest (AST) stellt sicher, dass nur `write_gate.py` die `WRITE_METHODS` des Bridge-Clients aufruft.
 
 ## 6. Die echte Anlage (Feldbefunde)
 
@@ -135,11 +163,20 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 - Nach jedem Start lehnt das Gateway die SHIP-Verbindung oft rund 2 Minuten lang ab (einmal 5,5 min), bevor sie
   hält. Ursache **unbekannt** (SHIP-Log mit `log_level: debug` steht aus).
 - Der minütliche Snapshot-Lesezugriff hat die zyklischen Neuverbindungen der Bridge-Überwachung behoben (bestätigt).
+- 0.4.0 an der Anlage (19.10.2026, 20:33): Verbindung sofort, ohne abgelehnte Versuche; zwei Kacheln „Zone 1“/„Zone 2“.
+- **Sollwert im Auto-Betrieb:** Das Gateway meldet je Zone genau einen Sollwert (Zone 2: 23 °C), die myVAILLANT-App
+  zeigt im Auto-Betrieb mit Zeitprogramm aber 21,5 °C. Die Temperatur des laufenden Zeitfensters kommt nicht über
+  EEBUS. Vermutlich ist der EEBUS-Sollwert die Wunschtemperatur für „Ein“/manuell – **nicht bestätigt**, der Nutzer
+  prüft es in myVAILLANT. Die Oberfläche weist im Auto-Betrieb darauf hin.
+- Vom Gerät gemeldet: Zonen 5–30 °C in 0,5er-Schritten, Warmwasser 35–70 °C in 1er-Schritten, Betriebsarten
+  änderbar, Einmalladung schreibbar, Leistungsdeckel 0 W inaktiv, Failsafe 1.000.000 W für 2 h.
 
 ## 7. Tests
 
-- Python: 57 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
-  Raumfühler). Kein Test spricht mit echter Hardware.
+- Python: 105 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+  Raumfühler). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
+  Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
+  Kein Test spricht mit echter Hardware.
 - Go (Fork): `go test -race ./...`; neue Tests u. a. `internal/grpc/hvac_zones_test.go`,
   `internal/usecases/entity_test.go`, `roomheatingsysfn_adapter_test.go`, `classification_test.go`, `registry_test.go`.
 - Frontend: `svelte-check`, ESLint, Build; keine Unit-Tests der Oberfläche.
@@ -163,23 +200,29 @@ Release: Version in `config.yaml`, `pyproject.toml`, `frontend/package.json` und
 
 Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösungen sind aber willkommen:
 
-1. Ursache der abgelehnten Verbindungsversuche nach dem Start ist unbekannt.
+1. Ursache der abgelehnten Verbindungsversuche nach dem Start ist unbekannt (tritt nur manchmal auf).
 2. `GetRoomHeating` ohne Zone liefert bewusst die erste Zone (Abweichung von der ursprünglichen Planung, die dort
    bei mehreren Zonen einen Fehler vorsah). Die App nutzt nur `room_heating_zones`.
-3. Die App schreibt noch nichts; Schreibschutz, Demo/Live und Protokoll kommen in Phase 5.
+3. Leistungsdeckel, Failsafe und Verdichter-Flexibilität sind nur über die API erreichbar und **nicht an der Anlage
+   getestet**. Ein niedriger Failsafe-Wert würde die Wärmepumpe nach jedem Neustart der App bis zu 2 h drosseln.
 4. Raumtemperatur aus Home Assistant und Export nach HA kommen in Phase 6.
 5. Im Fork gibt es einen Alt-Pfad in `hvac_service.go` für Quellen ohne Zonenliste (per Typ-Zusicherung). Er existiert
    für bestehende Test-Doubles; im Produktivbetrieb liefern alle Use Cases Zonenlisten.
-6. **Bitte prüfen:** `recordCapabilitySupport()` in `internal/usecases/entity.go` (Original-Code) entfernt die
-   Registry-Beobachtung einer Entität, wenn sie nicht die „erste passende“ ist. Bei zwei Zonen betrifft das die zweite
-   Zone. Ob das Auswirkungen auf Gesundheits-/Bereitschaftsanzeigen hat, ist nicht untersucht.
+6. `recordCapabilitySupport()` in `internal/usecases/entity.go` (Original-Code) entfernt die Registry-Beobachtung
+   der zweiten Zone. Bewertet in der Prüfung von v0.4.0: kein Einfluss auf Raumheizung, Gesundheit oder
+   Bereitschaft; nur Registry-Fallbacks anderer Werte wären „nicht verfügbar“, nie falsch. Bewusst nicht geändert.
 7. `TemperatureMonitoringWrapper` wird für Raum- und Außentemperatur genutzt; Außentemperatur-Ereignisse tragen
-   ebenfalls eine Zonen-ID (die des Außenfühlers). Der HVAC-Stream filtert nach Ereignistyp – vermutlich harmlos.
+   ebenfalls eine Zonen-ID (die des Außenfühlers). In der Prüfung als harmlos bestätigt.
+8. Zonen ohne eigenen Namen heißen „Zone N“ nach ihrer Position unter den gerade lesbaren Zonen; die Nummer ist nur
+   stabil, solange alle Zonen lesbar sind (die echte Anlage benennt ihre Zonen).
+9. Die Prüfung von v0.4.0 (Funde 1–10) ist eingearbeitet: 1, 2, 5 im Fork (`78a1a5a`); 3, 7, 8, 9 in der App; 6
+   dokumentiert; 4 bewertet (Punkt 6); Testlücken aus 10 geschlossen.
 
 ## 10. Wo eine Prüfung am meisten bringt
 
-1. **Mehrzonen-Logik im Fork** (`25e061f..69234ad`): kann ein Schreibbefehl jemals die falsche Zone treffen?
-   Stimmen Sortierung, Zuordnung Raum ↔ Zone ↔ Konfigurations-Entität nach Neuverbindungen, Fehlercodes?
+1. **Schreibschutz** (`write_gate.py`): Kann im Demo-Betrieb irgendein Weg einen Schreibbefehl an die Bridge
+   bringen? Sind Sperre je Steuerung, 5-s-Grenze, Duplikaterkennung und Bestätigung nebenläufig korrekt? Kann ein
+   Befehl die falsche Zone treffen (App → `zone_id` → Fork `78a1a5a`)?
 2. **Nebenläufigkeit im Backend**: `StateService` (Ereignis-Stream, Entprellung, Listener-Queues, SSE),
    `PairingService.run()` (Wiederverbindung, Backoff), Abbruch beim Herunterfahren, Verhalten bei Bridge-Neustart.
 3. **Sicherheit**: Ingress-Prüfung (nur 172.30.32.2), gRPC nur auf Loopback, Umgang mit fremder Bridge,
