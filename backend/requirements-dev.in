@@ -3,6 +3,7 @@
 -c requirements-build.lock
 -r requirements.in
 -r requirements-build.in
+httpx
 mypy
 mypy-protobuf
 pytest

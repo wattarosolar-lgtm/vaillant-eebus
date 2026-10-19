@@ -1,4 +1,6 @@
 # Runtime dependencies of the backend. Pinned with hashes in requirements.lock
 # (README.md, "Lock-Dateien", describes how to regenerate the lock files).
+fastapi>=0.146,<1
 grpcio>=1.84,<2
 protobuf>=7.36,<8
+uvicorn>=0.54,<1
