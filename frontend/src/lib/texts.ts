@@ -1,4 +1,4 @@
-import type { ConnectionState, Gateway } from './types';
+import type { ConnectionState, Gateway, LogCategory } from './types';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'neutral';
 
@@ -51,6 +51,29 @@ const OPERATING_STATES: Record<string, string> = {
 export function operatingStateName(state: string): string {
   return OPERATING_STATES[state] ?? state;
 }
+
+/**
+ * In auto mode the controller follows its time program. The gateway reports
+ * only one setpoint per zone, not the time program's current temperature
+ * (field finding: myVAILLANT showed 21,5 °C while the gateway reported 23 °C).
+ */
+export const AUTO_MODE_SETPOINT_NOTE =
+  'Im Auto-Betrieb regelt der Regler nach seinem Zeitprogramm; dessen aktuelle Solltemperatur meldet das Gateway nicht.';
+
+export const OPERATING_MODE_BANNERS = {
+  demo: 'Demo-Betrieb: Die App liest nur Werte. Änderungen werden angezeigt, aber nicht an die Wärmepumpe gesendet.',
+  live: 'Live-Betrieb: Änderungen werden an die Wärmepumpe gesendet.',
+} as const;
+
+export const LIVE_CONFIRMATION =
+  'Live-Betrieb einschalten? Danach sendet die App Änderungen wirklich an die Wärmepumpe.';
+
+export const LOG_CATEGORY_LABELS: Record<LogCategory, string> = {
+  write: 'Schreiben',
+  device: 'Gerät',
+  connection: 'Verbindung',
+  mode: 'Modus',
+};
 
 export const BOOST_LABELS: Record<string, string> = {
   inactive: 'Aus',

@@ -1,8 +1,16 @@
 <script lang="ts">
+  import BoostSwitch from '../components/BoostSwitch.svelte';
   import Dial from '../components/Dial.svelte';
+  import {
+    setHotWaterBoost,
+    setHotWaterMode,
+    setHotWaterSetpoint,
+    setZoneMode,
+    setZoneSetpoint,
+  } from '../lib/api';
   import { kilowattHours, kilowatts, temperature, timeOfDay, watts } from '../lib/format';
-  import { BOOST_LABELS, BRIDGE_PROBLEMS } from '../lib/texts';
-  import type { ApiState, Reading } from '../lib/types';
+  import { AUTO_MODE_SETPOINT_NOTE, BRIDGE_PROBLEMS } from '../lib/texts';
+  import type { ApiState, Control, Reading } from '../lib/types';
 
   let { live, streamOpen }: { live: ApiState | null; streamOpen: boolean } = $props();
 
@@ -12,6 +20,11 @@
   // Values are only shown while they are current: snapshot readable and gateway connected.
   const values = $derived(heatPump && heatPump.available && heatPump.connected ? heatPump : null);
   const measurements = $derived(values?.measurements ?? {});
+
+  /** The value sent for a control that the device has not reported yet. */
+  function pending(control: Control, zoneId: string | null = null): number | string | boolean | null {
+    return live?.pending.find((write) => write.control === control && write.zone_id === zoneId)?.value ?? null;
+  }
 
   function celsius(reading: Reading | null | undefined): string | null {
     const value = temperature(reading);
@@ -69,8 +82,15 @@
             current={temperature(zone.room_temperature)}
             subline={zone.room_temperature ? 'Raumfühler (EEBUS)' : 'Kommt später aus Home Assistant'}
             setpoint={zone.setpoint}
-            mode={zone.mode}
+            operationMode={zone.mode}
             availableModes={zone.available_modes}
+            modeWritable={zone.mode_writable}
+            appMode={live.mode}
+            pendingSetpoint={pending('zone_setpoint', zone.id) as number | null}
+            pendingMode={pending('zone_mode', zone.id) as string | null}
+            setpointNote={zone.mode === 'auto' ? AUTO_MODE_SETPOINT_NOTE : null}
+            sendSetpoint={(value) => setZoneSetpoint(zone.id, value)}
+            sendMode={(mode) => setZoneMode(zone.id, mode)}
             color="var(--heat)"
             textColor="var(--heat-text)"
           />
@@ -82,21 +102,25 @@
             current={temperature(values.hot_water.temperature)}
             subline="Speicher"
             setpoint={values.hot_water.setpoint}
-            mode={values.hot_water.mode}
+            operationMode={values.hot_water.mode}
             availableModes={values.hot_water.available_modes}
+            modeWritable={values.hot_water.mode_writable}
+            appMode={live.mode}
+            pendingSetpoint={pending('dhw_setpoint') as number | null}
+            pendingMode={pending('dhw_mode') as string | null}
+            sendSetpoint={setHotWaterSetpoint}
+            sendMode={setHotWaterMode}
             color="var(--water)"
             textColor="var(--water-text)"
           >
             {#if values.hot_water.boost}
-              <div class="boost">
-                <div class="boost-text">
-                  <span class="boost-title">Einmalladung</span>
-                  <span class="hint">Speicher einmal aufheizen</span>
-                </div>
-                <span class="chip" class:running={values.hot_water.boost === 'running' || values.hot_water.boost === 'active'}>
-                  {BOOST_LABELS[values.hot_water.boost]}
-                </span>
-              </div>
+              <BoostSwitch
+                boost={values.hot_water.boost}
+                writable={values.hot_water.boost_writable}
+                mode={live.mode}
+                pending={pending('dhw_boost') as boolean | null}
+                send={setHotWaterBoost}
+              />
             {/if}
           </Dial>
         {/if}
@@ -145,40 +169,6 @@
     grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     gap: 24px;
     align-items: start;
-  }
-
-  .boost {
-    align-self: stretch;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding-top: 4px;
-  }
-
-  .boost-text {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .boost-title {
-    font-size: 15px;
-    font-weight: 500;
-  }
-
-  .chip {
-    padding: 4px 10px;
-    border-radius: 999px;
-    background: var(--bg);
-    color: var(--text-secondary);
-    font-size: 13px;
-    font-weight: 500;
-  }
-
-  .chip.running {
-    background: var(--water);
-    color: #ffffff;
   }
 
   .big {

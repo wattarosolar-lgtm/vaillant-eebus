@@ -2,8 +2,9 @@
   import type { Snippet } from 'svelte';
 
   import { digitsForStep, formatNumber } from '../lib/format';
-  import { MODE_LABELS, MODE_ORDER } from '../lib/texts';
-  import type { Setpoint } from '../lib/types';
+  import type { OperatingMode, Setpoint, WriteResult } from '../lib/types';
+  import ModeSegments from './ModeSegments.svelte';
+  import SetpointControl from './SetpointControl.svelte';
 
   let {
     title,
@@ -11,8 +12,15 @@
     current,
     subline,
     setpoint,
-    mode,
+    operationMode,
     availableModes,
+    modeWritable,
+    appMode,
+    pendingSetpoint,
+    pendingMode,
+    setpointNote = null,
+    sendSetpoint,
+    sendMode,
     color,
     textColor,
     children,
@@ -23,8 +31,16 @@
     current: string | null;
     subline: string;
     setpoint: Setpoint | null;
-    mode: string | null;
+    operationMode: string | null;
     availableModes: string[];
+    modeWritable: boolean;
+    /** Demo or live: decides whether changes are previews or sent. */
+    appMode: OperatingMode;
+    pendingSetpoint: number | null;
+    pendingMode: string | null;
+    setpointNote?: string | null;
+    sendSetpoint: (value: number) => Promise<WriteResult>;
+    sendMode: (mode: string) => Promise<WriteResult>;
     color: string;
     textColor: string;
     children?: Snippet;
@@ -61,10 +77,6 @@
   const target = $derived(
     setpoint ? arc((setpoint.value - setpoint.min) / (setpoint.max - setpoint.min || 1)) : null,
   );
-  const modes = $derived([
-    ...MODE_ORDER.filter((candidate) => availableModes.includes(candidate)),
-    ...availableModes.filter((candidate) => !MODE_ORDER.includes(candidate)),
-  ]);
   const ariaLabel = $derived(
     `${title}: ${current ? `Ist ${current} °C, ` : ''}${
       setpoint ? `Soll ${formatNumber(setpoint.value, digitsForStep(setpoint.step))} °C` : 'Soll nicht verfügbar'
@@ -99,29 +111,25 @@
     </div>
   </div>
 
-  <div class="target">
-    <span class="hint-text">Solltemperatur</span>
-    {#if setpoint}
-      <span class="target-value" style:color={textColor}>
-        {formatNumber(setpoint.value, digitsForStep(setpoint.step))}<span class="unit"> °C</span>
-      </span>
-    {:else}
-      <span class="target-value muted">nicht verfügbar</span>
-    {/if}
-  </div>
+  <SetpointControl
+    {title}
+    {setpoint}
+    {textColor}
+    mode={appMode}
+    pending={pendingSetpoint}
+    note={setpointNote}
+    send={sendSetpoint}
+  />
 
-  <div class="modes">
-    <span class="hint-text">Betriebsart</span>
-    {#if modes.length > 0}
-      <div class="segments" role="group" aria-label={`Betriebsart ${title}: ${MODE_LABELS[mode ?? ''] ?? 'unbekannt'}`}>
-        {#each modes as candidate (candidate)}
-          <span class="segment" class:active={candidate === mode}>{MODE_LABELS[candidate] ?? candidate}</span>
-        {/each}
-      </div>
-    {:else}
-      <span class="muted">nicht verfügbar</span>
-    {/if}
-  </div>
+  <ModeSegments
+    {title}
+    current={operationMode}
+    {availableModes}
+    writable={modeWritable}
+    mode={appMode}
+    pending={pendingMode}
+    send={sendMode}
+  />
 
   {#if children}
     {@render children()}
@@ -184,53 +192,5 @@
 
   .muted {
     color: var(--text-hint);
-  }
-
-  .target {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .target-value {
-    font-size: 32px;
-    font-weight: 600;
-  }
-
-  .target-value.muted {
-    font-size: 15px;
-    font-weight: 500;
-  }
-
-  .modes {
-    align-self: stretch;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .segments {
-    display: flex;
-    gap: 4px;
-    padding: 4px;
-    background: var(--bg);
-    border-radius: 12px;
-  }
-
-  .segment {
-    flex: 1 1 0;
-    min-height: 44px;
-    display: grid;
-    place-items: center;
-    border-radius: 9px;
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--text);
-  }
-
-  .segment.active {
-    background: var(--text);
-    color: #ffffff;
   }
 </style>

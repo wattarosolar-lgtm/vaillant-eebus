@@ -1,7 +1,7 @@
 // HTTP access to the backend. All paths are relative because Home Assistant
 // ingress serves the app below a token path.
 
-import type { ApiState, PairingStatus } from './types';
+import type { ApiState, LogCategory, LogPage, OperatingMode, PairingStatus, WriteResult } from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -43,13 +43,59 @@ export async function getPairing(): Promise<PairingStatus> {
   return (await send('api/pairing')).json() as Promise<PairingStatus>;
 }
 
-export async function registerGateway(ski: string): Promise<PairingStatus> {
-  const response = await send('api/pairing/register', {
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const response = await send(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ski }),
+    body: JSON.stringify(body),
   });
-  return response.json() as Promise<PairingStatus>;
+  return response.json() as Promise<T>;
+}
+
+export async function registerGateway(ski: string): Promise<PairingStatus> {
+  return post<PairingStatus>('api/pairing/register', { ski });
+}
+
+/** Live needs confirm: true; the backend refuses it otherwise. */
+export async function setOperatingMode(mode: OperatingMode, confirm: boolean): Promise<{ mode: OperatingMode }> {
+  return post<{ mode: OperatingMode }>('api/mode', { mode, confirm });
+}
+
+function zonePath(zoneId: string, what: 'setpoint' | 'mode'): string {
+  return `api/zones/${encodeURIComponent(zoneId)}/${what}`;
+}
+
+export async function setZoneSetpoint(zoneId: string, value: number): Promise<WriteResult> {
+  return post<WriteResult>(zonePath(zoneId, 'setpoint'), { value });
+}
+
+export async function setZoneMode(zoneId: string, mode: string): Promise<WriteResult> {
+  return post<WriteResult>(zonePath(zoneId, 'mode'), { mode });
+}
+
+export async function setHotWaterSetpoint(value: number): Promise<WriteResult> {
+  return post<WriteResult>('api/dhw/setpoint', { value });
+}
+
+export async function setHotWaterMode(mode: string): Promise<WriteResult> {
+  return post<WriteResult>('api/dhw/mode', { mode });
+}
+
+export async function setHotWaterBoost(active: boolean): Promise<WriteResult> {
+  return post<WriteResult>('api/dhw/boost', { active });
+}
+
+/** Protocol entries, newest first; before continues after the last entry of a page. */
+export async function getLog(category: LogCategory | null, before: number | null): Promise<LogPage> {
+  const params = new URLSearchParams();
+  if (category) {
+    params.set('category', category);
+  }
+  if (before !== null) {
+    params.set('before', String(before));
+  }
+  const query = params.toString();
+  return (await send(query ? `api/log?${query}` : 'api/log')).json() as Promise<LogPage>;
 }
 
 function filenameFrom(disposition: string | null): string {
