@@ -28,6 +28,14 @@ from eebus.v1.dhw_service_pb2 import (
     DHW_BOOST_STATUS_RUNNING,
 )
 from eebus.v1.hvac_service_pb2 import RoomHeatingState
+from eebus.v1.ohpcf_service_pb2 import (
+    COMPRESSOR_STATE_AVAILABLE,
+    COMPRESSOR_STATE_COMPLETED,
+    COMPRESSOR_STATE_PAUSED,
+    COMPRESSOR_STATE_RUNNING,
+    COMPRESSOR_STATE_SCHEDULED,
+    COMPRESSOR_STATE_STOPPED,
+)
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from vaillant_eebus.bridge_client import RETRYABLE_CODES, BridgeClient
@@ -73,6 +81,15 @@ _BOOST_STATES = {
     DHW_BOOST_STATUS_FINISHED: "finished",
 }
 
+_COMPRESSOR_STATES = {
+    COMPRESSOR_STATE_AVAILABLE: "available",
+    COMPRESSOR_STATE_SCHEDULED: "scheduled",
+    COMPRESSOR_STATE_RUNNING: "running",
+    COMPRESSOR_STATE_PAUSED: "paused",
+    COMPRESSOR_STATE_COMPLETED: "completed",
+    COMPRESSOR_STATE_STOPPED: "stopped",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Reading:
@@ -100,6 +117,7 @@ class Zone:
     setpoint: Setpoint | None
     mode: str | None
     available_modes: list[str]
+    mode_writable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,9 +126,36 @@ class HotWater:
     setpoint: Setpoint | None
     mode: str | None
     available_modes: list[str]
+    mode_writable: bool
     # inactive, active, running or finished; None if the device reports no boost.
     boost: str | None
     boost_writable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ConsumptionLimit:
+    # Power limit of the LPC use case; only enforced while active.
+    value_w: float
+    duration_s: int
+    active: bool
+    changeable: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FailsafeLimit:
+    # Limit the device applies on its own when the app's heartbeat stops.
+    value_w: float
+    duration_s: int
+
+
+@dataclass(frozen=True, slots=True)
+class CompressorFlexibility:
+    # Whether the compressor offers an optional consumption the app may schedule.
+    available: bool
+    # available, scheduled, running, paused, completed or stopped; None if unknown.
+    state: str | None
+    stoppable: bool
+    pausable: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +169,10 @@ class HeatPumpState:
     measurements: dict[str, Reading] = field(default_factory=dict)
     zones: list[Zone] = field(default_factory=list)
     hot_water: HotWater | None = None
+    # Not shown in the UI; read for the API and the write gate.
+    consumption_limit: ConsumptionLimit | None = None
+    failsafe_limit: FailsafeLimit | None = None
+    compressor_flexibility: CompressorFlexibility | None = None
     captured_at: datetime | None = None
 
 
@@ -181,6 +230,7 @@ def _zone(zone_id: str, position: int, room: RoomHeatingState, captured_at: date
         setpoint=setpoint,
         mode=function.operation_mode or None if function else None,
         available_modes=list(function.available_modes) if function else [],
+        mode_writable=function.mode_writable if function else False,
     )
 
 
@@ -208,8 +258,42 @@ def _hot_water(snapshot: DeviceSnapshot, measurements: dict[str, Reading]) -> Ho
         setpoint=setpoint,
         mode=function.operation_mode or None if function else None,
         available_modes=list(function.available_modes) if function else [],
+        mode_writable=function.mode_writable if function else False,
         boost=_BOOST_STATES.get(function.boost_status) if function else None,
         boost_writable=function.boost_writable if function else False,
+    )
+
+
+def _consumption_limit(snapshot: DeviceSnapshot) -> ConsumptionLimit | None:
+    if snapshot.consumption_limit_state != SNAPSHOT_VALUE_STATE_AVAILABLE or not snapshot.HasField("consumption_limit"):
+        return None
+    limit = snapshot.consumption_limit
+    return ConsumptionLimit(
+        value_w=limit.value_watts,
+        duration_s=limit.duration_seconds,
+        active=limit.is_active,
+        changeable=limit.is_changeable,
+    )
+
+
+def _failsafe_limit(snapshot: DeviceSnapshot) -> FailsafeLimit | None:
+    if snapshot.failsafe_limit_state != SNAPSHOT_VALUE_STATE_AVAILABLE or not snapshot.HasField("failsafe_limit"):
+        return None
+    limit = snapshot.failsafe_limit
+    return FailsafeLimit(value_w=limit.value_watts, duration_s=limit.duration_minimum_seconds)
+
+
+def _compressor_flexibility(snapshot: DeviceSnapshot) -> CompressorFlexibility | None:
+    if snapshot.compressor_flexibility_state != SNAPSHOT_VALUE_STATE_AVAILABLE or not snapshot.HasField(
+        "compressor_flexibility"
+    ):
+        return None
+    flexibility = snapshot.compressor_flexibility
+    return CompressorFlexibility(
+        available=flexibility.available,
+        state=_COMPRESSOR_STATES.get(flexibility.state),
+        stoppable=flexibility.is_stoppable,
+        pausable=flexibility.is_pausable,
     )
 
 
@@ -232,6 +316,9 @@ def state_from_snapshot(snapshot: DeviceSnapshot) -> HeatPumpState:
         measurements=measurements,
         zones=_zones(snapshot, captured_at),
         hot_water=_hot_water(snapshot, measurements),
+        consumption_limit=_consumption_limit(snapshot),
+        failsafe_limit=_failsafe_limit(snapshot),
+        compressor_flexibility=_compressor_flexibility(snapshot),
         captured_at=captured_at,
     )
 
@@ -282,6 +369,15 @@ class StateService:
             yield queue
         finally:
             self._listeners.discard(deliver)
+
+    def refresh_now(self) -> None:
+        """Read the snapshot again soon, e.g. right after a write."""
+        self._dirty.set()
+
+    def republish(self) -> None:
+        """Hand the current state to all listeners again, e.g. after the operating
+        mode changed, so open event streams send the new overall state."""
+        self._publish(self._state)
 
     async def run(self) -> None:
         backoff = self._bridge.backoff.delays()

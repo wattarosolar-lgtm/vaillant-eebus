@@ -1,10 +1,11 @@
 """Fake EEBUS bridge for development and tests without a heat pump.
 
 A gRPC server built from the same proto files as the real bridge. It serves the
-DeviceService RPCs the backend uses so far: server info, gateway discovery,
-pairing, device status, device events and the structure dump. Every other RPC
-answers UNIMPLEMENTED (behaviour of the generated base class). It grows with
-each phase.
+RPCs the backend uses: server info, gateway discovery, pairing, device status,
+device events, snapshot, structure dump and the writes of the HVAC, DHW, LPC
+and OHPCF services. Writes are checked like the real bridge does, recorded in
+FakeDeviceService.write_calls and applied to the served device state. Every
+other RPC answers UNIMPLEMENTED (behaviour of the generated base class).
 
 Standalone, e.g. to click through the setup wizard without hardware (the fake
 gateway "accepts" the pairing a few seconds after it was registered):
@@ -17,11 +18,11 @@ import argparse
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import grpc
-from eebus.v1.common_pb2 import DeviceRequest, Empty, MeasurementEntry
+from eebus.v1.common_pb2 import DeviceRequest, Empty, LoadLimit, MeasurementEntry
 from eebus.v1.device_service_pb2 import (
     DEVICE_EVENT_CONNECTED,
     DEVICE_EVENT_DISCONNECTED,
@@ -46,15 +47,42 @@ from eebus.v1.device_service_pb2 import (
     ServerInfo,
 )
 from eebus.v1.device_service_pb2_grpc import DeviceServiceServicer, add_DeviceServiceServicer_to_server
-from eebus.v1.dhw_service_pb2 import DHW_BOOST_STATUS_INACTIVE, DHWSetpoint, DHWSystemFunctionState
+from eebus.v1.dhw_service_pb2 import (
+    DHW_BOOST_STATUS_ACTIVE,
+    DHW_BOOST_STATUS_INACTIVE,
+    DHWBoostStatus,
+    DHWSetpoint,
+    DHWSystemFunctionState,
+    SetDHWBoostRequest,
+    SetDHWOperationModeRequest,
+    SetDHWSetpointRequest,
+)
+from eebus.v1.dhw_service_pb2_grpc import DHWServiceServicer, add_DHWServiceServicer_to_server
 from eebus.v1.hvac_service_pb2 import (
     RoomHeatingSetpoint,
     RoomHeatingState,
     RoomHeatingSystemFunction,
     RoomHeatingZone,
+    SetRoomHeatingModeRequest,
+    SetRoomHeatingTemperatureRequest,
 )
-from eebus.v1.lpc_service_pb2 import HeartbeatStatus
+from eebus.v1.hvac_service_pb2_grpc import HVACServiceServicer, add_HVACServiceServicer_to_server
+from eebus.v1.lpc_service_pb2 import (
+    FailsafeLimit,
+    HeartbeatStatus,
+    WriteFailsafeLimitRequest,
+    WriteLoadLimitRequest,
+)
+from eebus.v1.lpc_service_pb2_grpc import LPCServiceServicer, add_LPCServiceServicer_to_server
 from eebus.v1.monitoring_service_pb2 import DeviceDiagnosticsData
+from eebus.v1.ohpcf_service_pb2 import (
+    COMPRESSOR_STATE_AVAILABLE,
+    OHPCF_ACTION_SCHEDULE,
+    CompressorFlexibility,
+    ControlCompressorRequest,
+)
+from eebus.v1.ohpcf_service_pb2_grpc import OHPCFServiceServicer, add_OHPCFServiceServicer_to_server
+from google.protobuf.message import Message
 from google.protobuf.timestamp_pb2 import Timestamp
 
 FAKE_SKI = "4a1f9c2e7b3d8065f1a2c4e6b8d0f2a4c6e8b0d2"
@@ -147,19 +175,42 @@ def _normalize(ski: str) -> str:
     return ski.replace(" ", "").upper()
 
 
-def _room(label: str, setpoint: float, temperature: float | None) -> RoomHeatingState:
-    room = RoomHeatingState(
-        setpoint=RoomHeatingSetpoint(
-            value_celsius=setpoint, min_celsius=5, max_celsius=30, step_celsius=0.5, writable=True
-        ),
-        system_function=RoomHeatingSystemFunction(
-            operation_mode="auto", available_modes=["auto", "on", "off"], mode_writable=True
-        ),
-        zone_label=label,
-    )
-    if temperature is not None:
-        room.current_temperature_celsius = temperature
-    return room
+@dataclass
+class FakeZone:
+    """A heating zone as the real gateway reports it: 5-30 °C in 0.5 steps, no eco."""
+
+    label: str
+    setpoint: float
+    mode: str = "auto"
+    available_modes: list[str] = field(default_factory=lambda: ["auto", "on", "off"])
+    setpoint_writable: bool = True
+    mode_writable: bool = True
+    minimum: float = 5
+    maximum: float = 30
+    step: float = 0.5
+
+    def state(self, temperature: float | None) -> RoomHeatingState:
+        room = RoomHeatingState(
+            setpoint=RoomHeatingSetpoint(
+                value_celsius=self.setpoint,
+                min_celsius=self.minimum,
+                max_celsius=self.maximum,
+                step_celsius=self.step,
+                writable=self.setpoint_writable,
+            ),
+            system_function=RoomHeatingSystemFunction(
+                operation_mode=self.mode, available_modes=self.available_modes, mode_writable=self.mode_writable
+            ),
+            zone_label=self.label,
+        )
+        if temperature is not None:
+            room.current_temperature_celsius = temperature
+        return room
+
+
+def _on_step(value: float, minimum: float, maximum: float, step: float) -> bool:
+    steps = (value - minimum) / step
+    return minimum <= value <= maximum and abs(steps - round(steps)) < 1e-6
 
 
 class FakeDeviceService(DeviceServiceServicer):
@@ -191,6 +242,20 @@ class FakeDeviceService(DeviceServiceServicer):
         # Device state served by GetDeviceSnapshot; tests may change it.
         self.measurements: dict[str, tuple[float, str]] = dict(FAKE_MEASUREMENTS)
         self.room_temperature: float | None = None
+        # Writable values, as the real installation reports them.
+        self.zones: dict[str, FakeZone] = {"5.1.1": FakeZone("Zone 1", 21), "6.1.1": FakeZone("Zone 2", 23)}
+        self.dhw_setpoint = 55.0
+        self.dhw_mode = "auto"
+        self.dhw_boost: DHWBoostStatus.ValueType = DHW_BOOST_STATUS_INACTIVE
+        self.consumption_limit = LoadLimit(value_watts=0, duration_seconds=0, is_active=False, is_changeable=True)
+        self.failsafe_limit = FailsafeLimit(value_watts=1_000_000, duration_minimum_seconds=7200)
+        self.compressor = CompressorFlexibility(available=True, state=COMPRESSOR_STATE_AVAILABLE)
+        # Every write RPC that reached the fake bridge: (RPC name, request).
+        self.write_calls: list[tuple[str, Message]] = []
+        # When set, write RPCs fail with this status code.
+        self.fail_writes_with: grpc.StatusCode | None = None
+        # False: the device accepts writes but keeps reporting the old values.
+        self.apply_writes = True
         self.snapshot_calls = 0
         self._state_subscribers: list[asyncio.Queue[DeviceStateEvent | None]] = []
 
@@ -259,28 +324,60 @@ class FakeDeviceService(DeviceServiceServicer):
         snapshot.device_diagnostics.CopyFrom(DeviceDiagnosticsData(operating_state="normalOperation"))
         snapshot.device_diagnostics_state = SNAPSHOT_VALUE_STATE_AVAILABLE
         snapshot.dhw_setpoint.CopyFrom(
-            DHWSetpoint(value_celsius=55, min_celsius=35, max_celsius=70, step_celsius=1, writable=True)
+            DHWSetpoint(value_celsius=self.dhw_setpoint, min_celsius=35, max_celsius=70, step_celsius=1, writable=True)
         )
         snapshot.dhw_setpoint_state = SNAPSHOT_VALUE_STATE_AVAILABLE
         snapshot.dhw_system_function.CopyFrom(
             DHWSystemFunctionState(
-                boost_status=DHW_BOOST_STATUS_INACTIVE,
+                boost_status=self.dhw_boost,
                 boost_writable=True,
-                operation_mode="auto",
+                operation_mode=self.dhw_mode,
                 available_modes=["auto", "on", "off"],
                 mode_writable=True,
             )
         )
         snapshot.dhw_system_function_state = SNAPSHOT_VALUE_STATE_AVAILABLE
-        # Two zones like the Vaillant gateway; Zone 2 has no room sensor.
+        # Two zones like the Vaillant gateway; only Zone 1 may report a room temperature.
         zones = [
-            RoomHeatingZone(zone_id="5.1.1", state=_room("Zone 1", 21, self.room_temperature)),
-            RoomHeatingZone(zone_id="6.1.1", state=_room("Zone 2", 23, None)),
+            RoomHeatingZone(zone_id=zone_id, state=zone.state(self.room_temperature if zone_id == "5.1.1" else None))
+            for zone_id, zone in self.zones.items()
         ]
         snapshot.room_heating_zones.extend(zones)
         snapshot.room_heating.CopyFrom(zones[0].state)
         snapshot.room_heating_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        snapshot.consumption_limit.CopyFrom(self.consumption_limit)
+        snapshot.consumption_limit_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        snapshot.failsafe_limit.CopyFrom(self.failsafe_limit)
+        snapshot.failsafe_limit_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        snapshot.compressor_flexibility.CopyFrom(self.compressor)
+        snapshot.compressor_flexibility_state = SNAPSHOT_VALUE_STATE_AVAILABLE
         return snapshot
+
+    async def accept_write(
+        self, name: str, request: Message, ski: str, context: grpc.aio.ServicerContext[Any, Any]
+    ) -> bool:
+        """Record a write and check it like the bridge; False: the device keeps its values."""
+        self.write_calls.append((name, request))
+        if self.fail_writes_with is not None:
+            await context.abort(self.fail_writes_with, "fake bridge write failure")
+        normalized = _normalize(ski)
+        if normalized not in self.registered:
+            await context.abort(grpc.StatusCode.NOT_FOUND, "device not found for specified ski")
+        if normalized not in self.connected:
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "device not connected")
+        return self.apply_writes
+
+    async def zone(self, request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> FakeZone:
+        """The zone a room heating write goes to; never guesses between zones."""
+        if not request.HasField("zone_id"):
+            if len(self.zones) != 1:
+                await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "zone_id is required with several zones")
+            return next(iter(self.zones.values()))
+        zone = self.zones.get(request.zone_id)
+        if zone is None:
+            await context.abort(grpc.StatusCode.NOT_FOUND, f"unknown heating zone {request.zone_id!r}")
+        assert zone is not None
+        return zone
 
     # --- RPCs ----------------------------------------------------------------
 
@@ -392,6 +489,109 @@ class FakeDeviceService(DeviceServiceServicer):
         )
 
 
+class FakeHVACService(HVACServiceServicer):
+    def __init__(self, device: FakeDeviceService) -> None:
+        self._device = device
+
+    async def SetRoomHeatingTemperature(
+        self, request: SetRoomHeatingTemperatureRequest, context: grpc.aio.ServicerContext[Any, Empty]
+    ) -> Empty:
+        apply = await self._device.accept_write("SetRoomHeatingTemperature", request, request.ski, context)
+        zone = await self._device.zone(request, context)
+        if not zone.setpoint_writable or not _on_step(request.value_celsius, zone.minimum, zone.maximum, zone.step):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "setpoint outside the zone's limits or step")
+        if apply:
+            zone.setpoint = request.value_celsius
+            self._device.push_state_event(request.ski)
+        return Empty()
+
+    async def SetRoomHeatingMode(
+        self, request: SetRoomHeatingModeRequest, context: grpc.aio.ServicerContext[Any, Empty]
+    ) -> Empty:
+        apply = await self._device.accept_write("SetRoomHeatingMode", request, request.ski, context)
+        zone = await self._device.zone(request, context)
+        if not zone.mode_writable or request.mode not in zone.available_modes:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"mode {request.mode!r} not offered")
+        if apply:
+            zone.mode = request.mode
+            self._device.push_state_event(request.ski)
+        return Empty()
+
+
+class FakeDHWService(DHWServiceServicer):
+    def __init__(self, device: FakeDeviceService) -> None:
+        self._device = device
+
+    async def SetDHWSetpoint(
+        self, request: SetDHWSetpointRequest, context: grpc.aio.ServicerContext[Any, Empty]
+    ) -> Empty:
+        apply = await self._device.accept_write("SetDHWSetpoint", request, request.ski, context)
+        if not _on_step(request.value_celsius, 35, 70, 1):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "DHW setpoint outside the limits or step")
+        if apply:
+            self._device.dhw_setpoint = request.value_celsius
+            self._device.push_state_event(request.ski)
+        return Empty()
+
+    async def SetDHWOperationMode(
+        self, request: SetDHWOperationModeRequest, context: grpc.aio.ServicerContext[Any, Empty]
+    ) -> Empty:
+        apply = await self._device.accept_write("SetDHWOperationMode", request, request.ski, context)
+        if request.mode not in ("auto", "on", "off"):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"mode {request.mode!r} not offered")
+        if apply:
+            self._device.dhw_mode = request.mode
+            self._device.push_state_event(request.ski)
+        return Empty()
+
+    async def SetDHWBoost(self, request: SetDHWBoostRequest, context: grpc.aio.ServicerContext[Any, Empty]) -> Empty:
+        if await self._device.accept_write("SetDHWBoost", request, request.ski, context):
+            self._device.dhw_boost = DHW_BOOST_STATUS_ACTIVE if request.active else DHW_BOOST_STATUS_INACTIVE
+            self._device.push_state_event(request.ski)
+        return Empty()
+
+
+class FakeLPCService(LPCServiceServicer):
+    def __init__(self, device: FakeDeviceService) -> None:
+        self._device = device
+
+    async def WriteConsumptionLimit(
+        self, request: WriteLoadLimitRequest, context: grpc.aio.ServicerContext[Any, Empty]
+    ) -> Empty:
+        if await self._device.accept_write("WriteConsumptionLimit", request, request.ski, context):
+            self._device.consumption_limit = LoadLimit(
+                value_watts=request.value_watts,
+                duration_seconds=request.duration_seconds,
+                is_active=request.is_active,
+                is_changeable=True,
+            )
+            self._device.push_state_event(request.ski)
+        return Empty()
+
+    async def WriteFailsafeLimit(
+        self, request: WriteFailsafeLimitRequest, context: grpc.aio.ServicerContext[Any, Empty]
+    ) -> Empty:
+        if await self._device.accept_write("WriteFailsafeLimit", request, request.ski, context):
+            self._device.failsafe_limit = FailsafeLimit(
+                value_watts=request.value_watts, duration_minimum_seconds=request.duration_minimum_seconds
+            )
+            self._device.push_state_event(request.ski)
+        return Empty()
+
+
+class FakeOHPCFService(OHPCFServiceServicer):
+    def __init__(self, device: FakeDeviceService) -> None:
+        self._device = device
+
+    async def ControlCompressorFlexibility(
+        self, request: ControlCompressorRequest, context: grpc.aio.ServicerContext[Any, Empty]
+    ) -> Empty:
+        await self._device.accept_write("ControlCompressorFlexibility", request, request.ski, context)
+        if request.action == OHPCF_ACTION_SCHEDULE and not self._device.compressor.available:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "no optional consumption available")
+        return Empty()
+
+
 @dataclass
 class FakeBridge:
     server: grpc.aio.Server
@@ -407,6 +607,10 @@ async def start_fake_bridge(port: int = 0, auto_connect_after: float | None = No
     server = grpc.aio.server()
     device = FakeDeviceService(auto_connect_after)  # type: ignore[abstract]  # unimplemented RPCs answer UNIMPLEMENTED
     add_DeviceServiceServicer_to_server(device, server)
+    add_HVACServiceServicer_to_server(FakeHVACService(device), server)  # type: ignore[abstract]
+    add_DHWServiceServicer_to_server(FakeDHWService(device), server)  # type: ignore[abstract]
+    add_LPCServiceServicer_to_server(FakeLPCService(device), server)  # type: ignore[abstract]
+    add_OHPCFServiceServicer_to_server(FakeOHPCFService(device), server)  # type: ignore[abstract]
     bound_port = server.add_insecure_port(f"127.0.0.1:{port}")
     await server.start()
     return FakeBridge(server=server, address=f"127.0.0.1:{bound_port}", device=device)
