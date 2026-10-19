@@ -155,6 +155,9 @@ class FakeDeviceService(DeviceServiceServicer):
         self.fail_with: grpc.StatusCode | None = None
         self.server_info_calls = 0
         self.discovered: list[DiscoveredDevice] = [FAKE_GATEWAY]
+        # What the bridge learns from a connected device's classification,
+        # independent of what the device announces over mDNS.
+        self.device_details: dict[str, DiscoveredDevice] = {GATEWAY_SKI: FAKE_GATEWAY}
         self.registered: set[str] = set()
         self.connected: set[str] = set()
         # Readiness reported by GetDeviceStatus, overriding the connected flag.
@@ -307,8 +310,8 @@ class FakeDeviceService(DeviceServiceServicer):
                 software_revision="0357.40.31",
                 hardware_revision="0201",
             )
-            for device in self.discovered
-            if _normalize(device.ski) in self.connected
+            for ski, device in self.device_details.items()
+            if ski in self.connected
         ]
         return ListPairedDevicesResponse(devices=devices)
 

@@ -16,7 +16,7 @@ import contextlib
 import json
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from enum import StrEnum
 from pathlib import Path
@@ -69,6 +69,11 @@ class Gateway:
     host: str = ""
     software_revision: str = ""
     hardware_revision: str = ""
+    # mDNS instance name and SHIP id, shown when a device announces no brand/model.
+    name: str = ""
+    ship_id: str = ""
+    # SHIP device categories, e.g. 4 = HVAC.
+    categories: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,11 +198,14 @@ class PairingService:
         discovered = [_gateway_from_discovered(device) for device in await self._bridge.list_discovered()]
         if ski is None:
             return PairingStatus(bridge=bridge, state=ConnectionState.NOT_PAIRED, paired=None, discovered=discovered)
+        paired = await self._paired_gateway(ski, discovered)
         return PairingStatus(
             bridge=bridge,
             state=await self._connection_state(ski),
-            paired=await self._paired_gateway(ski, discovered),
-            discovered=discovered,
+            paired=paired,
+            # Gateways often announce no brand/model over mDNS; the paired one
+            # is completed from its device classification.
+            discovered=[_with_details_of(gateway, paired) if gateway.ski == ski else gateway for gateway in discovered],
         )
 
     async def pair(self, ski: str) -> PairingStatus:
@@ -332,6 +340,22 @@ def _gateway_from_discovered(device: DiscoveredDevice) -> Gateway:
         serial=device.serial,
         device_type=device.device_type,
         host=device.host,
+        name=device.name,
+        ship_id=device.ship_id,
+        categories=list(device.categories),
+    )
+
+
+def _with_details_of(gateway: Gateway, paired: Gateway) -> Gateway:
+    """The discovered gateway, with announced values kept and gaps filled from the paired device."""
+    return replace(
+        gateway,
+        brand=gateway.brand or paired.brand,
+        model=gateway.model or paired.model,
+        serial=gateway.serial or paired.serial,
+        device_type=gateway.device_type or paired.device_type,
+        software_revision=gateway.software_revision or paired.software_revision,
+        hardware_revision=gateway.hardware_revision or paired.hardware_revision,
     )
 
 

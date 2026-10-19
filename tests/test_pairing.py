@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 
 import pytest
-from eebus.v1.device_service_pb2 import DEVICE_READINESS_UNTRUSTED
+from eebus.v1.device_service_pb2 import DEVICE_READINESS_UNTRUSTED, DiscoveredDevice
 
 from tests.fake_bridge import FAKE_SERIAL, FAKE_SKI, GATEWAY_SKI, FakeBridge
 from tests.support import FAST_BACKOFF, eventually, free_port
@@ -253,3 +253,33 @@ async def test_unreachable_bridge_with_free_ship_port_is_just_unavailable(tmp_pa
         status = await PairingService(unreachable, SettingsStore(tmp_path), "test", ship_port=free_port()).status()
 
     assert status.state is ConnectionState.BRIDGE_UNAVAILABLE
+
+
+async def test_discovery_passes_on_name_ship_id_and_categories(
+    pairing: PairingService, fake_bridge: FakeBridge
+) -> None:
+    fake_bridge.device.discovered = [
+        DiscoveredDevice(ski=OTHER_SKI, name="Vaillant-VR940f-0933", ship_id="Vaillant-EEBUS-0933", categories=[4])
+    ]
+
+    [gateway] = (await pairing.status()).discovered
+
+    assert (gateway.brand, gateway.name, gateway.ship_id, gateway.categories) == (
+        "",
+        "Vaillant-VR940f-0933",
+        "Vaillant-EEBUS-0933",
+        [4],
+    )
+
+
+async def test_paired_gateway_without_announced_model_gets_its_device_details(
+    pairing: PairingService, fake_bridge: FakeBridge
+) -> None:
+    # Vaillant gateways announce neither brand nor model over mDNS.
+    fake_bridge.device.discovered = [DiscoveredDevice(ski=GATEWAY_SKI, ship_id="Vaillant-EEBUS-0933")]
+    await pairing.pair(GATEWAY_SKI)
+    fake_bridge.device.connect(GATEWAY_SKI)
+
+    [gateway] = (await pairing.status()).discovered
+
+    assert (gateway.brand, gateway.model, gateway.ship_id) == ("Vaillant", "VR940f", "Vaillant-EEBUS-0933")
