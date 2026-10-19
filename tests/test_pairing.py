@@ -18,6 +18,7 @@ from eebus.v1.device_service_pb2 import (
 from tests.fake_bridge import FAKE_SERIAL, FAKE_SKI, GATEWAY_SKI, FakeBridge
 from tests.support import FAST_BACKOFF, eventually, free_port
 from vaillant_eebus.bridge_client import BridgeClient
+from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.pairing import (
     ConnectionLog,
     ConnectionState,
@@ -202,6 +203,26 @@ def test_connection_log_warns_when_an_established_connection_drops(caplog: pytes
     assert _logged(caplog, logging.WARNING) == ["Gateway …7D9F02 disconnected, reconnecting"]
     assert _logged(caplog, logging.INFO)[0] == "Gateway …7D9F02 connected"
     assert _logged(caplog, logging.INFO)[-1] == "Gateway …7D9F02 connected after 5s and 1 failed attempt"
+
+
+async def test_connection_events_go_to_the_protocol_in_german(log_store: LogStore) -> None:
+    clock = _Clock()
+    log = ConnectionLog(clock=clock, summary_interval=300.0, log=log_store)
+
+    for _ in range(31):
+        clock.now += 10
+        log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_DISCONNECTED))
+    clock.now += 15
+    log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_CONNECTED))
+    log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_DISCONNECTED))
+    page = await log_store.page(category=LogCategory.CONNECTION)
+
+    assert [entry.message for entry in reversed(page.entries)] == [
+        "Gateway …7D9F02 lehnt die Verbindung ab; die App versucht es weiter.",
+        "Gateway …7D9F02 noch nicht verbunden nach 30 abgelehnten Versuchen in 5 min 00 s; die App versucht es weiter.",
+        "Gateway …7D9F02 verbunden nach 5 min 25 s und 31 abgelehnten Versuchen.",
+        "Verbindung zu Gateway …7D9F02 getrennt; die App verbindet neu.",
+    ]
 
 
 async def test_diagnostic_dump_requires_pairing(pairing: PairingService) -> None:

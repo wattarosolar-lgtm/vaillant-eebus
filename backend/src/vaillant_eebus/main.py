@@ -15,9 +15,11 @@ import uvicorn
 
 from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_client import DEFAULT_ADDRESS, BridgeClient
+from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import PairingService
 from vaillant_eebus.settings import SettingsStore
 from vaillant_eebus.state import StateService
+from vaillant_eebus.write_gate import WriteGate
 
 _LOGGER = logging.getLogger("vaillant_eebus")
 
@@ -81,15 +83,19 @@ def configure_logging(level_name: str) -> None:
 
 async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
     """Serve the ingress UI and keep the bridge pairing alive until stopped."""
+    settings = SettingsStore(config.data_dir)
+    log = LogStore(config.data_dir)
     pairing = PairingService(
         bridge,
-        SettingsStore(config.data_dir),
+        settings,
         config.app_version,
         bridge_serial_file=config.bridge_serial_file,
         ship_port=config.ship_port,
+        log=log,
     )
     state = StateService(bridge, pairing)
-    app = create_app(pairing, state, static_dir=config.static_dir, trusted_clients=config.trusted_clients)
+    gate = WriteGate(bridge, pairing, state, settings, log)
+    app = create_app(pairing, state, gate, log, static_dir=config.static_dir, trusted_clients=config.trusted_clients)
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -102,12 +108,19 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
             timeout_graceful_shutdown=3,
         )
     )
-    async with asyncio.TaskGroup() as tasks:
-        background = [tasks.create_task(pairing.run()), tasks.create_task(state.run())]
-        # Returns when uvicorn handles SIGTERM; it re-raises the signal afterwards.
-        await server.serve()
-        for task in background:
-            task.cancel()
+    try:
+        async with asyncio.TaskGroup() as tasks:
+            background = [
+                tasks.create_task(pairing.run()),
+                tasks.create_task(state.run()),
+                tasks.create_task(gate.run()),
+            ]
+            # Returns when uvicorn handles SIGTERM; it re-raises the signal afterwards.
+            await server.serve()
+            for task in background:
+                task.cancel()
+    finally:
+        log.close()
 
 
 async def _main(config: BackendConfig) -> None:

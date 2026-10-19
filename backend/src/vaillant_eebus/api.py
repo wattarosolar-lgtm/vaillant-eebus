@@ -8,20 +8,39 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePath
+from typing import Annotated, Literal
 
 import grpc
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Query, Request, Response
+from fastapi import Path as PathParam
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 from starlette.types import Scope
 
+from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
+from vaillant_eebus.settings import OperatingMode
 from vaillant_eebus.state import HeatPumpState, StateService
+from vaillant_eebus.write_gate import (
+    ControlCompressor,
+    PendingWrite,
+    SetConsumptionLimit,
+    SetFailsafeLimit,
+    SetHotWaterBoost,
+    SetHotWaterMode,
+    SetHotWaterSetpoint,
+    SetZoneMode,
+    SetZoneSetpoint,
+    WriteGate,
+    WriteRejected,
+    WriteResult,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +67,46 @@ class RegisterRequest(BaseModel):
     ski: str = Field(pattern=r"^[0-9A-Fa-f]{40}$")
 
 
+class ModeRequest(BaseModel):
+    mode: OperatingMode
+    # Switching to live needs the user's explicit confirmation.
+    confirm: bool = False
+
+
+class SetpointRequest(BaseModel):
+    value: float = Field(allow_inf_nan=False)
+
+
+class OperationModeRequest(BaseModel):
+    # Checked against the modes the device offers by the write gate.
+    mode: str = Field(pattern=r"^[a-z]{1,32}$")
+
+
+class BoostRequest(BaseModel):
+    active: bool
+
+
+class ConsumptionLimitRequest(BaseModel):
+    value_watts: float = Field(ge=0, allow_inf_nan=False)
+    duration_seconds: int = Field(ge=0)
+    active: bool
+
+
+class FailsafeLimitRequest(BaseModel):
+    value_watts: float = Field(ge=0, allow_inf_nan=False)
+    duration_minimum_seconds: int = Field(ge=0)
+
+
+class CompressorRequest(BaseModel):
+    action: Literal["schedule", "pause", "resume", "abort"]
+    # Only for schedule; without it the compressor starts at once.
+    start_time: AwareDatetime | None = None
+
+
+# The bridge's zone ID: the SPINE address of the zone's room entity, e.g. "5.1.1".
+ZoneId = Annotated[str, PathParam(pattern=r"^[0-9]{1,5}(\.[0-9]{1,5}){0,7}$")]
+
+
 class UiFiles(StaticFiles):
     """Serves the built UI with cache rules that survive app updates.
 
@@ -68,13 +127,23 @@ class UiFiles(StaticFiles):
 @dataclass(frozen=True, slots=True)
 class ApiState:
     connection: ConnectionState
+    mode: OperatingMode
+    # Sent values the device has not reported yet.
+    pending: list[PendingWrite]
     # None until a gateway is paired and this app's own bridge answers.
     heat_pump: HeatPumpState | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModeStatus:
+    mode: OperatingMode
 
 
 def create_app(
     pairing: PairingService,
     state: StateService,
+    gate: WriteGate,
+    log: LogStore,
     *,
     static_dir: Path | None,
     trusted_clients: frozenset[str],
@@ -82,7 +151,9 @@ def create_app(
     app = FastAPI(title="Vaillant EEBUS", docs_url=None, redoc_url=None, openapi_url=None)
 
     async def api_state(heat_pump: HeatPumpState | None) -> ApiState:
-        return ApiState(connection=(await pairing.status()).state, heat_pump=heat_pump)
+        return ApiState(
+            connection=(await pairing.status()).state, mode=gate.mode, pending=gate.pending, heat_pump=heat_pump
+        )
 
     @app.middleware("http")
     async def only_ingress(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -130,6 +201,58 @@ def create_app(
     async def register_gateway(request: RegisterRequest) -> PairingStatus:
         return await pairing.pair(request.ski)
 
+    @app.get("/api/mode")
+    async def get_mode() -> ModeStatus:
+        return ModeStatus(mode=gate.mode)
+
+    @app.post("/api/mode")
+    async def set_mode(request: ModeRequest) -> ModeStatus:
+        return ModeStatus(mode=gate.set_mode(request.mode, confirm=request.confirm))
+
+    @app.post("/api/zones/{zone_id}/setpoint")
+    async def set_zone_setpoint(zone_id: ZoneId, request: SetpointRequest) -> WriteResult:
+        return await gate.submit(SetZoneSetpoint(zone_id=zone_id, celsius=request.value))
+
+    @app.post("/api/zones/{zone_id}/mode")
+    async def set_zone_mode(zone_id: ZoneId, request: OperationModeRequest) -> WriteResult:
+        return await gate.submit(SetZoneMode(zone_id=zone_id, mode=request.mode))
+
+    @app.post("/api/dhw/setpoint")
+    async def set_dhw_setpoint(request: SetpointRequest) -> WriteResult:
+        return await gate.submit(SetHotWaterSetpoint(celsius=request.value))
+
+    @app.post("/api/dhw/mode")
+    async def set_dhw_mode(request: OperationModeRequest) -> WriteResult:
+        return await gate.submit(SetHotWaterMode(mode=request.mode))
+
+    @app.post("/api/dhw/boost")
+    async def set_dhw_boost(request: BoostRequest) -> WriteResult:
+        return await gate.submit(SetHotWaterBoost(active=request.active))
+
+    @app.post("/api/lpc")
+    async def write_consumption_limit(request: ConsumptionLimitRequest) -> WriteResult:
+        return await gate.submit(
+            SetConsumptionLimit(watts=request.value_watts, duration_s=request.duration_seconds, active=request.active)
+        )
+
+    @app.post("/api/lpc/failsafe")
+    async def write_failsafe_limit(request: FailsafeLimitRequest) -> WriteResult:
+        return await gate.submit(
+            SetFailsafeLimit(watts=request.value_watts, duration_s=request.duration_minimum_seconds)
+        )
+
+    @app.post("/api/ohpcf")
+    async def control_compressor(request: CompressorRequest) -> WriteResult:
+        return await gate.submit(ControlCompressor(action=request.action, start_time=request.start_time))
+
+    @app.get("/api/log")
+    async def get_log(
+        category: LogCategory | None = None,
+        before: Annotated[int | None, Query(ge=1)] = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = PAGE_SIZE,
+    ) -> LogPage:
+        return await log.page(category=category, before=before, limit=limit)
+
     @app.get("/api/diagnostics/dump")
     async def download_dump() -> Response:
         dump = await pairing.diagnostic_dump()
@@ -145,6 +268,12 @@ def create_app(
         status, message = _BRIDGE_ERRORS.get(code, _BRIDGE_ERROR_DEFAULT)
         _LOGGER.warning("Bridge call failed: %s", code.name)
         return JSONResponse({"detail": f"{message} (Fehlercode {code.name})"}, status_code=status)
+
+    @app.exception_handler(WriteRejected)
+    async def write_rejected(_request: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, WriteRejected)
+        headers = {"Retry-After": str(math.ceil(exc.retry_after))} if exc.retry_after is not None else None
+        return JSONResponse({"detail": exc.message}, status_code=exc.status, headers=headers)
 
     @app.exception_handler(NotPairedError)
     async def not_paired(_request: Request, _exc: Exception) -> JSONResponse:

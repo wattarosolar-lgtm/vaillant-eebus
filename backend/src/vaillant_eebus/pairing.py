@@ -37,6 +37,7 @@ from eebus.v1.device_service_pb2 import (
 )
 
 from vaillant_eebus.bridge_client import RETRYABLE_CODES, BridgeClient
+from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.settings import SettingsStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -129,21 +130,23 @@ class PairingService:
         *,
         bridge_serial_file: Path | None = None,
         ship_port: int | None = None,
+        log: LogStore | None = None,
     ) -> None:
         """bridge_serial_file holds the EEBUS serial this app's bridge announces;
         None skips the identity check (development against the fake bridge).
-        ship_port is checked for another listener while the bridge is down."""
+        ship_port is checked for another listener while the bridge is down.
+        log receives pairing and connection events for the protocol page."""
         self._bridge = bridge
         self._store = store
-        self._settings = store.load()
         self._app_version = app_version
         self._bridge_serial_file = bridge_serial_file
         self._ship_port = ship_port
-        self._connection_log = ConnectionLog()
+        self._log = log
+        self._connection_log = ConnectionLog(log=log)
 
     @property
     def paired_ski(self) -> str | None:
-        return self._settings.paired_ski
+        return self._store.current.paired_ski
 
     async def run(self) -> None:
         """Keep the paired gateway registered with the bridge, across bridge restarts."""
@@ -180,7 +183,7 @@ class PairingService:
             await asyncio.sleep(self._bridge.backoff.initial)
 
     async def status(self) -> PairingStatus:
-        ski = self._settings.paired_ski
+        ski = self.paired_ski
         try:
             info = await self._bridge.get_server_info()
         except grpc.aio.AioRpcError as err:
@@ -222,7 +225,7 @@ class PairingService:
         if not _SKI_PATTERN.fullmatch(ski):
             raise ValueError("SKI must be 40 hexadecimal characters")
         await self._require_own_bridge()
-        previous = self._settings.paired_ski
+        previous = self.paired_ski
         if previous is not None and previous != ski:
             try:
                 await self._bridge.unregister_ski(previous)
@@ -230,14 +233,15 @@ class PairingService:
                 if err.code() is not grpc.StatusCode.NOT_FOUND:
                     raise
         await self._bridge.register_ski(ski)
-        self._settings = replace(self._settings, paired_ski=ski)
-        self._store.save(self._settings)
+        self._store.update(lambda settings: replace(settings, paired_ski=ski))
         _LOGGER.info("Paired gateway %s", short_ski(ski))
+        if self._log is not None:
+            self._log.add(LogCategory.CONNECTION, f"Gateway {short_ski(ski)} gekoppelt.")
         return await self.status()
 
     async def diagnostic_dump(self) -> DiagnosticDump:
         """Read-only structure dump of the paired gateway, wrapped with app metadata."""
-        ski = self._settings.paired_ski
+        ski = self.paired_ski
         if ski is None:
             raise NotPairedError
         info = await self._require_own_bridge()
@@ -293,7 +297,7 @@ class PairingService:
         return info
 
     async def _register_paired(self) -> None:
-        ski = self._settings.paired_ski
+        ski = self.paired_ski
         if ski is None:
             return
         try:
@@ -395,9 +399,12 @@ class ConnectionLog:
         *,
         clock: Callable[[], float] = time.monotonic,
         summary_interval: float = CONNECT_SUMMARY_INTERVAL,
+        log: LogStore | None = None,
     ) -> None:
+        """log receives the same events in German for the protocol page."""
         self._clock = clock
         self._summary_interval = summary_interval
+        self._log = log
         self.reset()
 
     def reset(self) -> None:
@@ -418,20 +425,27 @@ class ConnectionLog:
                     _duration(now - self._waiting_since),
                     _failed_attempts(self._failed_attempts),
                 )
+                self._protocol(
+                    f"Gateway {ski} verbunden nach {_german_duration(now - self._waiting_since)} "
+                    f"und {_german_attempts(self._failed_attempts)}."
+                )
             else:
                 _LOGGER.info("Gateway %s connected", ski)
+                self._protocol(f"Gateway {ski} verbunden.")
             self._connected = True
             self._failed_attempts = 0
         elif event.event_type == DEVICE_EVENT_DISCONNECTED:
             self._record_disconnect(ski, now)
         elif event.event_type == DEVICE_EVENT_TRUST_REMOVED:
             _LOGGER.warning("Gateway %s withdrew its trust (check the myVAILLANT app)", ski)
+            self._protocol(f"Gateway {ski} hat das Vertrauen entzogen (bitte in der myVAILLANT-App prüfen).")
         else:
             _LOGGER.debug("Device event %d for %s", event.event_type, ski)
 
     def _record_disconnect(self, ski: str, now: float) -> None:
         if self._connected:
             _LOGGER.warning("Gateway %s disconnected, reconnecting", ski)
+            self._protocol(f"Verbindung zu Gateway {ski} getrennt; die App verbindet neu.")
             self._connected = False
             self._waiting_since = now
             self._last_summary = now
@@ -441,6 +455,7 @@ class ConnectionLog:
             _LOGGER.info(
                 "Gateway %s refused the connection attempt; retrying (each attempt is logged at level debug)", ski
             )
+            self._protocol(f"Gateway {ski} lehnt die Verbindung ab; die App versucht es weiter.")
             return
         _LOGGER.debug("Connection attempt %d to gateway %s failed", self._failed_attempts, ski)
         if now - self._last_summary >= self._summary_interval:
@@ -450,7 +465,15 @@ class ConnectionLog:
                 _failed_attempts(self._failed_attempts),
                 _duration(now - self._waiting_since),
             )
+            self._protocol(
+                f"Gateway {ski} noch nicht verbunden nach {_german_attempts(self._failed_attempts)} "
+                f"in {_german_duration(now - self._waiting_since)}; die App versucht es weiter."
+            )
             self._last_summary = now
+
+    def _protocol(self, message: str) -> None:
+        if self._log is not None:
+            self._log.add(LogCategory.CONNECTION, message)
 
 
 def _failed_attempts(count: int) -> str:
@@ -460,3 +483,12 @@ def _failed_attempts(count: int) -> str:
 def _duration(seconds: float) -> str:
     minutes, rest = divmod(round(seconds), 60)
     return f"{minutes}m{rest:02d}s" if minutes else f"{rest}s"
+
+
+def _german_attempts(count: int) -> str:
+    return "1 abgelehnten Versuch" if count == 1 else f"{count} abgelehnten Versuchen"
+
+
+def _german_duration(seconds: float) -> str:
+    minutes, rest = divmod(round(seconds), 60)
+    return f"{minutes} min {rest:02d} s" if minutes else f"{rest} s"
