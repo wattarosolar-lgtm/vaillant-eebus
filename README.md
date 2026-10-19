@@ -34,6 +34,10 @@ Die Oberfläche holt den Zustand der Wärmepumpe über `api/state` und bekommt j
 Minute. Diese regelmäßige Leseanfrage braucht auch die Verbindungsüberwachung der Bridge: Bleibt sie aus, baut die
 Bridge die Verbindung zum Gateway nach zwei Minuten neu auf.
 
+Die Bridge liefert jede Heizzone einzeln (`room_heating_zones` im Snapshot, `ListRoomHeatingZones`). Eine Zone heißt
+nach der SPINE-Adresse ihres Raum-Eintrags, z. B. `5.1.1`. Schreibende Aufrufe brauchen bei mehreren Zonen diese
+Zonen-ID; ohne sie lehnt die Bridge ab, statt eine Zone zu raten.
+
 ## Entwicklung
 
 Voraussetzungen: Git, Go 1.27, Python 3.13, Node.js 24. Kein Test spricht mit echter Hardware.

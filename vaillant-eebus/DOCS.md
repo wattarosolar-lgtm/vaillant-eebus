@@ -5,7 +5,8 @@ ohne eBUS-Adapter und ohne MQTT.
 
 ## Stand dieser Version
 
-Version 0.3.0 koppelt die App mit dem Gateway Ihrer Wärmepumpe und zeigt deren Werte live in einer Übersicht.
+Version 0.4.0 koppelt die App mit dem Gateway Ihrer Wärmepumpe und zeigt deren Werte live in einer Übersicht,
+jede Heizzone einzeln.
 Die App liest nur; sie sendet nichts an die Wärmepumpe. Steuerung und Sensoren in Home Assistant folgen in den
 nächsten Versionen.
 
@@ -21,19 +22,27 @@ nächsten Versionen.
 
 Das gekoppelte Gateway steht in `/data/settings.json`. Die App meldet es nach jedem Neustart selbst wieder an.
 
+Nach einem Start oder Update der App lehnt das Gateway die ersten Verbindungsversuche oft ab. Bis die Werte
+erscheinen, können einige Minuten vergehen. Das Log fasst die Versuche zusammen und nennt die Dauer, sobald die
+Verbindung steht.
+
 ## Übersicht
 
 Die Seite **Übersicht** zeigt für jede Heizzone und für das Warmwasser ein Rundinstrument: den gemessenen Wert,
-die Solltemperatur auf dem Bogen mit ihrem erlaubten Bereich und die aktive Betriebsart. Darunter stehen Leistung,
+die Solltemperatur auf dem Bogen mit ihrem erlaubten Bereich und die aktive Betriebsart. Jede Zone trägt den Namen,
+den sie in der Anlage hat (z. B. „Zone 1“ und „Zone 2“). Darunter stehen Leistung,
 Energie und Temperaturen. Oben sieht man, ob das Gateway verbunden ist, ob die Wärmepumpe ihren Heartbeat sendet,
 ihren Betriebszustand, die Außentemperatur und ob der Verdichter läuft (ab 100 W Leistungsaufnahme).
 
 Die Werte aktualisieren sich von selbst, sobald die Wärmepumpe etwas meldet, spätestens nach einer Minute.
 In dieser Version ist die Übersicht nur eine Anzeige.
 
-Was die Wärmepumpe über EEBUS nicht liefert, steht als **nicht verfügbar** da. Dazu gehört bei Vaillant die
-Raumtemperatur: Der Raumfühler meldet über EEBUS keinen gültigen Wert. Eine spätere Version kann sie aus einem
-Sensor in Home Assistant übernehmen.
+Was die Wärmepumpe über EEBUS nicht liefert, steht als **nicht verfügbar** da.
+
+**Raumtemperatur:** Meldet eine Zone über EEBUS einen gültigen Wert, zeigt ihr Rundinstrument ihn mit dem Hinweis
+„Raumfühler (EEBUS)“. Nicht jede Zone meldet einen; dann steht dort „—“. Eine spätere Version berechnet die
+Raumtemperatur jeder Zone als Mittelwert der Temperatursensoren, die Sie in Home Assistant für die Räume dieser
+Zone auswählen.
 
 ## Diagnose-Dump
 
