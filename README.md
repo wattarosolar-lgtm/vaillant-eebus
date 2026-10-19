@@ -19,15 +19,17 @@ https://github.com/wattarosolar-lgtm/vaillant-eebus
 | `vaillant-eebus/` | Die App: `config.yaml`, `Dockerfile`, s6-Dienste (`rootfs/`), Doku |
 | `bridge/` | Git-Submodul: Fork der EEBUS-Bridge ([volschin/eebus-ha-bridge](https://github.com/volschin/eebus-ha-bridge)), fester Commit |
 | `backend/` | Python-Backend (`src/vaillant_eebus`), Lock-Dateien, Skript für die gRPC-Stubs |
+| `frontend/` | Oberfläche (Svelte, TypeScript, Vite), vom Backend per Ingress ausgeliefert |
 | `tests/` | Backend-Tests und Fake-Bridge |
 | `.github/workflows/` | CI und Image-Build |
 
 Im Container laufen zwei s6-Dienste: `eebus-bridge` (Go, SHIP/SPINE, Port 4712, gRPC auf `127.0.0.1:50051`)
-und `backend` (Python), das nur über gRPC mit der Bridge spricht.
+und `backend` (Python), das nur über gRPC mit der Bridge spricht. Das Backend liefert API und Oberfläche auf
+`172.30.32.1:8714` aus und nimmt nur Anfragen des Ingress-Proxys (`172.30.32.2`) an.
 
 ## Entwicklung
 
-Voraussetzungen: Git, Go 1.27, Python 3.13. Kein Test spricht mit echter Hardware.
+Voraussetzungen: Git, Go 1.27, Python 3.13, Node.js 24. Kein Test spricht mit echter Hardware.
 
 ```bash
 git clone --recurse-submodules https://github.com/wattarosolar-lgtm/vaillant-eebus.git
@@ -42,12 +44,26 @@ python3.13 -m venv .venv
 
 Die gRPC-Stubs werden aus `bridge/eebus-bridge/proto` erzeugt und nie von Hand geändert oder eingecheckt.
 
-**Fake-Bridge** (gRPC-Server mit denselben Protos und Beispieldaten), um das Backend ohne Wärmepumpe zu starten:
+**Oberfläche:**
 
 ```bash
-PYTHONPATH=backend/gen .venv/bin/python -m tests.fake_bridge --port 50051
+cd frontend
+npm ci
+npm run check && npm run lint && npm run build   # Ergebnis in frontend/dist/
+```
+
+**Ohne Wärmepumpe ausprobieren:** Die Fake-Bridge ist ein gRPC-Server mit denselben Protos und Beispieldaten.
+Ihr Gateway nimmt eine Kopplung nach `--connect-after` Sekunden von selbst an. Danach die Oberfläche unter
+`http://127.0.0.1:8714/` öffnen:
+
+```bash
+PYTHONPATH=backend/gen .venv/bin/python -m tests.fake_bridge --port 50051 --connect-after 10
+export DATA_DIR=/tmp/vaillant-eebus HTTP_HOST=127.0.0.1 TRUSTED_CLIENTS=127.0.0.1 STATIC_DIR=frontend/dist
 PYTHONPATH=backend/src:backend/gen .venv/bin/python -m vaillant_eebus
 ```
+
+Für die Arbeit an der Oberfläche mit Hot Reload stattdessen `npm run dev` im Ordner `frontend/`; Vite leitet
+`/api` an das Backend auf Port 8714 weiter. Unter Windows `PYTHONPATH` mit `;` statt `:` trennen.
 
 **Lock-Dateien** neu erzeugen (mit [uv](https://docs.astral.sh/uv/)), nachdem eine `requirements*.in` geändert wurde:
 
@@ -59,7 +75,9 @@ done
 ```
 
 **Bridge:** `cd bridge/eebus-bridge && go vet ./... && go test -race ./...`
-(`-race` braucht CGO und läuft deshalb in der CI unter Linux).
+(`-race` braucht CGO und läuft deshalb in der CI unter Linux). Änderungen am Bridge-Code entstehen im Fork
+([wattarosolar-lgtm/HEMS-EEBUS](https://github.com/wattarosolar-lgtm/HEMS-EEBUS)); nach einer Proto-Änderung dort
+`bash generate_proto.sh` ausführen und die erzeugten Dateien mit committen.
 
 ## Release
 

@@ -5,19 +5,34 @@ ohne eBUS-Adapter und ohne MQTT.
 
 ## Stand dieser Version
 
-Version 0.1.0 ist die technische Grundlage:
+Version 0.2.0 koppelt die App mit dem Gateway Ihrer Wärmepumpe und kann einen Diagnose-Dump erstellen.
+Die App liest nur; sie sendet nichts an die Wärmepumpe. Übersicht, Steuerung und Sensoren in Home Assistant
+folgen in den nächsten Versionen.
 
-- Die EEBUS-Bridge startet und erzeugt beim ersten Start ihr Zertifikat.
-- Das Backend verbindet sich mit der Bridge und schreibt deren **SKI** ins Log.
+## Einrichtung
 
-Kopplung mit dem Gateway, Oberfläche und Steuerung folgen in den nächsten Versionen.
+1. App starten und in der Seitenleiste **Wärmepumpe** öffnen.
+2. **Gateway auswählen:** Die App sucht im Netzwerk nach EEBUS-Geräten. Wählen Sie das Gateway Ihrer
+   Wärmepumpe (VR921 oder VR940f).
+3. **In der myVAILLANT-App bestätigen:** *Einstellungen → Netzwerk → EEBUS*, dort diese App auf
+   **Vertrauenswürdig** setzen. Der Assistent zeigt die Kennung (SKI) der App zum Vergleich.
+4. Sobald die Verbindung steht, zeigt der Assistent **Verbunden**. Laden Sie dann den **Diagnose-Dump** herunter.
+
+Das gekoppelte Gateway steht in `/data/settings.json`. Die App meldet es nach jedem Neustart selbst wieder an.
+
+## Diagnose-Dump
+
+Der Dump (Einstellungen → Diagnose) beschreibt die vollständige EEBUS-Struktur der Anlage: Zonen, Messwerte,
+Sollwerte mit Grenzen und angebotene Betriebsarten. Die App schickt dafür nur Leseanfragen an das Gateway.
+Der Dump enthält Modell- und Seriennummern Ihrer Geräte; die SKI des Gateways ist gekürzt.
 
 ## Voraussetzungen
 
 - Vaillant-Wärmepumpe mit Vaillant-Gateway (VR921 oder VR940f) und der myVAILLANT-App.
 - Home Assistant OS oder Supervised (die App braucht das Host-Netzwerk für die EEBUS-Suche per mDNS).
 - **Das Gateway erlaubt nur eine aktive EEBUS-Verbindung.** Ist bereits ein anderer EEBUS-Partner
-  gekoppelt (z. B. ein Energiemanager oder das Add-on „EEBUS Bridge“), kommt keine Verbindung zustande.
+  gekoppelt (z. B. ein Energiemanager, das Add-on „EEBUS Bridge“ oder eine andere EEBUS-App), kommt keine
+  Verbindung zustande. Andere EEBUS-Apps bitte stoppen; sie belegen außerdem dieselben Ports.
 
 ## Daten und Sicherung
 
