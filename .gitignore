@@ -9,3 +9,7 @@ __pycache__/
 
 # Generated from bridge/eebus-bridge/proto by backend/scripts/generate_proto.py
 backend/gen/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

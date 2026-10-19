@@ -1,0 +1,155 @@
+/* Design tokens from the agreed overview design (design-referenz-pc.dc.html, spec 8.4). */
+:root {
+  --bg: #f2f3ef;
+  --surface: #ffffff;
+  --surface-muted: #f7f8f5;
+  --border: #e2e4de;
+  --divider: #edeee9;
+  --control-border: #d6d9d2;
+  --segment-bg: #e6e8e2;
+  --text: #1a1e1c;
+  --text-secondary: #4f5753;
+  --text-hint: #6b726e;
+
+  --ok-bg: #e3f0e7;
+  --ok-text: #24613c;
+  --ok-dot: #2f7d4f;
+  --warn-bg: #fbf0d5;
+  --warn-text: #6b4a00;
+  --error-bg: #fbe4e1;
+  --error-text: #8a2a1e;
+  --info-bg: #e8eef3;
+  --info-text: #1f4a62;
+
+  --radius-card: 16px;
+  --radius-control: 10px;
+
+  color: var(--text);
+  background: var(--bg);
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.secondary {
+  color: var(--text-secondary);
+  font-size: 15px;
+}
+
+.hint {
+  color: var(--text-hint);
+  font-size: 13px;
+}
+
+.button {
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: var(--radius-control);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--control-border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.button.primary {
+  border-color: var(--text);
+  background: var(--text);
+  color: #ffffff;
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.button:focus-visible {
+  outline: 3px solid var(--info-text);
+  outline-offset: 2px;
+}
+
+.banner {
+  padding: 14px 20px;
+  border-radius: 12px;
+  font-size: 15px;
+}
+
+.banner.info {
+  background: var(--info-bg);
+  color: var(--info-text);
+}
+
+.banner.error {
+  background: var(--error-bg);
+  color: var(--error-text);
+}
+
+.banner.warn {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+dl.facts {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+dl.facts > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--divider);
+}
+
+dl.facts > div:last-child {
+  border-bottom: 0;
+}
+
+dl.facts dt {
+  flex-shrink: 0;
+  font-size: 15px;
+  color: var(--text-secondary);
+}
+
+dl.facts dd {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+  text-align: right;
+  overflow-wrap: anywhere;
+}

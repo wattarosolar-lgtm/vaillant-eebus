@@ -268,8 +268,8 @@ async def start_fake_bridge(port: int = 0, auto_connect_after: float | None = No
     return FakeBridge(server=server, address=f"127.0.0.1:{bound_port}", device=device)
 
 
-async def _serve(port: int) -> None:
-    bridge = await start_fake_bridge(port, auto_connect_after=5.0)
+async def _serve(port: int, connect_after: float) -> None:
+    bridge = await start_fake_bridge(port, auto_connect_after=connect_after)
     print(f"Fake bridge listening on {bridge.address}")
     await bridge.server.wait_for_termination()
 
@@ -277,7 +277,11 @@ async def _serve(port: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fake EEBUS bridge (gRPC) for development without a heat pump")
     parser.add_argument("--port", type=int, default=50051)
-    asyncio.run(_serve(parser.parse_args().port))
+    parser.add_argument(
+        "--connect-after", type=float, default=5.0, help="seconds until the fake gateway accepts a pairing"
+    )
+    args = parser.parse_args()
+    asyncio.run(_serve(args.port, args.connect_after))
 
 
 if __name__ == "__main__":
