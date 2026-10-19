@@ -3,6 +3,7 @@
 
   import StatusPill from './components/StatusPill.svelte';
   import { ApiError, getPairing } from './lib/api';
+  import { BRIDGE_PROBLEMS } from './lib/texts';
   import type { PairingStatus } from './lib/types';
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
@@ -69,6 +70,8 @@
 
   {#if loadError}
     <p class="banner error" role="alert">{loadError}</p>
+  {:else if status && BRIDGE_PROBLEMS[status.state]}
+    <p class="banner error" role="alert">{BRIDGE_PROBLEMS[status.state]}</p>
   {/if}
 
   <main>

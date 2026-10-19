@@ -3,6 +3,8 @@
 export type ConnectionState =
   | 'not_paired'
   | 'bridge_unavailable'
+  | 'ship_port_in_use'
+  | 'foreign_bridge'
   | 'disconnected'
   | 'connected'
   | 'trust_removed'

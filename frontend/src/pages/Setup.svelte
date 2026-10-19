@@ -2,7 +2,7 @@
   import DumpButton from '../components/DumpButton.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { ApiError, registerGateway } from '../lib/api';
-  import { gatewayName, groupedSki, skiEnding } from '../lib/texts';
+  import { BRIDGE_PROBLEMS, gatewayDetails, gatewayName, groupedSki, skiEnding } from '../lib/texts';
   import type { ConnectionState, PairingStatus } from '../lib/types';
 
   let {
@@ -26,6 +26,8 @@
       'Das Gateway hat die Verbindung abgelehnt. Prüfen Sie, ob die App in myVAILLANT als vertrauenswürdig markiert ist.',
     failed: 'Die Verbindung ist gestört. Die Bridge versucht es weiter; ein Neustart der App kann helfen.',
     bridge_unavailable: 'Die EEBUS-Bridge der App ist gerade nicht erreichbar und startet neu.',
+    ship_port_in_use: 'Die EEBUS-Bridge der App kann nicht starten (siehe Hinweis oben).',
+    foreign_bridge: 'Die App spricht nicht mit ihrer eigenen EEBUS-Bridge (siehe Hinweis oben).',
   };
 
   let chosenSki = $state<string | null>(null);
@@ -68,10 +70,11 @@
     <div class="card">
       <h3>Gateway auswählen</h3>
       <p class="secondary">
-        Die App sucht im Netzwerk nach EEBUS-Geräten. Wählen Sie das Gateway Ihrer Wärmepumpe (VR921 oder VR940f).
+        Die App sucht im Netzwerk nach EEBUS-Geräten. Wählen Sie das Gateway Ihrer Wärmepumpe (VR921 oder VR940f). Andere
+        EEBUS-Geräte im Netz, etwa Wechselrichter, Wallboxen oder Energiemanager, erscheinen hier ebenfalls.
       </p>
-      {#if !status.bridge.reachable}
-        <p class="banner error" role="alert">{WAITING_TEXT.bridge_unavailable}</p>
+      {#if BRIDGE_PROBLEMS[status.state]}
+        <p class="secondary">Die Suche startet, sobald das Problem oben behoben ist.</p>
       {:else if status.discovered.length === 0}
         <p class="banner info" role="status">Noch kein Gerät gefunden. Die Suche läuft weiter …</p>
       {:else}
@@ -80,7 +83,9 @@
             <li class="gateway">
               <div class="gateway-text">
                 <p class="name">{gatewayName(gateway)}</p>
-                <p class="hint">Seriennummer {gateway.serial || '—'} · Adresse {gateway.host || '—'}</p>
+                {#if gatewayDetails(gateway)}
+                  <p class="hint">{gatewayDetails(gateway)}</p>
+                {/if}
                 <p class="hint">SKI endet auf {skiEnding(gateway.ski)}</p>
               </div>
               <button
