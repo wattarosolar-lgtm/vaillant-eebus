@@ -11,24 +11,29 @@ from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.pairing import PairingService
 from vaillant_eebus.settings import SettingsStore
+from vaillant_eebus.state import StateService
 
 
 def _client(
-    pairing: PairingService, *, client_ip: str = INGRESS_CLIENT, static_dir: Path | None = None
+    pairing: PairingService,
+    state: StateService,
+    *,
+    client_ip: str = INGRESS_CLIENT,
+    static_dir: Path | None = None,
 ) -> httpx.AsyncClient:
-    app = create_app(pairing, static_dir=static_dir, trusted_clients=frozenset({INGRESS_CLIENT}))
+    app = create_app(pairing, state, static_dir=static_dir, trusted_clients=frozenset({INGRESS_CLIENT}))
     transport = httpx.ASGITransport(app=app, client=(client_ip, 51234))
     return httpx.AsyncClient(transport=transport, base_url="http://ingress")
 
 
 @pytest.fixture
-async def client(pairing: PairingService) -> AsyncIterator[httpx.AsyncClient]:
-    async with _client(pairing) as http:
+async def client(pairing: PairingService, state: StateService) -> AsyncIterator[httpx.AsyncClient]:
+    async with _client(pairing, state) as http:
         yield http
 
 
-async def test_requests_from_outside_ingress_are_rejected(pairing: PairingService) -> None:
-    async with _client(pairing, client_ip="192.168.178.23") as http:
+async def test_requests_from_outside_ingress_are_rejected(pairing: PairingService, state: StateService) -> None:
+    async with _client(pairing, state, client_ip="192.168.178.23") as http:
         response = await http.get("/api/pairing")
 
     assert response.status_code == 403
@@ -91,9 +96,11 @@ async def test_dump_of_a_disconnected_gateway_is_unavailable(client: httpx.Async
     assert "nicht erreichbar" in response.json()["detail"]
 
 
-async def test_ui_is_served_from_the_static_directory(pairing: PairingService, tmp_path: Path) -> None:
+async def test_ui_is_served_from_the_static_directory(
+    pairing: PairingService, state: StateService, tmp_path: Path
+) -> None:
     (tmp_path / "index.html").write_text("<!doctype html><title>Wärmepumpe</title>", encoding="utf-8")
-    async with _client(pairing, static_dir=tmp_path) as http:
+    async with _client(pairing, state, static_dir=tmp_path) as http:
         response = await http.get("/")
 
     assert response.status_code == 200
@@ -114,7 +121,8 @@ async def test_pairing_through_a_foreign_bridge_is_refused(
     serial_file = tmp_path / "serial"
     serial_file.write_text("0000000000000000", encoding="utf-8")
     pairing = PairingService(bridge_client, settings_store, "test", bridge_serial_file=serial_file)
-    async with _client(pairing) as http:
+    state = StateService(bridge_client, pairing)
+    async with _client(pairing, state) as http:
         status = (await http.get("/api/pairing")).json()
         response = await http.post("/api/pairing/register", json={"ski": GATEWAY_SKI})
 
@@ -122,3 +130,22 @@ async def test_pairing_through_a_foreign_bridge_is_refused(
     assert response.status_code == 409
     assert "fremde EEBUS-Bridge" in response.json()["detail"]
     assert fake_bridge.device.register_calls == []
+
+
+async def test_state_contains_connection_and_heat_pump(
+    client: httpx.AsyncClient, state: StateService, fake_bridge: FakeBridge
+) -> None:
+    before = (await client.get("/api/state")).json()
+    await client.post("/api/pairing/register", json={"ski": GATEWAY_SKI})
+    fake_bridge.device.connect(GATEWAY_SKI)
+    await state.refresh(GATEWAY_SKI)
+
+    after = (await client.get("/api/state")).json()
+
+    assert before == {"connection": "not_paired", "heat_pump": None}
+    assert after["connection"] == "connected"
+    heat_pump = after["heat_pump"]
+    assert heat_pump["measurements"]["power_consumption"]["value"] == 532
+    assert heat_pump["zones"][0]["label"] == "Zone 1"
+    assert heat_pump["zones"][0]["room_temperature"] is None
+    assert heat_pump["hot_water"]["setpoint"]["max"] == 70

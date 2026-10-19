@@ -16,6 +16,8 @@ import grpc
 from eebus.v1.common_pb2 import DeviceRequest, Empty
 from eebus.v1.device_service_pb2 import (
     DeviceEvent,
+    DeviceSnapshot,
+    DeviceStateEvent,
     DeviceStatus,
     DeviceStructureDump,
     DiscoveredDevice,
@@ -130,6 +132,23 @@ class BridgeClient:
 
     async def get_device_status(self, ski: str) -> DeviceStatus:
         return await self._device.GetDeviceStatus(DeviceRequest(ski=ski), timeout=RPC_TIMEOUT)
+
+    async def get_device_snapshot(self, ski: str) -> DeviceSnapshot:
+        """Complete current state of the device as the bridge caches it.
+
+        A snapshot also counts as a live monitoring read for the bridge's
+        watchdog, which otherwise reconnects the device after a few minutes.
+        """
+        return await self._device.GetDeviceSnapshot(DeviceRequest(ski=ski), timeout=RPC_TIMEOUT)
+
+    async def device_state_events(self, ski: str) -> AsyncIterator[DeviceStateEvent]:
+        """Yield the device's state change events until the stream ends or fails."""
+        call = self._device.SubscribeDeviceState(DeviceRequest(ski=ski))
+        try:
+            async for event in call:
+                yield event
+        finally:
+            call.cancel()
 
     async def get_structure_dump(self, ski: str) -> DeviceStructureDump:
         return await self._device.GetDeviceStructureDump(DeviceRequest(ski=ski), timeout=DUMP_TIMEOUT)

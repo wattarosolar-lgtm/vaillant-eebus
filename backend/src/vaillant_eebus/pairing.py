@@ -248,6 +248,18 @@ class PairingService:
             content=(json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
         )
 
+    async def own_bridge_ready(self) -> bool:
+        """True if this app's own bridge answers right now."""
+        try:
+            await self._require_own_bridge()
+        except ForeignBridgeError:
+            return False
+        except grpc.aio.AioRpcError as err:
+            if err.code() not in RETRYABLE_CODES:
+                raise
+            return False
+        return True
+
     def _is_own_bridge(self, info: ServerInfo) -> bool:
         if self._bridge_serial_file is None:
             return True

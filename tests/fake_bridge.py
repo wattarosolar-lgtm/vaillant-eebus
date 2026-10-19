@@ -21,16 +21,20 @@ from dataclasses import dataclass
 from typing import Any
 
 import grpc
-from eebus.v1.common_pb2 import DeviceRequest, Empty
+from eebus.v1.common_pb2 import DeviceRequest, Empty, MeasurementEntry
 from eebus.v1.device_service_pb2 import (
     DEVICE_EVENT_CONNECTED,
     DEVICE_EVENT_DISCONNECTED,
     DEVICE_EVENT_TRUST_REMOVED,
     DEVICE_READINESS_DISCONNECTED,
     DEVICE_READINESS_READY,
+    RESYNC_REASON_INITIAL_STATE_REQUIRED,
+    SNAPSHOT_VALUE_STATE_AVAILABLE,
     DeviceEvent,
     DeviceEventType,
     DeviceReadinessState,
+    DeviceSnapshot,
+    DeviceStateEvent,
     DeviceStatus,
     DeviceStructureDump,
     DiscoveredDevice,
@@ -38,9 +42,14 @@ from eebus.v1.device_service_pb2 import (
     ListPairedDevicesResponse,
     PairedDevice,
     RegisterSKIRequest,
+    ResyncRequired,
     ServerInfo,
 )
 from eebus.v1.device_service_pb2_grpc import DeviceServiceServicer, add_DeviceServiceServicer_to_server
+from eebus.v1.dhw_service_pb2 import DHW_BOOST_STATUS_INACTIVE, DHWSetpoint, DHWSystemFunctionState
+from eebus.v1.hvac_service_pb2 import RoomHeatingSetpoint, RoomHeatingState, RoomHeatingSystemFunction
+from eebus.v1.lpc_service_pb2 import HeartbeatStatus
+from eebus.v1.monitoring_service_pb2 import DeviceDiagnosticsData
 from google.protobuf.timestamp_pb2 import Timestamp
 
 FAKE_SKI = "4a1f9c2e7b3d8065f1a2c4e6b8d0f2a4c6e8b0d2"
@@ -112,6 +121,23 @@ FAKE_STRUCTURE: dict[str, Any] = {
 }
 
 
+# Values from a real dump (aroTHERM split plus): no room temperature over EEBUS,
+# no flow/return/compressor temperatures and no energy counters.
+FAKE_MEASUREMENTS: dict[str, tuple[float, str]] = {
+    "power_consumption": (532.0, "W"),
+    "compressor_power": (527.0, "W"),
+    "dhw_temperature": (48.0, "degC"),
+    "outdoor_temperature": (13.5, "degC"),
+}
+FAKE_CAPTURED_AT = "2026-10-19T09:51:46Z"
+
+
+def _timestamp(value: str = FAKE_CAPTURED_AT) -> Timestamp:
+    timestamp = Timestamp()
+    timestamp.FromJsonString(value)
+    return timestamp
+
+
 def _normalize(ski: str) -> str:
     return ski.replace(" ", "").upper()
 
@@ -139,6 +165,11 @@ class FakeDeviceService(DeviceServiceServicer):
         # Standalone mode: the gateway accepts a registration after this delay.
         self.auto_connect_after = auto_connect_after
         self._subscribers: list[asyncio.Queue[DeviceEvent | None]] = []
+        # Device state served by GetDeviceSnapshot; tests may change it.
+        self.measurements: dict[str, tuple[float, str]] = dict(FAKE_MEASUREMENTS)
+        self.room_temperature: float | None = None
+        self.snapshot_calls = 0
+        self._state_subscribers: list[asyncio.Queue[DeviceStateEvent | None]] = []
 
     # --- helpers for tests -------------------------------------------------
 
@@ -161,10 +192,74 @@ class FakeDeviceService(DeviceServiceServicer):
         self.connected.clear()
         for queue in self._subscribers:
             queue.put_nowait(None)
+        for state_queue in self._state_subscribers:
+            state_queue.put_nowait(None)
 
     @property
     def subscriber_count(self) -> int:
         return len(self._subscribers)
+
+    def push_state_event(self, ski: str) -> None:
+        """Announce a change of the device state, as the bridge does for new readings."""
+        event = DeviceStateEvent(ski=_normalize(ski), event_time=_timestamp())
+        for queue in self._state_subscribers:
+            queue.put_nowait(event)
+
+    @property
+    def state_subscriber_count(self) -> int:
+        return len(self._state_subscribers)
+
+    def snapshot(self, ski: str) -> DeviceSnapshot:
+        connected = ski in self.connected
+        snapshot = DeviceSnapshot(
+            ski=ski,
+            captured_at=_timestamp(),
+            local_ski=FAKE_SKI,
+            connection=DeviceStatus(
+                connected=connected,
+                readiness=DEVICE_READINESS_READY if connected else DEVICE_READINESS_DISCONNECTED,
+            ),
+            connection_state=SNAPSHOT_VALUE_STATE_AVAILABLE,
+        )
+        if not connected:
+            return snapshot
+        snapshot.measurements.extend(
+            MeasurementEntry(type=kind, value=value, unit=unit, timestamp=_timestamp())
+            for kind, (value, unit) in self.measurements.items()
+        )
+        snapshot.measurements_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        snapshot.heartbeat.CopyFrom(HeartbeatStatus(running=True, within_duration=True))
+        snapshot.heartbeat_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        snapshot.device_diagnostics.CopyFrom(DeviceDiagnosticsData(operating_state="normalOperation"))
+        snapshot.device_diagnostics_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        snapshot.dhw_setpoint.CopyFrom(
+            DHWSetpoint(value_celsius=55, min_celsius=35, max_celsius=70, step_celsius=1, writable=True)
+        )
+        snapshot.dhw_setpoint_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        snapshot.dhw_system_function.CopyFrom(
+            DHWSystemFunctionState(
+                boost_status=DHW_BOOST_STATUS_INACTIVE,
+                boost_writable=True,
+                operation_mode="auto",
+                available_modes=["auto", "on", "off"],
+                mode_writable=True,
+            )
+        )
+        snapshot.dhw_system_function_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        room = RoomHeatingState(
+            setpoint=RoomHeatingSetpoint(
+                value_celsius=21, min_celsius=5, max_celsius=30, step_celsius=0.5, writable=True
+            ),
+            system_function=RoomHeatingSystemFunction(
+                operation_mode="auto", available_modes=["auto", "on", "off"], mode_writable=True
+            ),
+            zone_label="Zone 1",
+        )
+        if self.room_temperature is not None:
+            room.current_temperature_celsius = self.room_temperature
+        snapshot.room_heating.CopyFrom(room)
+        snapshot.room_heating_state = SNAPSHOT_VALUE_STATE_AVAILABLE
+        return snapshot
 
     # --- RPCs ----------------------------------------------------------------
 
@@ -238,6 +333,31 @@ class FakeDeviceService(DeviceServiceServicer):
         finally:
             self._subscribers.remove(queue)
 
+    async def GetDeviceSnapshot(
+        self, request: DeviceRequest, context: grpc.aio.ServicerContext[DeviceRequest, DeviceSnapshot]
+    ) -> DeviceSnapshot:
+        ski = _normalize(request.ski)
+        if ski not in self.registered:
+            await context.abort(grpc.StatusCode.NOT_FOUND, "device not found for specified ski")
+        self.snapshot_calls += 1
+        return self.snapshot(ski)
+
+    async def SubscribeDeviceState(
+        self, request: DeviceRequest, context: grpc.aio.ServicerContext[DeviceRequest, DeviceStateEvent]
+    ) -> AsyncIterator[DeviceStateEvent]:
+        queue: asyncio.Queue[DeviceStateEvent | None] = asyncio.Queue()
+        self._state_subscribers.append(queue)
+        try:
+            # Like the bridge: the first envelope asks the client to read a snapshot.
+            yield DeviceStateEvent(
+                ski=_normalize(request.ski),
+                resync_required=ResyncRequired(reason=RESYNC_REASON_INITIAL_STATE_REQUIRED),
+            )
+            while (event := await queue.get()) is not None:
+                yield event
+        finally:
+            self._state_subscribers.remove(queue)
+
     async def GetDeviceStructureDump(
         self, request: DeviceRequest, context: grpc.aio.ServicerContext[DeviceRequest, DeviceStructureDump]
     ) -> DeviceStructureDump:
@@ -246,9 +366,9 @@ class FakeDeviceService(DeviceServiceServicer):
             await context.abort(grpc.StatusCode.NOT_FOUND, "device not found for specified ski")
         if ski not in self.connected:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "device not connected")
-        captured_at = Timestamp()
-        captured_at.FromJsonString("2026-10-19T08:00:00Z")
-        return DeviceStructureDump(redacted_ski="…" + ski[-6:], captured_at=captured_at, json=self.structure_json)
+        return DeviceStructureDump(
+            redacted_ski="…" + ski[-6:], captured_at=_timestamp("2026-10-19T08:00:00Z"), json=self.structure_json
+        )
 
 
 @dataclass

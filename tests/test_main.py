@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from pathlib import Path
 
 import httpx
 import pytest
 
-from tests.fake_bridge import FAKE_SKI, FakeBridge
+from tests.fake_bridge import FAKE_SKI, GATEWAY_SKI, FakeBridge
 from tests.support import FAST_BACKOFF, eventually, free_port
 from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.main import BackendConfig, run_backend
+from vaillant_eebus.settings import Settings, SettingsStore
 
 
 def test_config_from_environment() -> None:
@@ -73,6 +75,39 @@ async def test_run_backend_serves_the_api_and_logs_the_bridge_ski(
                 response = await http.get("/api/pairing")
             assert response.status_code == 200
             assert response.json()["bridge"]["ski"] == FAKE_SKI
+        finally:
+            backend.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await backend
+
+
+async def test_event_stream_delivers_the_heat_pump_state(fake_bridge: FakeBridge, tmp_path: Path) -> None:
+    fake_bridge.device.registered.add(GATEWAY_SKI)
+    fake_bridge.device.connected.add(GATEWAY_SKI)
+    SettingsStore(tmp_path).save(Settings(paired_ski=GATEWAY_SKI))
+    port = free_port()
+    config = BackendConfig(
+        data_dir=tmp_path, http_host="127.0.0.1", http_port=port, trusted_clients=frozenset({"127.0.0.1"})
+    )
+    async with BridgeClient(fake_bridge.address, FAST_BACKOFF) as bridge:
+        backend = asyncio.create_task(run_backend(config, bridge))
+        try:
+            await eventually(lambda: fake_bridge.device.snapshot_calls > 0)
+            async with (
+                httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http,
+                http.stream("GET", "/api/events") as response,
+            ):
+                assert response.headers["content-type"].startswith("text/event-stream")
+                payload = None
+                async with asyncio.timeout(10):
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            payload = json.loads(line.removeprefix("data: "))
+                            if payload["heat_pump"] is not None:
+                                break
+            assert payload is not None
+            assert payload["connection"] == "connected"
+            assert payload["heat_pump"]["measurements"]["outdoor_temperature"]["value"] == 13.5
         finally:
             backend.cancel()
             with contextlib.suppress(asyncio.CancelledError):

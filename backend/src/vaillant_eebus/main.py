@@ -17,6 +17,7 @@ from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_client import DEFAULT_ADDRESS, BridgeClient
 from vaillant_eebus.pairing import PairingService
 from vaillant_eebus.settings import SettingsStore
+from vaillant_eebus.state import StateService
 
 _LOGGER = logging.getLogger("vaillant_eebus")
 
@@ -87,7 +88,8 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
         bridge_serial_file=config.bridge_serial_file,
         ship_port=config.ship_port,
     )
-    app = create_app(pairing, static_dir=config.static_dir, trusted_clients=config.trusted_clients)
+    state = StateService(bridge, pairing)
+    app = create_app(pairing, state, static_dir=config.static_dir, trusted_clients=config.trusted_clients)
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -96,13 +98,16 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
             log_config=None,
             access_log=False,
             lifespan="off",
+            # Open event streams would otherwise hold up the shutdown forever.
+            timeout_graceful_shutdown=3,
         )
     )
     async with asyncio.TaskGroup() as tasks:
-        pairing_task = tasks.create_task(pairing.run())
+        background = [tasks.create_task(pairing.run()), tasks.create_task(state.run())]
         # Returns when uvicorn handles SIGTERM; it re-raises the signal afterwards.
         await server.serve()
-        pairing_task.cancel()
+        for task in background:
+            task.cancel()
 
 
 async def _main(config: BackendConfig) -> None:

@@ -5,17 +5,22 @@ All routes are relative to the ingress path prefix; the UI uses relative URLs.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import grpc
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from vaillant_eebus.pairing import ForeignBridgeError, NotPairedError, PairingService, PairingStatus
+from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
+from vaillant_eebus.state import HeatPumpState, StateService
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,12 +39,32 @@ FOREIGN_BRIDGE_MESSAGE = (
 )
 
 
+# Seconds between keep-alive comments on the event stream.
+SSE_KEEPALIVE = 15.0
+
+
 class RegisterRequest(BaseModel):
     ski: str = Field(pattern=r"^[0-9A-Fa-f]{40}$")
 
 
-def create_app(pairing: PairingService, *, static_dir: Path | None, trusted_clients: frozenset[str]) -> FastAPI:
+@dataclass(frozen=True, slots=True)
+class ApiState:
+    connection: ConnectionState
+    # None until a gateway is paired and this app's own bridge answers.
+    heat_pump: HeatPumpState | None
+
+
+def create_app(
+    pairing: PairingService,
+    state: StateService,
+    *,
+    static_dir: Path | None,
+    trusted_clients: frozenset[str],
+) -> FastAPI:
     app = FastAPI(title="Vaillant EEBUS", docs_url=None, redoc_url=None, openapi_url=None)
+
+    async def api_state(heat_pump: HeatPumpState | None) -> ApiState:
+        return ApiState(connection=(await pairing.status()).state, heat_pump=heat_pump)
 
     @app.middleware("http")
     async def only_ingress(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -52,6 +77,36 @@ def create_app(pairing: PairingService, *, static_dir: Path | None, trusted_clie
     @app.get("/api/pairing")
     async def get_pairing() -> PairingStatus:
         return await pairing.status()
+
+    @app.get("/api/state")
+    async def get_state() -> ApiState:
+        return await api_state(state.current)
+
+    @app.get("/api/events")
+    async def get_events(request: Request) -> StreamingResponse:
+        """Server-sent events: the full state on connect and after every change."""
+
+        async def stream() -> AsyncIterator[str]:
+            async with state.listen() as updates:
+                current = state.current
+                while True:
+                    payload = json.dumps(jsonable_encoder(await api_state(current)), ensure_ascii=False)
+                    yield f"event: state\ndata: {payload}\n\n"
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        try:
+                            async with asyncio.timeout(SSE_KEEPALIVE):
+                                current = await updates.get()
+                            break
+                        except TimeoutError:
+                            yield ": keep-alive\n\n"
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.post("/api/pairing/register")
     async def register_gateway(request: RegisterRequest) -> PairingStatus:
