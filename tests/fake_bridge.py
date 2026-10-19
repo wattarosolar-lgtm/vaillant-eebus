@@ -179,10 +179,13 @@ class FakeDeviceService(DeviceServiceServicer):
     def connect(self, ski: str) -> None:
         self.connected.add(_normalize(ski))
         self.publish(ski, DEVICE_EVENT_CONNECTED)
+        # The consolidated state stream carries connection changes as well.
+        self.push_state_event(ski)
 
     def disconnect(self, ski: str) -> None:
         self.connected.discard(_normalize(ski))
         self.publish(ski, DEVICE_EVENT_DISCONNECTED)
+        self.push_state_event(ski)
 
     def publish(self, ski: str, event_type: DeviceEventType.ValueType) -> None:
         event = DeviceEvent(ski=_normalize(ski), event_type=event_type)
