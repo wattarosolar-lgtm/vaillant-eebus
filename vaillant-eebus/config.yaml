@@ -1,5 +1,5 @@
 name: Vaillant EEBUS
-version: "0.5.0"
+version: "0.5.1"
 slug: vaillant_eebus
 description: Vaillant-Wärmepumpe lokal über EEBUS – ohne Cloud und ohne eBUS-Adapter.
 url: https://github.com/wattarosolar-lgtm/vaillant-eebus

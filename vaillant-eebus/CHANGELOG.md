@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.1
+
+Korrekturen aus dem Fehlertest vor dem ersten Live-Test:
+
+- Eine Änderung gilt nur für den Betrieb, in dem sie gemacht wurde. Wer kurz nach einem Klick von Demo auf Live
+  umschaltet, sendet den Wert nicht mehr versehentlich: Die App verwirft ihn, und das Backend lehnt jeden Befehl ab,
+  der in einem anderen Betrieb entschieden wurde.
+- Bleibt die Antwort der Wärmepumpe aus, meldet die App „Ergebnis unbekannt“ statt „Fehler“ und beobachtet weiter,
+  ob der Wert ankommt. Eindeutige Ablehnungen heißen „Nicht ausgeführt“.
+- Jeder Schreibversuch steht als „Wird gesendet“ im Protokoll, bevor er die App verlässt; auch ein Absturz mitten im
+  Senden hinterlässt so eine Spur.
+- Läuft die Bestätigungszeit während einer Verbindungsunterbrechung ab, trägt die App das Ergebnis nach, sobald die
+  Verbindung wieder steht („Nachträglich bestätigt“ oder „Nicht übernommen“).
+
 ## 0.5.0
 
 - Die App kann jetzt steuern: Solltemperatur und Betriebsart jeder Heizzone, Solltemperatur und Betriebsart des
