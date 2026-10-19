@@ -23,9 +23,11 @@ https://github.com/wattarosolar-lgtm/vaillant-eebus
 | `tests/` | Backend-Tests und Fake-Bridge |
 | `.github/workflows/` | CI und Image-Build |
 
-Im Container laufen zwei s6-Dienste: `eebus-bridge` (Go, SHIP/SPINE, Port 4712, gRPC auf `127.0.0.1:50051`)
+Im Container laufen zwei s6-Dienste: `eebus-bridge` (Go, SHIP/SPINE, Port 4712, gRPC auf `127.0.0.1:50471`)
 und `backend` (Python), das nur über gRPC mit der Bridge spricht. Das Backend liefert API und Oberfläche auf
-`172.30.32.1:8714` aus und nimmt nur Anfragen des Ingress-Proxys (`172.30.32.2`) an.
+`172.30.32.1:8714` aus und nimmt nur Anfragen des Ingress-Proxys (`172.30.32.2`) an. Alle Apps mit
+Host-Netzwerk teilen sich die Ports des Hosts; das Backend prüft deshalb, dass die Bridge auf seinem Port die
+eigene ist (sie muss die EEBUS-Seriennummer aus `/data/eebus/serial` melden).
 
 ## Entwicklung
 
@@ -57,7 +59,7 @@ Ihr Gateway nimmt eine Kopplung nach `--connect-after` Sekunden von selbst an. D
 `http://127.0.0.1:8714/` öffnen:
 
 ```bash
-PYTHONPATH=backend/gen .venv/bin/python -m tests.fake_bridge --port 50051 --connect-after 10
+PYTHONPATH=backend/gen .venv/bin/python -m tests.fake_bridge --port 50471 --connect-after 10
 export DATA_DIR=/tmp/vaillant-eebus HTTP_HOST=127.0.0.1 TRUSTED_CLIENTS=127.0.0.1 STATIC_DIR=frontend/dist
 PYTHONPATH=backend/src:backend/gen .venv/bin/python -m vaillant_eebus
 ```

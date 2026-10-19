@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- Die App erkennt, ob sie mit ihrer eigenen EEBUS-Bridge spricht. Läuft eine andere EEBUS-App, zeigt sie das
+  deutlich an, statt über deren Bridge zu koppeln.
+- Die Bridge der App nutzt einen eigenen gRPC-Port (50471) statt des Standard-Ports 50051.
+- Ist der EEBUS-Port 4712 durch eine andere App belegt, sagt die Oberfläche das.
+- Die Gerätesuche zeigt Marke, Modell, Gerätetyp und Seriennummer der gefundenen Geräte.
+- Fehlermeldungen nennen den Fehlercode; große Diagnose-Dumps werden nicht mehr abgeschnitten.
+
 ## 0.2.0
 
 - Einrichtungsassistent in der Seitenleiste „Wärmepumpe“: Gateway auswählen, in myVAILLANT bestätigen.
