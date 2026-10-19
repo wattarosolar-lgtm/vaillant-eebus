@@ -38,6 +38,7 @@ from vaillant_eebus.write_gate import (
     SetZoneMode,
     SetZoneSetpoint,
     WriteGate,
+    WriteOutcomeUnknown,
     WriteRejected,
     WriteResult,
 )
@@ -73,31 +74,37 @@ class ModeRequest(BaseModel):
     confirm: bool = False
 
 
-class SetpointRequest(BaseModel):
+class WriteRequest(BaseModel):
+    # The mode the caller showed the user when the change was made. If it
+    # changed since, nothing is sent: a change decided in demo never goes live.
+    operating_mode: OperatingMode
+
+
+class SetpointRequest(WriteRequest):
     value: float = Field(allow_inf_nan=False)
 
 
-class OperationModeRequest(BaseModel):
+class OperationModeRequest(WriteRequest):
     # Checked against the modes the device offers by the write gate.
     mode: str = Field(pattern=r"^[a-z]{1,32}$")
 
 
-class BoostRequest(BaseModel):
+class BoostRequest(WriteRequest):
     active: bool
 
 
-class ConsumptionLimitRequest(BaseModel):
+class ConsumptionLimitRequest(WriteRequest):
     value_watts: float = Field(ge=0, allow_inf_nan=False)
     duration_seconds: int = Field(ge=0)
     active: bool
 
 
-class FailsafeLimitRequest(BaseModel):
+class FailsafeLimitRequest(WriteRequest):
     value_watts: float = Field(ge=0, allow_inf_nan=False)
     duration_minimum_seconds: int = Field(ge=0)
 
 
-class CompressorRequest(BaseModel):
+class CompressorRequest(WriteRequest):
     action: Literal["schedule", "pause", "resume", "abort"]
     # Only for schedule; without it the compressor starts at once.
     start_time: AwareDatetime | None = None
@@ -230,39 +237,45 @@ def create_app(
 
     @app.post("/api/zones/{zone_id}/setpoint")
     async def set_zone_setpoint(zone_id: ZoneId, request: SetpointRequest) -> WriteResult:
-        return await gate.submit(SetZoneSetpoint(zone_id=zone_id, celsius=request.value))
+        command = SetZoneSetpoint(zone_id=zone_id, celsius=request.value)
+        return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.post("/api/zones/{zone_id}/mode")
     async def set_zone_mode(zone_id: ZoneId, request: OperationModeRequest) -> WriteResult:
-        return await gate.submit(SetZoneMode(zone_id=zone_id, mode=request.mode))
+        command = SetZoneMode(zone_id=zone_id, mode=request.mode)
+        return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.post("/api/dhw/setpoint")
     async def set_dhw_setpoint(request: SetpointRequest) -> WriteResult:
-        return await gate.submit(SetHotWaterSetpoint(celsius=request.value))
+        command = SetHotWaterSetpoint(celsius=request.value)
+        return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.post("/api/dhw/mode")
     async def set_dhw_mode(request: OperationModeRequest) -> WriteResult:
-        return await gate.submit(SetHotWaterMode(mode=request.mode))
+        command = SetHotWaterMode(mode=request.mode)
+        return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.post("/api/dhw/boost")
     async def set_dhw_boost(request: BoostRequest) -> WriteResult:
-        return await gate.submit(SetHotWaterBoost(active=request.active))
+        command = SetHotWaterBoost(active=request.active)
+        return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.post("/api/lpc")
     async def write_consumption_limit(request: ConsumptionLimitRequest) -> WriteResult:
-        return await gate.submit(
-            SetConsumptionLimit(watts=request.value_watts, duration_s=request.duration_seconds, active=request.active)
+        command = SetConsumptionLimit(
+            watts=request.value_watts, duration_s=request.duration_seconds, active=request.active
         )
+        return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.post("/api/lpc/failsafe")
     async def write_failsafe_limit(request: FailsafeLimitRequest) -> WriteResult:
-        return await gate.submit(
-            SetFailsafeLimit(watts=request.value_watts, duration_s=request.duration_minimum_seconds)
-        )
+        command = SetFailsafeLimit(watts=request.value_watts, duration_s=request.duration_minimum_seconds)
+        return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.post("/api/ohpcf")
     async def control_compressor(request: CompressorRequest) -> WriteResult:
-        return await gate.submit(ControlCompressor(action=request.action, start_time=request.start_time))
+        command = ControlCompressor(action=request.action, start_time=request.start_time)
+        return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.get("/api/log")
     async def get_log(
@@ -287,6 +300,17 @@ def create_app(
         status, message = _BRIDGE_ERRORS.get(code, _BRIDGE_ERROR_DEFAULT)
         _LOGGER.warning("Bridge call failed: %s", code.name)
         return JSONResponse({"detail": f"{message} (Fehlercode {code.name})"}, status_code=status)
+
+    @app.exception_handler(WriteOutcomeUnknown)
+    async def write_outcome_unknown(_request: Request, exc: Exception) -> JSONResponse:
+        code = exc.code.name if isinstance(exc, WriteOutcomeUnknown) else "UNKNOWN"
+        return JSONResponse(
+            {
+                "detail": "Ob die Änderung bei der Wärmepumpe angekommen ist, ist unklar "
+                f"(Fehlercode {code}). Die App prüft, ob die Wärmepumpe den Wert meldet."
+            },
+            status_code=504,
+        )
 
     @app.exception_handler(WriteRejected)
     async def write_rejected(_request: Request, exc: Exception) -> JSONResponse:

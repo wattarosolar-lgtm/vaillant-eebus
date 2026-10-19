@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -252,8 +252,13 @@ class FakeDeviceService(DeviceServiceServicer):
         self.compressor = CompressorFlexibility(available=True, state=COMPRESSOR_STATE_AVAILABLE)
         # Every write RPC that reached the fake bridge: (RPC name, request).
         self.write_calls: list[tuple[str, Message]] = []
-        # When set, write RPCs fail with this status code.
+        # When set, write RPCs fail with this status code before the device sees them.
         self.fail_writes_with: grpc.StatusCode | None = None
+        # When set, the device applies a write but its answer is lost: the RPC
+        # fails with this status code although the value arrived.
+        self.answer_lost_with: grpc.StatusCode | None = None
+        # Awaited when a write reaches the fake bridge, before it is checked.
+        self.before_write: Callable[[], Awaitable[None]] | None = None
         # False: the device accepts writes but keeps reporting the old values.
         self.apply_writes = True
         self.snapshot_calls = 0
@@ -358,6 +363,8 @@ class FakeDeviceService(DeviceServiceServicer):
     ) -> bool:
         """Record a write and check it like the bridge; False: the device keeps its values."""
         self.write_calls.append((name, request))
+        if self.before_write is not None:
+            await self.before_write()
         if self.fail_writes_with is not None:
             await context.abort(self.fail_writes_with, "fake bridge write failure")
         normalized = _normalize(ski)
@@ -366,6 +373,12 @@ class FakeDeviceService(DeviceServiceServicer):
         if normalized not in self.connected:
             await context.abort(grpc.StatusCode.UNAVAILABLE, "device not connected")
         return self.apply_writes
+
+    async def answer(self, context: grpc.aio.ServicerContext[Any, Any]) -> Empty:
+        """The bridge's answer to a write, unless it is lost on the way."""
+        if self.answer_lost_with is not None:
+            await context.abort(self.answer_lost_with, "fake bridge lost the device's answer")
+        return Empty()
 
     async def zone(self, request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> FakeZone:
         """The zone a room heating write goes to; never guesses between zones."""
@@ -503,7 +516,7 @@ class FakeHVACService(HVACServiceServicer):
         if apply:
             zone.setpoint = request.value_celsius
             self._device.push_state_event(request.ski)
-        return Empty()
+        return await self._device.answer(context)
 
     async def SetRoomHeatingMode(
         self, request: SetRoomHeatingModeRequest, context: grpc.aio.ServicerContext[Any, Empty]
@@ -515,7 +528,7 @@ class FakeHVACService(HVACServiceServicer):
         if apply:
             zone.mode = request.mode
             self._device.push_state_event(request.ski)
-        return Empty()
+        return await self._device.answer(context)
 
 
 class FakeDHWService(DHWServiceServicer):
@@ -531,7 +544,7 @@ class FakeDHWService(DHWServiceServicer):
         if apply:
             self._device.dhw_setpoint = request.value_celsius
             self._device.push_state_event(request.ski)
-        return Empty()
+        return await self._device.answer(context)
 
     async def SetDHWOperationMode(
         self, request: SetDHWOperationModeRequest, context: grpc.aio.ServicerContext[Any, Empty]
@@ -542,13 +555,13 @@ class FakeDHWService(DHWServiceServicer):
         if apply:
             self._device.dhw_mode = request.mode
             self._device.push_state_event(request.ski)
-        return Empty()
+        return await self._device.answer(context)
 
     async def SetDHWBoost(self, request: SetDHWBoostRequest, context: grpc.aio.ServicerContext[Any, Empty]) -> Empty:
         if await self._device.accept_write("SetDHWBoost", request, request.ski, context):
             self._device.dhw_boost = DHW_BOOST_STATUS_ACTIVE if request.active else DHW_BOOST_STATUS_INACTIVE
             self._device.push_state_event(request.ski)
-        return Empty()
+        return await self._device.answer(context)
 
 
 class FakeLPCService(LPCServiceServicer):
@@ -566,7 +579,7 @@ class FakeLPCService(LPCServiceServicer):
                 is_changeable=True,
             )
             self._device.push_state_event(request.ski)
-        return Empty()
+        return await self._device.answer(context)
 
     async def WriteFailsafeLimit(
         self, request: WriteFailsafeLimitRequest, context: grpc.aio.ServicerContext[Any, Empty]
@@ -576,7 +589,7 @@ class FakeLPCService(LPCServiceServicer):
                 value_watts=request.value_watts, duration_minimum_seconds=request.duration_minimum_seconds
             )
             self._device.push_state_event(request.ski)
-        return Empty()
+        return await self._device.answer(context)
 
 
 class FakeOHPCFService(OHPCFServiceServicer):
@@ -589,7 +602,7 @@ class FakeOHPCFService(OHPCFServiceServicer):
         await self._device.accept_write("ControlCompressorFlexibility", request, request.ski, context)
         if request.action == OHPCF_ACTION_SCHEDULE and not self._device.compressor.available:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "no optional consumption available")
-        return Empty()
+        return await self._device.answer(context)
 
 
 @dataclass

@@ -31,6 +31,7 @@ from vaillant_eebus.write_gate import (
     SetZoneMode,
     SetZoneSetpoint,
     WriteGate,
+    WriteOutcomeUnknown,
     WriteRejected,
 )
 
@@ -340,27 +341,119 @@ async def test_simultaneous_requests_for_one_control_send_once(live_gate: WriteG
     assert sum(isinstance(result, WriteRejected) and result.status == 429 for result in results) == 1
 
 
-@pytest.mark.parametrize(
-    ("code", "logged"),
-    [
-        (grpc.StatusCode.UNAVAILABLE, "Fehler beim Senden: Warmwasser: Solltemperatur 54 °C (Fehlercode UNAVAILABLE)"),
-        (
-            grpc.StatusCode.DEADLINE_EXCEEDED,
-            "Ergebnis unbekannt (keine Antwort des Geräts): Warmwasser: Solltemperatur 54 °C",
-        ),
-    ],
-)
-async def test_failed_writes_are_logged_and_reported(
-    live_gate: WriteGate, fake_bridge: FakeBridge, log_store: LogStore, code: grpc.StatusCode, logged: str
+async def test_a_write_the_device_rejected_is_not_followed(
+    live_gate: WriteGate, fake_bridge: FakeBridge, log_store: LogStore
 ) -> None:
-    fake_bridge.device.fail_writes_with = code
+    fake_bridge.device.fail_writes_with = grpc.StatusCode.FAILED_PRECONDITION
 
     with pytest.raises(grpc.aio.AioRpcError) as failed:
         await live_gate.submit(SetHotWaterSetpoint(celsius=54))
 
-    assert failed.value.code() is code
+    assert failed.value.code() is grpc.StatusCode.FAILED_PRECONDITION
     assert live_gate.pending == []
-    assert (await messages(log_store, LogCategory.WRITE))[-1] == logged
+    assert (await messages(log_store, LogCategory.WRITE))[-2:] == [
+        "Wird gesendet: Warmwasser: Solltemperatur 54 °C",
+        "Nicht ausgeführt: Warmwasser: Solltemperatur 54 °C (Fehlercode FAILED_PRECONDITION)",
+    ]
+
+
+@pytest.mark.parametrize(
+    "code", [grpc.StatusCode.INTERNAL, grpc.StatusCode.DEADLINE_EXCEEDED, grpc.StatusCode.UNAVAILABLE]
+)
+async def test_a_write_with_a_lost_answer_is_followed_until_the_device_reports_it(
+    live_gate: WriteGate,
+    connected: StateService,
+    fake_bridge: FakeBridge,
+    log_store: LogStore,
+    code: grpc.StatusCode,
+) -> None:
+    # The bridge times out waiting for the device's answer, but the value arrived.
+    fake_bridge.device.answer_lost_with = code
+    async with running(live_gate.run()):
+        with pytest.raises(WriteOutcomeUnknown) as unknown:
+            await live_gate.submit(SetHotWaterSetpoint(celsius=54))
+        pending = live_gate.pending
+        await connected.refresh(GATEWAY_SKI)
+        entries = await logged(log_store, LogCategory.WRITE, 3)
+
+    assert unknown.value.code is code
+    assert [(write.control, write.value) for write in pending] == [(Control.DHW_SETPOINT, 54)]
+    assert entries == [
+        "Wird gesendet: Warmwasser: Solltemperatur 54 °C",
+        f"Ergebnis unbekannt: Warmwasser: Solltemperatur 54 °C (Fehlercode {code.name}); die App prüft, ob das "
+        "Gerät den Wert meldet.",
+        "Bestätigt vom Gerät: Warmwasser: Solltemperatur 54 °C",
+    ]
+
+
+async def test_the_attempt_is_in_the_protocol_before_the_bridge_sees_it(
+    live_gate: WriteGate, fake_bridge: FakeBridge, log_store: LogStore
+) -> None:
+    seen: list[str] = []
+
+    async def read_protocol() -> None:
+        seen.extend(await messages(log_store, LogCategory.WRITE))
+
+    fake_bridge.device.before_write = read_protocol
+
+    await live_gate.submit(SetZoneSetpoint(zone_id="6.1.1", celsius=22.5))
+
+    assert seen[-1] == "Wird gesendet: Zone 2: Solltemperatur 22,5 °C"
+
+
+@pytest.mark.parametrize(
+    ("applied", "resolution"),
+    [
+        (22.5, "Nachträglich bestätigt vom Gerät: Zone 2: Solltemperatur 22,5 °C"),
+        (23.0, "Nicht übernommen: Zone 2: Solltemperatur 22,5 °C; das Gerät meldet Solltemperatur 23,0 °C"),
+    ],
+)
+async def test_a_confirmation_timeout_during_a_connection_loss_is_resolved_after_reconnecting(
+    live_gate: WriteGate,
+    connected: StateService,
+    fake_bridge: FakeBridge,
+    log_store: LogStore,
+    clock: FakeClock,
+    applied: float,
+    resolution: str,
+) -> None:
+    fake_bridge.device.apply_writes = False
+    async with running(live_gate.run()):
+        await live_gate.submit(SetZoneSetpoint(zone_id="6.1.1", celsius=22.5))
+        fake_bridge.device.disconnect(GATEWAY_SKI)
+        await connected.refresh(GATEWAY_SKI)
+        clock.now += 30
+        connected.republish()
+        await eventually(lambda: not live_gate.pending)
+        # Whatever the device did meanwhile shows once the connection is back.
+        fake_bridge.device.zones["6.1.1"].setpoint = applied
+        fake_bridge.device.connect(GATEWAY_SKI)
+        await connected.refresh(GATEWAY_SKI)
+        entries = await logged(log_store, LogCategory.WRITE, 4)
+
+    assert entries[2:] == [
+        "Nicht bestätigt nach 30 s: Zone 2: Solltemperatur 22,5 °C; die Verbindung zum Gerät ist unterbrochen, "
+        "das Ergebnis ist unbekannt.",
+        resolution,
+    ]
+    assert await messages(log_store, LogCategory.DEVICE) == []
+
+
+async def test_a_change_decided_in_one_mode_is_never_sent_in_the_other(
+    live_gate: WriteGate, fake_bridge: FakeBridge, log_store: LogStore
+) -> None:
+    # Clicked while demo was shown, arriving after the switch to live.
+    with pytest.raises(WriteRejected) as rejected:
+        await live_gate.submit(SetZoneSetpoint(zone_id="6.1.1", celsius=22.5), expected_mode=OperatingMode.DEMO)
+
+    assert rejected.value.status == 409
+    assert "inzwischen auf Live umgestellt" in rejected.value.message
+    assert fake_bridge.device.write_calls == []
+    assert (await messages(log_store, LogCategory.WRITE))[-1].startswith(
+        "Abgelehnt: Zone 2: Solltemperatur 22,5 °C. Der Betrieb wurde inzwischen auf Live umgestellt"
+    )
+    sent = await live_gate.submit(SetZoneSetpoint(zone_id="6.1.1", celsius=22.5), expected_mode=OperatingMode.LIVE)
+    assert sent.sent
 
 
 @pytest.mark.usefixtures("connected")

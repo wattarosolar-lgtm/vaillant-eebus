@@ -8,10 +8,13 @@ reports (zone, writable flag, limits, step, offered modes). Then:
   what would be sent; power limits and compressor control are blocked.
 - live mode: at most one command per control every few seconds, values that
   are already set are skipped, and every sent value is followed until the
-  device reports it or a timeout passes.
+  device reports it or a timeout passes - also when the bridge's answer got
+  lost and it is unknown whether the value arrived.
 
-Everything is recorded in the protocol. No other module calls the bridge
-client's write methods; a test checks that.
+A caller states the mode it showed the user; a command decided in demo is
+never sent because the mode changed in between. Every attempt is in the
+protocol before it is sent. No other module calls the bridge client's write
+methods; a test checks that.
 """
 
 from __future__ import annotations
@@ -40,6 +43,22 @@ _LOGGER = logging.getLogger(__name__)
 RATE_LIMIT_S = 5.0
 # A sent value counts as not confirmed when the device does not report it in time.
 CONFIRM_TIMEOUT_S = 30.0
+
+# Errors after which the value certainly did not reach the device: the bridge
+# refused the request before sending it, or the device answered with a
+# rejection. Any other error (timeout, internal error, lost connection) leaves
+# open whether the value arrived.
+_NOT_EXECUTED = frozenset(
+    {
+        grpc.StatusCode.INVALID_ARGUMENT,
+        grpc.StatusCode.FAILED_PRECONDITION,
+        grpc.StatusCode.NOT_FOUND,
+        grpc.StatusCode.OUT_OF_RANGE,
+        grpc.StatusCode.UNIMPLEMENTED,
+        grpc.StatusCode.PERMISSION_DENIED,
+        grpc.StatusCode.UNAUTHENTICATED,
+    }
+)
 
 _MODE_NAMES = {"off": "Aus", "auto": "Auto", "on": "Ein", "eco": "Eco"}
 _COMPRESSOR_ACTIONS = {"schedule": "einplanen", "pause": "pausieren", "resume": "fortsetzen", "abort": "abbrechen"}
@@ -144,6 +163,17 @@ class PendingWrite:
     since: datetime
 
 
+class WriteOutcomeUnknown(Exception):
+    """The command was sent, but whether it reached the device is unknown.
+
+    The gate keeps following the value like any sent value.
+    """
+
+    def __init__(self, code: grpc.StatusCode) -> None:
+        super().__init__(code.name)
+        self.code = code
+
+
 class WriteRejected(Exception):
     """The gate refused a command; nothing was sent."""
 
@@ -196,7 +226,11 @@ class WriteGate:
         self._locks: dict[_Key, asyncio.Lock] = {}
         self._last_sent: dict[_Key, float] = {}
         self._pending: dict[_Key, _Pending] = {}
+        # Sent values that timed out while the device was unreachable; resolved
+        # by the first state after the connection is back.
+        self._unresolved: dict[_Key, _Pending] = {}
         self._last_values: dict[_Key, _Observed] = {}
+        self._device_reachable = False
 
     @property
     def mode(self) -> OperatingMode:
@@ -222,11 +256,14 @@ class WriteGate:
         self._state.republish()
         return mode
 
-    async def submit(self, command: Command) -> WriteResult:
+    async def submit(self, command: Command, *, expected_mode: OperatingMode | None = None) -> WriteResult:
         """Check the command and, in live mode, send it to the heat pump.
 
-        Raises WriteRejected when the command is not allowed, NotPairedError
-        without a paired gateway, and the bridge's gRPC error when sending failed.
+        expected_mode is the mode the caller showed the user when the change was
+        made; if the mode changed since, nothing is sent. Raises WriteRejected
+        when the command is not allowed, NotPairedError without a paired gateway,
+        WriteOutcomeUnknown when it is unknown whether a sent value arrived, and
+        the bridge's gRPC error when the value certainly did not arrive.
         """
         key = _key(command)
         async with self._locks.setdefault(key, asyncio.Lock()):
@@ -236,6 +273,13 @@ class WriteGate:
             heat_pump = self._state.current
             description = _describe(command, heat_pump)
             try:
+                if expected_mode is not None and expected_mode is not self.mode:
+                    now_named = "Live" if self.mode is OperatingMode.LIVE else "Demo"
+                    raise WriteRejected(
+                        409,
+                        f"Der Betrieb wurde inzwischen auf {now_named} umgestellt; die Änderung wurde nicht "
+                        "gesendet. Bitte neu einstellen.",
+                    )
                 if heat_pump is None or not heat_pump.available or not heat_pump.connected:
                     raise WriteRejected(409, "Die Wärmepumpe ist gerade nicht verbunden.")
                 _validate(command, heat_pump)
@@ -296,18 +340,34 @@ class WriteGate:
             raise WriteRejected(429, message, retry_after=wait)
         self._last_sent[key] = now
 
+        # In the database before the bridge sees the command, so even a crash
+        # of the app in the middle of a write leaves a trace.
+        await self._log.record(LogCategory.WRITE, f"Wird gesendet: {description}")
         try:
             await _call_bridge(self._bridge, ski, command)
         except grpc.aio.AioRpcError as err:
-            if err.code() is grpc.StatusCode.DEADLINE_EXCEEDED:
-                self._log.add(LogCategory.WRITE, f"Ergebnis unbekannt (keine Antwort des Geräts): {description}")
-            else:
-                self._log.add(LogCategory.WRITE, f"Fehler beim Senden: {description} (Fehlercode {err.code().name})")
-            _LOGGER.warning("Write failed (%s): %s", err.code().name, description)
-            raise
+            code = err.code()
+            if code in _NOT_EXECUTED:
+                _LOGGER.warning("Write not executed (%s): %s", code.name, description)
+                self._log.add(LogCategory.WRITE, f"Nicht ausgeführt: {description} (Fehlercode {code.name})")
+                raise
+            _LOGGER.warning("Write outcome unknown (%s): %s", code.name, description)
+            self._log.add(
+                LogCategory.WRITE,
+                f"Ergebnis unbekannt: {description} (Fehlercode {code.name}); die App prüft, ob das Gerät den "
+                "Wert meldet.",
+            )
+            self._follow(command, key, target, description, now)
+            raise WriteOutcomeUnknown(code) from err
         _LOGGER.info("Sent: %s", description)
         message = f"Gesendet: {description}"
         self._log.add(LogCategory.WRITE, message)
+        self._follow(command, key, target, description, now)
+        return WriteResult(sent=True, mode=OperatingMode.LIVE, message=message)
+
+    def _follow(self, command: Command, key: _Key, target: Hashable | None, description: str, sent_at: float) -> None:
+        """Watch for the device to report a sent value."""
+        self._unresolved.pop(key, None)
         if target is not None:
             self._pending[key] = _Pending(
                 write=PendingWrite(
@@ -318,23 +378,32 @@ class WriteGate:
                     since=datetime.now(UTC),
                 ),
                 target=target,
-                sent_at=now,
+                sent_at=sent_at,
             )
             self._state.republish()
         self._state.refresh_now()
-        return WriteResult(sent=True, mode=OperatingMode.LIVE, message=message)
 
     def _observe(self, heat_pump: HeatPumpState | None) -> None:
-        if heat_pump is None or not heat_pump.available or not heat_pump.connected:
+        self._device_reachable = heat_pump is not None and heat_pump.available and heat_pump.connected
+        if heat_pump is None or not self._device_reachable:
             return
         changed = False
         for key, observed in _device_values(heat_pump).items():
             pending = self._pending.get(key)
+            unresolved = self._unresolved.pop(key, None)
             previous = self._last_values.get(key)
             if pending is not None and observed.value == pending.target:
                 del self._pending[key]
                 changed = True
                 self._log.add(LogCategory.WRITE, f"Bestätigt vom Gerät: {observed.text}")
+            elif unresolved is not None:
+                if observed.value == unresolved.target:
+                    self._log.add(LogCategory.WRITE, f"Nachträglich bestätigt vom Gerät: {observed.text}")
+                else:
+                    self._log.add(
+                        LogCategory.WRITE,
+                        f"Nicht übernommen: {unresolved.write.message}; das Gerät meldet {_value_part(observed)}",
+                    )
             elif previous is not None and previous.value != observed.value:
                 self._log.add(
                     LogCategory.DEVICE, f"Am Gerät geändert: {observed.text} (vorher {_value_part(previous)})"
@@ -354,12 +423,18 @@ class WriteGate:
         expired = [key for key, pending in self._pending.items() if now - pending.sent_at >= self._confirm_timeout_s]
         for key in expired:
             pending = self._pending.pop(key)
+            timed_out = f"Nicht bestätigt nach {self._confirm_timeout_s:.0f} s: {pending.write.message}"
+            if not self._device_reachable:
+                # The last known value is from before the connection broke.
+                self._unresolved[key] = pending
+                self._log.add(
+                    LogCategory.WRITE,
+                    f"{timed_out}; die Verbindung zum Gerät ist unterbrochen, das Ergebnis ist unbekannt.",
+                )
+                continue
             reported = self._last_values.get(key)
             still = f"; das Gerät meldet weiterhin {_value_part(reported)}" if reported else ""
-            self._log.add(
-                LogCategory.WRITE,
-                f"Nicht bestätigt nach {self._confirm_timeout_s:.0f} s: {pending.write.message}{still}",
-            )
+            self._log.add(LogCategory.WRITE, f"{timed_out}{still}")
         if expired:
             self._state.republish()
 

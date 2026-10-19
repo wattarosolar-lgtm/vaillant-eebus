@@ -87,6 +87,13 @@ class LogStore:
             # Shutting down: the entry would not be written any more.
             _LOGGER.debug("Protocol closed, dropped entry: %s", message)
 
+    async def record(self, category: LogCategory, message: str) -> None:
+        """Record an entry and wait until it is in the database, e.g. right before
+        an action whose trace must survive a crash of the app."""
+        time = self._clock()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._executor, self._insert, time, category, message)
+
     async def page(
         self, *, category: LogCategory | None = None, before: int | None = None, limit: int = PAGE_SIZE
     ) -> LogPage:

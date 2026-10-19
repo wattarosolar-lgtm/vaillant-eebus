@@ -185,15 +185,18 @@ async def connected_client(
     return client
 
 
+DEMO = {"operating_mode": "demo"}
+LIVE = {"operating_mode": "live"}
+
 WRITE_REQUESTS = [
-    ("/api/zones/6.1.1/setpoint", {"value": 22.5}),
-    ("/api/zones/5.1.1/mode", {"mode": "on"}),
-    ("/api/dhw/setpoint", {"value": 54}),
-    ("/api/dhw/mode", {"mode": "off"}),
-    ("/api/dhw/boost", {"active": True}),
-    ("/api/lpc", {"value_watts": 4200, "duration_seconds": 3600, "active": True}),
-    ("/api/lpc/failsafe", {"value_watts": 4200, "duration_minimum_seconds": 7200}),
-    ("/api/ohpcf", {"action": "schedule"}),
+    ("/api/zones/6.1.1/setpoint", {"value": 22.5, **DEMO}),
+    ("/api/zones/5.1.1/mode", {"mode": "on", **DEMO}),
+    ("/api/dhw/setpoint", {"value": 54, **DEMO}),
+    ("/api/dhw/mode", {"mode": "off", **DEMO}),
+    ("/api/dhw/boost", {"active": True, **DEMO}),
+    ("/api/lpc", {"value_watts": 4200, "duration_seconds": 3600, "active": True, **DEMO}),
+    ("/api/lpc/failsafe", {"value_watts": 4200, "duration_minimum_seconds": 7200, **DEMO}),
+    ("/api/ohpcf", {"action": "schedule", **DEMO}),
 ]
 
 
@@ -216,7 +219,7 @@ async def test_demo_mode_answers_every_write_without_sending(
 async def test_live_mode_sends_after_confirmation(connected_client: httpx.AsyncClient, fake_bridge: FakeBridge) -> None:
     refused = await connected_client.post("/api/mode", json={"mode": "live"})
     confirmed = await connected_client.post("/api/mode", json={"mode": "live", "confirm": True})
-    response = await connected_client.post("/api/zones/6.1.1/setpoint", json={"value": 22.5})
+    response = await connected_client.post("/api/zones/6.1.1/setpoint", json={"value": 22.5, **LIVE})
     state = (await connected_client.get("/api/state")).json()
 
     assert refused.status_code == 400
@@ -237,36 +240,44 @@ async def test_live_mode_sends_after_confirmation(connected_client: httpx.AsyncC
 
 async def test_rejected_writes_explain_why(connected_client: httpx.AsyncClient) -> None:
     await connected_client.post("/api/mode", json={"mode": "live", "confirm": True})
-    out_of_range = await connected_client.post("/api/zones/6.1.1/setpoint", json={"value": 35})
-    unknown_zone = await connected_client.post("/api/zones/9.9.9/setpoint", json={"value": 21})
-    await connected_client.post("/api/dhw/setpoint", json={"value": 54})
-    too_soon = await connected_client.post("/api/dhw/setpoint", json={"value": 53})
+    out_of_range = await connected_client.post("/api/zones/6.1.1/setpoint", json={"value": 35, **LIVE})
+    unknown_zone = await connected_client.post("/api/zones/9.9.9/setpoint", json={"value": 21, **LIVE})
+    await connected_client.post("/api/dhw/setpoint", json={"value": 54, **LIVE})
+    too_soon = await connected_client.post("/api/dhw/setpoint", json={"value": 53, **LIVE})
+    switched = await connected_client.post("/api/zones/5.1.1/mode", json={"mode": "on", **DEMO})
 
     assert out_of_range.status_code == 422
     assert out_of_range.json()["detail"] == "Zone 2: Die Solltemperatur muss zwischen 5,0 °C und 30,0 °C liegen."
     assert unknown_zone.status_code == 404
     assert too_soon.status_code == 429
     assert too_soon.headers["retry-after"] == "5"
+    # Decided while the UI still showed demo: refused, not sent.
+    assert switched.status_code == 409
+    assert "inzwischen auf Live umgestellt" in switched.json()["detail"]
 
 
 async def test_malformed_write_requests_are_refused(connected_client: httpx.AsyncClient) -> None:
-    bad_zone = await connected_client.post("/api/zones/zone-1/setpoint", json={"value": 21})
-    not_a_number = await connected_client.post("/api/dhw/setpoint", json={"value": "warm"})
-    negative = await connected_client.post("/api/lpc", json={"value_watts": -1, "duration_seconds": 0, "active": True})
+    bad_zone = await connected_client.post("/api/zones/zone-1/setpoint", json={"value": 21, **DEMO})
+    not_a_number = await connected_client.post("/api/dhw/setpoint", json={"value": "warm", **DEMO})
+    negative = await connected_client.post(
+        "/api/lpc", json={"value_watts": -1, "duration_seconds": 0, "active": True, **DEMO}
+    )
+    # Every write must say which mode the user saw.
+    without_mode = await connected_client.post("/api/dhw/setpoint", json={"value": 54})
 
-    assert (bad_zone.status_code, not_a_number.status_code, negative.status_code) == (422, 422, 422)
+    assert [response.status_code for response in (bad_zone, not_a_number, negative, without_mode)] == [422] * 4
 
 
 async def test_writes_without_a_paired_gateway_are_refused(client: httpx.AsyncClient) -> None:
-    response = await client.post("/api/dhw/boost", json={"active": True})
+    response = await client.post("/api/dhw/boost", json={"active": True, **DEMO})
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Es ist noch kein Gateway gekoppelt."
 
 
 async def test_protocol_is_paged_and_filtered(connected_client: httpx.AsyncClient) -> None:
-    await connected_client.post("/api/zones/6.1.1/setpoint", json={"value": 22.5})
-    await connected_client.post("/api/dhw/mode", json={"mode": "off"})
+    await connected_client.post("/api/zones/6.1.1/setpoint", json={"value": 22.5, **DEMO})
+    await connected_client.post("/api/dhw/mode", json={"mode": "off", **DEMO})
 
     writes = (await connected_client.get("/api/log", params={"category": "write", "limit": 1})).json()
     older = (
@@ -308,3 +319,18 @@ async def test_event_stream_survives_a_failing_bridge_call(state: StateService) 
     assert first == ": bridge error\n\n"
     assert message.startswith("event: state\ndata: ")
     assert json.loads(message.split("data: ", 1)[1])["connection"] == "connected"
+
+
+async def test_a_lost_answer_is_reported_as_unknown(
+    connected_client: httpx.AsyncClient, fake_bridge: FakeBridge
+) -> None:
+    await connected_client.post("/api/mode", json={"mode": "live", "confirm": True})
+    fake_bridge.device.answer_lost_with = grpc.StatusCode.INTERNAL
+
+    response = await connected_client.post("/api/dhw/setpoint", json={"value": 54, **LIVE})
+    state = (await connected_client.get("/api/state")).json()
+
+    assert response.status_code == 504
+    assert response.json()["detail"].startswith("Ob die Änderung bei der Wärmepumpe angekommen ist, ist unklar")
+    # The app keeps following the value: the tile shows "Wird gesendet …".
+    assert [(write["control"], write["value"]) for write in state["pending"]] == [("dhw_setpoint", 54)]
