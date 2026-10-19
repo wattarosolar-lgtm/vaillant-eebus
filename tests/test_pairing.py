@@ -7,12 +7,24 @@ import logging
 from pathlib import Path
 
 import pytest
-from eebus.v1.device_service_pb2 import DEVICE_READINESS_UNTRUSTED, DiscoveredDevice
+from eebus.v1.device_service_pb2 import (
+    DEVICE_EVENT_CONNECTED,
+    DEVICE_EVENT_DISCONNECTED,
+    DEVICE_READINESS_UNTRUSTED,
+    DeviceEvent,
+    DiscoveredDevice,
+)
 
 from tests.fake_bridge import FAKE_SERIAL, FAKE_SKI, GATEWAY_SKI, FakeBridge
 from tests.support import FAST_BACKOFF, eventually, free_port
 from vaillant_eebus.bridge_client import BridgeClient
-from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService
+from vaillant_eebus.pairing import (
+    ConnectionLog,
+    ConnectionState,
+    ForeignBridgeError,
+    NotPairedError,
+    PairingService,
+)
 from vaillant_eebus.settings import Settings, SettingsStore
 
 OTHER_SKI = "0123456789ABCDEF0123456789ABCDEF01234567"
@@ -140,6 +152,56 @@ async def test_run_logs_gateway_connection_events(
         runner.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await runner
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _logged(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.levelno == level]
+
+
+def test_connection_log_summarises_refused_attempts(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="vaillant_eebus")
+    clock = _Clock()
+    log = ConnectionLog(clock=clock, summary_interval=300.0)
+
+    for _ in range(40):
+        clock.now += 10
+        log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_DISCONNECTED))
+    clock.now += 10
+    log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_CONNECTED))
+
+    assert _logged(caplog, logging.WARNING) == []
+    assert _logged(caplog, logging.INFO) == [
+        "Gateway …7D9F02 refused the connection attempt; retrying (each attempt is logged at level debug)",
+        "Gateway …7D9F02 not connected yet: 30 failed attempts in 5m00s, still trying",
+        "Gateway …7D9F02 connected after 6m50s and 40 failed attempts",
+    ]
+    assert len(_logged(caplog, logging.DEBUG)) == 39
+
+
+def test_connection_log_warns_when_an_established_connection_drops(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="vaillant_eebus")
+    clock = _Clock()
+    log = ConnectionLog(clock=clock)
+
+    log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_CONNECTED))
+    clock.now += 600
+    log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_DISCONNECTED))
+    clock.now += 3
+    log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_DISCONNECTED))
+    clock.now += 2
+    log.record(DeviceEvent(ski=GATEWAY_SKI, event_type=DEVICE_EVENT_CONNECTED))
+
+    assert _logged(caplog, logging.WARNING) == ["Gateway …7D9F02 disconnected, reconnecting"]
+    assert _logged(caplog, logging.INFO)[0] == "Gateway …7D9F02 connected"
+    assert _logged(caplog, logging.INFO)[-1] == "Gateway …7D9F02 connected after 5s and 1 failed attempt"
 
 
 async def test_diagnostic_dump_requires_pairing(pairing: PairingService) -> None:

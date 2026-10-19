@@ -16,6 +16,8 @@ import contextlib
 import json
 import logging
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC
 from enum import StrEnum
@@ -41,6 +43,9 @@ _LOGGER = logging.getLogger(__name__)
 
 _SKI_PATTERN = re.compile(r"[0-9A-F]{40}")
 _SKI_SEPARATORS = re.compile(r"[\s:-]")
+
+# Seconds between summaries while the gateway keeps refusing connections.
+CONNECT_SUMMARY_INTERVAL = 300.0
 
 
 class ConnectionState(StrEnum):
@@ -134,6 +139,7 @@ class PairingService:
         self._app_version = app_version
         self._bridge_serial_file = bridge_serial_file
         self._ship_port = ship_port
+        self._connection_log = ConnectionLog()
 
     @property
     def paired_ski(self) -> str | None:
@@ -161,9 +167,11 @@ class PairingService:
                 await asyncio.sleep(self._bridge.backoff.maximum)
                 continue
             await self._register_paired()
+            # A (re)started bridge connects from scratch.
+            self._connection_log.reset()
             try:
                 async for event in self._bridge.device_events():
-                    _log_device_event(event)
+                    self._connection_log.record(event)
                 _LOGGER.warning("Bridge ended the device event stream, reconnecting")
             except grpc.aio.AioRpcError as err:
                 if err.code() not in RETRYABLE_CODES:
@@ -372,13 +380,83 @@ def _gateway_from_paired(device: PairedDevice, host: str) -> Gateway:
     )
 
 
-def _log_device_event(event: DeviceEvent) -> None:
-    ski = short_ski(normalize_ski(event.ski))
-    if event.event_type == DEVICE_EVENT_CONNECTED:
-        _LOGGER.info("Gateway %s connected", ski)
-    elif event.event_type == DEVICE_EVENT_DISCONNECTED:
-        _LOGGER.warning("Gateway %s disconnected", ski)
-    elif event.event_type == DEVICE_EVENT_TRUST_REMOVED:
-        _LOGGER.warning("Gateway %s withdrew its trust (check the myVAILLANT app)", ski)
-    else:
-        _LOGGER.debug("Device event %d for %s", event.event_type, ski)
+class ConnectionLog:
+    """Logs the gateway's connection events without flooding the log.
+
+    While no connection is established, every failed SHIP attempt arrives as a
+    disconnect event; after a start the gateway often refuses attempts for
+    minutes. The first failure is logged, the following ones only at debug
+    level with a summary every few minutes. Losing an established connection
+    is a warning.
+    """
+
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        summary_interval: float = CONNECT_SUMMARY_INTERVAL,
+    ) -> None:
+        self._clock = clock
+        self._summary_interval = summary_interval
+        self.reset()
+
+    def reset(self) -> None:
+        """Start counting again, e.g. after the bridge restarted."""
+        self._connected = False
+        self._failed_attempts = 0
+        self._waiting_since = self._clock()
+        self._last_summary = self._waiting_since
+
+    def record(self, event: DeviceEvent) -> None:
+        ski = short_ski(normalize_ski(event.ski))
+        now = self._clock()
+        if event.event_type == DEVICE_EVENT_CONNECTED:
+            if self._failed_attempts:
+                _LOGGER.info(
+                    "Gateway %s connected after %s and %s",
+                    ski,
+                    _duration(now - self._waiting_since),
+                    _failed_attempts(self._failed_attempts),
+                )
+            else:
+                _LOGGER.info("Gateway %s connected", ski)
+            self._connected = True
+            self._failed_attempts = 0
+        elif event.event_type == DEVICE_EVENT_DISCONNECTED:
+            self._record_disconnect(ski, now)
+        elif event.event_type == DEVICE_EVENT_TRUST_REMOVED:
+            _LOGGER.warning("Gateway %s withdrew its trust (check the myVAILLANT app)", ski)
+        else:
+            _LOGGER.debug("Device event %d for %s", event.event_type, ski)
+
+    def _record_disconnect(self, ski: str, now: float) -> None:
+        if self._connected:
+            _LOGGER.warning("Gateway %s disconnected, reconnecting", ski)
+            self._connected = False
+            self._waiting_since = now
+            self._last_summary = now
+            return
+        self._failed_attempts += 1
+        if self._failed_attempts == 1:
+            _LOGGER.info(
+                "Gateway %s refused the connection attempt; retrying (each attempt is logged at level debug)", ski
+            )
+            return
+        _LOGGER.debug("Connection attempt %d to gateway %s failed", self._failed_attempts, ski)
+        if now - self._last_summary >= self._summary_interval:
+            _LOGGER.info(
+                "Gateway %s not connected yet: %s in %s, still trying",
+                ski,
+                _failed_attempts(self._failed_attempts),
+                _duration(now - self._waiting_since),
+            )
+            self._last_summary = now
+
+
+def _failed_attempts(count: int) -> str:
+    return f"{count} failed attempt" if count == 1 else f"{count} failed attempts"
+
+
+def _duration(seconds: float) -> str:
+    minutes, rest = divmod(round(seconds), 60)
+    return f"{minutes}m{rest:02d}s" if minutes else f"{rest}s"
