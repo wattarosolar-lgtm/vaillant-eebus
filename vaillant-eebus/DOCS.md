@@ -5,7 +5,7 @@ ohne eBUS-Adapter und ohne MQTT.
 
 ## Stand dieser Version
 
-Version 0.5.0 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
+Version 0.5.1 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
 Heizzone einzeln, und kann Solltemperaturen, Betriebsarten und die Einmalladung des Warmwassers ändern.
 Nach der Installation läuft die App im **Demo-Betrieb** und sendet nichts an die Wärmepumpe (siehe unten).
 Sensoren in Home Assistant und die Raumtemperatur aus Home Assistant folgen in den nächsten Versionen.
@@ -64,6 +64,13 @@ Betrieb gerade gilt.
   Anlage den neuen Wert meldet, zeigt die Kachel „Wird gesendet …“ und weiter den bisherigen Wert; danach den
   neuen. Meldet die Anlage den Wert nicht innerhalb von 30 Sekunden, steht das im Protokoll.
 
+Eine Änderung gilt immer für den Betrieb, in dem Sie sie gemacht haben: Wechseln Sie den Betrieb, während die App
+Klicks auf − und + noch sammelt, verwirft sie diese, statt sie im neuen Betrieb zu senden.
+
+Bleibt die Antwort der Wärmepumpe aus (etwa weil die Verbindung beim Senden abreißt), ist unklar, ob der Wert
+angekommen ist. Die App meldet dann „Ergebnis unbekannt“, sendet nicht von selbst erneut und beobachtet weiter, ob
+die Wärmepumpe den Wert meldet. Kommt die Verbindung erst später zurück, trägt sie das Ergebnis nach.
+
 Schutzregeln im Live-Betrieb: Jeder Wert muss im Bereich und auf der Schrittweite der Anlage liegen. Je
 Einstellung sendet die App höchstens alle 5 Sekunden; ein Wert, der schon eingestellt ist, wird nicht noch einmal
 gesendet. Ohne Verbindung zum Gateway sendet die App nichts.
@@ -75,8 +82,10 @@ startet die App sicherheitshalber im Demo-Betrieb.
 
 Die Seite **Protokoll** listet, neueste Einträge zuerst:
 
-- **Schreiben:** jede Änderung mit Ergebnis („Würde senden“, „Gesendet“, „Bestätigt vom Gerät“, „Abgelehnt“ mit
-  Grund, „Nicht bestätigt“, Fehler),
+- **Schreiben:** jede Änderung mit Ergebnis: „Würde senden“ (Demo); „Wird gesendet“ (steht im Protokoll, bevor
+  der Befehl die App verlässt), „Gesendet“, „Bestätigt vom Gerät“; „Abgelehnt“ mit Grund; „Nicht ausgeführt“ (die
+  Wärmepumpe oder die Bridge hat abgelehnt); „Ergebnis unbekannt“; „Nicht bestätigt“; nach einer
+  Verbindungsunterbrechung „Nachträglich bestätigt“ oder „Nicht übernommen“,
 - **Gerät:** Sollwerte, Betriebsarten und Einmalladung, die außerhalb der App geändert wurden, etwa in der
   myVAILLANT-App,
 - **Verbindung:** Kopplung, Verbindungsaufbau und -abbrüche,

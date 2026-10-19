@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v0.5.0)
+# Briefing: Vaillant EEBUS (Stand v0.5.1)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -9,7 +9,8 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 0.5.0, Phasen 1–5 von 7 umgesetzt (Abnahme von Phase 5 an der Anlage offen).
+- **Stand:** Version 0.5.1, Phasen 1–5 von 7 umgesetzt (Abnahme von Phase 5 an der Anlage offen). 0.5.1 enthält
+  die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a).
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -20,7 +21,7 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | 2 | Kopplung, Diagnose-Dump, Einrichtungsassistent | erledigt (0.2.0/0.2.1) |
 | 3 | Lesen: Zustand, API, Übersicht, Live-Updates | erledigt (0.3.0) |
 | 4 | Mehrere Heizzonen in der Bridge, Eco nur wenn angeboten | erledigt (0.4.0), an der Anlage abgenommen |
-| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0), Abnahme an der Anlage offen |
+| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1), Abnahme an der Anlage offen |
 | 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren), HA-Export als Sensoren | offen |
 | 7 | Einstellungs-/Protokollseite fertig, Doku, Release | offen |
 
@@ -138,15 +139,22 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 - Befehle: `SetZoneSetpoint`, `SetZoneMode`, `SetHotWaterSetpoint`, `SetHotWaterMode`, `SetHotWaterBoost`,
   `SetConsumptionLimit`, `SetFailsafeLimit`, `ControlCompressor`. `submit()` hält je Steuerung (Art + Zone) ein
   `asyncio.Lock`.
-- Vorbedingungen: gekoppelt (`NotPairedError`), Zustand lesbar und verbunden (409).
+- Vorbedingungen: gekoppelt (`NotPairedError`), Zustand lesbar und verbunden (409). `expected_mode` (über die API
+  Pflichtfeld `operating_mode`): der Betrieb, den der Nutzer beim Ändern sah; weicht er ab → 409, nichts gesendet. Die
+  Oberfläche verwirft gesammelte Klicks bei einem Moduswechsel.
 - Prüfung gegen die Gerätewerte **in beiden Modi**: Zone bekannt (404), schreibbar (409), Bereich und Schrittweite
   (422; Schrittweite ≤ 0 → 409, fail closed), Betriebsart angeboten (422).
 - **Demo:** nichts senden. Zonen/Warmwasser → `WriteResult(sent=False, would_send=…)` und „Würde senden: …“ im
   Protokoll; Leistungsdeckel/Failsafe/Verdichter → „Im Demo-Betrieb gesperrt“.
 - **Live:** gleicher Wert wie am Gerät oder wie ein noch offener Schreibvorgang → nicht senden; höchstens ein
-  Befehl je Steuerung alle 5 s (429, `Retry-After`); danach `refresh_now()`. Offene Schreibvorgänge (`pending`)
-  werden bestätigt, sobald der Snapshot den Wert zeigt, sonst nach 30 s „Nicht bestätigt“. `DEADLINE_EXCEEDED`
-  → „Ergebnis unbekannt“, kein automatischer Wiederholversuch.
+  Befehl je Steuerung alle 5 s (429, `Retry-After`). „Wird gesendet“ steht per `LogStore.record()` in der Datenbank,
+  bevor die Bridge den Befehl sieht. Fehler: `INVALID_ARGUMENT`, `FAILED_PRECONDITION`, `NOT_FOUND`, `OUT_OF_RANGE`,
+  `UNIMPLEMENTED`, `PERMISSION_DENIED`, `UNAUTHENTICATED` → „Nicht ausgeführt“ (sicher nicht angekommen); jeder
+  andere Code (Bridge meldet z. B. `INTERNAL`, wenn die Antwort des Geräts nach 10 s ausbleibt) → „Ergebnis
+  unbekannt“, `WriteOutcomeUnknown` (HTTP 504), der Wert wird wie ein gesendeter weiter verfolgt. Kein automatischer
+  Wiederholversuch. Offene Schreibvorgänge (`pending`) werden bestätigt, sobald der Snapshot den Wert zeigt, sonst
+  nach 30 s „Nicht bestätigt“; ist das Gerät dann nicht erreichbar, klärt der erste Zustand nach der Neuverbindung
+  das Ergebnis („Nachträglich bestätigt“ / „Nicht übernommen“).
 - `run()` protokolliert den Modus beim Start und erkennt Änderungen außerhalb der App (Kategorie `device`).
 - Moduswechsel: Live nur mit `confirm: true` (400 sonst); gespeichert in `settings.json`; Wechsel protokolliert.
 - Ein Strukturtest (AST) stellt sicher, dass nur `write_gate.py` die `WRITE_METHODS` des Bridge-Clients aufruft.
@@ -173,7 +181,7 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 
 ## 7. Tests
 
-- Python: 105 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+- Python: 113 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
   Kein Test spricht mit echter Hardware.
@@ -204,7 +212,11 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
 2. `GetRoomHeating` ohne Zone liefert bewusst die erste Zone (Abweichung von der ursprünglichen Planung, die dort
    bei mehreren Zonen einen Fehler vorsah). Die App nutzt nur `room_heating_zones`.
 3. Leistungsdeckel, Failsafe und Verdichter-Flexibilität sind nur über die API erreichbar und **nicht an der Anlage
-   getestet**. Ein niedriger Failsafe-Wert würde die Wärmepumpe nach jedem Neustart der App bis zu 2 h drosseln.
+   getestet**. Ein niedriger Failsafe-Wert würde die Wärmepumpe nach jedem Neustart der App bis zu 2 h drosseln. Für
+   Leistungsdeckel und Failsafe wartet die Bridge nicht auf eine Quittung des Geräts („Gesendet“ = abgeschickt).
+10. Der gRPC-Port der Bridge (127.0.0.1:50471) hat keine Anmeldung. Andere Prozesse im Host-Netzwerk (unter HAOS auch
+    HA Core) könnten an der App und ihrem Demo-Betrieb vorbei schreiben. Absicherung (Token) ist für eine spätere
+    Phase vorgesehen.
 4. Raumtemperatur aus Home Assistant und Export nach HA kommen in Phase 6.
 5. Im Fork gibt es einen Alt-Pfad in `hvac_service.go` für Quellen ohne Zonenliste (per Typ-Zusicherung). Er existiert
    für bestehende Test-Doubles; im Produktivbetrieb liefern alle Use Cases Zonenlisten.

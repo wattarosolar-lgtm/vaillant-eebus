@@ -48,13 +48,15 @@ Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
 | GET/POST | `api/mode` | Demo/Live lesen und setzen (Live nur mit `"confirm": true`) |
 | POST | `api/zones/{zone_id}/setpoint`, `api/zones/{zone_id}/mode` | Solltemperatur (`value`), Betriebsart (`mode`) einer Zone |
 | POST | `api/dhw/setpoint`, `api/dhw/mode`, `api/dhw/boost` | Warmwasser: `value`, `mode`, `active` |
-| POST | `api/lpc`, `api/lpc/failsafe` | Leistungsdeckel und Failsafe-Grenze (nur API, im Demo-Betrieb gesperrt) |
+| POST | `api/lpc`, `api/lpc/failsafe` | Leistungsdeckel und Failsafe-Grenze (nur API, im Demo-Betrieb gesperrt; die Bridge wartet hier nicht auf eine Quittung des Geräts, „Gesendet“ heißt nur abgeschickt) |
 | POST | `api/ohpcf` | Verdichter-Flexibilität (`schedule`, `pause`, `resume`, `abort`; nur API, im Demo gesperrt) |
 | GET | `api/log` | Protokoll, seitenweise (`before`, `limit`) und nach `category` gefiltert |
 
-Antworten auf Schreibbefehle sagen immer, ob gesendet wurde: `{"sent": false, "mode": "demo", "message": "Würde
-senden: …", "would_send": {...}}` bzw. `{"sent": true, "mode": "live", "message": "Gesendet: …"}`. Abgelehnte
-Befehle antworten mit 4xx und einer deutschen Begründung in `detail`.
+Jeder Schreibbefehl nennt in `operating_mode` (`demo` oder `live`) den Betrieb, den der Nutzer beim Ändern sah;
+stimmt er nicht mehr, wird nichts gesendet (409). Antworten sagen immer, ob gesendet wurde: `{"sent": false,
+"mode": "demo", "message": "Würde senden: …", "would_send": {...}}` bzw. `{"sent": true, "mode": "live", "message":
+"Gesendet: …"}`. Abgelehnte Befehle antworten mit 4xx und einer deutschen Begründung in `detail`; ist unklar, ob
+ein gesendeter Wert angekommen ist, mit 504 (die App beobachtet den Wert dann weiter).
 
 ## Entwicklung
 
