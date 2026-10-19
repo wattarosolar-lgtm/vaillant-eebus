@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import grpc
 import httpx
 import pytest
 
 from tests.fake_bridge import GATEWAY_SKI, FakeBridge
-from vaillant_eebus.api import INGRESS_CLIENT, create_app
+from vaillant_eebus.api import INGRESS_CLIENT, ApiState, create_app, state_events
 from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.log_store import LogStore
-from vaillant_eebus.pairing import PairingService
-from vaillant_eebus.settings import SettingsStore
-from vaillant_eebus.state import StateService
+from vaillant_eebus.pairing import ConnectionState, PairingService
+from vaillant_eebus.settings import OperatingMode, SettingsStore
+from vaillant_eebus.state import HeatPumpState, StateService
 from vaillant_eebus.write_gate import WriteGate
 
 
@@ -275,3 +278,33 @@ async def test_protocol_is_paged_and_filtered(connected_client: httpx.AsyncClien
     assert writes["more"] is True
     assert [entry["message"] for entry in older["entries"]] == ["Würde senden: Zone 2: Solltemperatur 22,5 °C"]
     assert [entry["message"] for entry in connection["entries"]] == ["Gateway …7D9F02 gekoppelt."]
+
+
+class _OpenClient:
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+async def test_event_stream_survives_a_failing_bridge_call(state: StateService) -> None:
+    calls = 0
+
+    async def flaky_state(heat_pump: HeatPumpState | None) -> ApiState:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise grpc.aio.AioRpcError(grpc.StatusCode.INTERNAL, grpc.aio.Metadata(), grpc.aio.Metadata(), "broken")
+        return ApiState(connection=ConnectionState.CONNECTED, mode=OperatingMode.DEMO, pending=[], heat_pump=heat_pump)
+
+    events = state_events(_OpenClient(), state, flaky_state, keepalive=5)
+    try:
+        first = await anext(events)
+        second = anext(events)
+        state.republish()
+        async with asyncio.timeout(2):
+            message = await second
+    finally:
+        await events.aclose()
+
+    assert first == ": bridge error\n\n"
+    assert message.startswith("event: state\ndata: ")
+    assert json.loads(message.split("data: ", 1)[1])["connection"] == "connected"

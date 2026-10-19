@@ -56,6 +56,12 @@ def test_config_defaults_bind_ingress_only() -> None:
     assert config.ship_port is None
 
 
+@pytest.mark.parametrize("value", ["eighty", "0", "70000", "-1"])
+def test_invalid_ports_name_the_variable(value: str) -> None:
+    with pytest.raises(ValueError, match="SHIP_PORT must be a port number"):
+        BackendConfig.from_env({"SHIP_PORT": value})
+
+
 async def test_run_backend_serves_the_api_and_logs_the_bridge_ski(
     fake_bridge: FakeBridge, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

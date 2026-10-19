@@ -9,10 +9,10 @@ import asyncio
 import json
 import logging
 import math
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
 import grpc
 from fastapi import FastAPI, Query, Request, Response
@@ -139,6 +139,43 @@ class ModeStatus:
     mode: OperatingMode
 
 
+class _Client(Protocol):
+    async def is_disconnected(self) -> bool: ...
+
+
+async def state_events(
+    client: _Client,
+    state: StateService,
+    api_state: Callable[[HeatPumpState | None], Awaitable[ApiState]],
+    *,
+    keepalive: float = SSE_KEEPALIVE,
+) -> AsyncGenerator[str]:
+    """Server-sent events: the full state on connect and after every change.
+
+    A failing bridge call skips one message instead of ending the stream; the
+    next change or keep-alive follows as usual.
+    """
+    async with state.listen() as updates:
+        current = state.current
+        while True:
+            try:
+                payload = json.dumps(jsonable_encoder(await api_state(current)), ensure_ascii=False)
+            except grpc.aio.AioRpcError as err:
+                _LOGGER.warning("Event stream: bridge call failed (%s), sending the next update", err.code().name)
+                yield ": bridge error\n\n"
+            else:
+                yield f"event: state\ndata: {payload}\n\n"
+            while True:
+                if await client.is_disconnected():
+                    return
+                try:
+                    async with asyncio.timeout(keepalive):
+                        current = await updates.get()
+                    break
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+
+
 def create_app(
     pairing: PairingService,
     state: StateService,
@@ -173,26 +210,8 @@ def create_app(
 
     @app.get("/api/events")
     async def get_events(request: Request) -> StreamingResponse:
-        """Server-sent events: the full state on connect and after every change."""
-
-        async def stream() -> AsyncIterator[str]:
-            async with state.listen() as updates:
-                current = state.current
-                while True:
-                    payload = json.dumps(jsonable_encoder(await api_state(current)), ensure_ascii=False)
-                    yield f"event: state\ndata: {payload}\n\n"
-                    while True:
-                        if await request.is_disconnected():
-                            return
-                        try:
-                            async with asyncio.timeout(SSE_KEEPALIVE):
-                                current = await updates.get()
-                            break
-                        except TimeoutError:
-                            yield ": keep-alive\n\n"
-
         return StreamingResponse(
-            stream(),
+            state_events(request, state, api_state),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

@@ -55,12 +55,11 @@ class BackendConfig:
         static_dir = env.get("STATIC_DIR")
         trusted = env.get("TRUSTED_CLIENTS")
         serial_file = env.get("BRIDGE_SERIAL_FILE")
-        ship_port = env.get("SHIP_PORT")
         return cls(
             bridge_address=env.get("BRIDGE_ADDRESS", defaults.bridge_address),
             data_dir=Path(env.get("DATA_DIR", str(defaults.data_dir))),
             http_host=env.get("HTTP_HOST", defaults.http_host),
-            http_port=int(env.get("HTTP_PORT", str(defaults.http_port))),
+            http_port=_port(env, "HTTP_PORT") or defaults.http_port,
             static_dir=Path(static_dir) if static_dir else None,
             trusted_clients=(
                 frozenset(client.strip() for client in trusted.split(",") if client.strip())
@@ -70,8 +69,18 @@ class BackendConfig:
             app_version=env.get("APP_VERSION", defaults.app_version),
             log_level=env.get("LOG_LEVEL", defaults.log_level),
             bridge_serial_file=Path(serial_file) if serial_file else None,
-            ship_port=int(ship_port) if ship_port else None,
+            ship_port=_port(env, "SHIP_PORT"),
         )
+
+
+def _port(env: Mapping[str, str], name: str) -> int | None:
+    """The port in env[name], None if unset; a clear error for anything else."""
+    value = env.get(name)
+    if not value:
+        return None
+    if not value.isdigit() or not 0 < int(value) < 65536:
+        raise ValueError(f"{name} must be a port number between 1 and 65535, got {value!r}")
+    return int(value)
 
 
 def configure_logging(level_name: str) -> None:

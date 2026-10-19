@@ -225,6 +225,8 @@ def _zone(zone_id: str, position: int, room: RoomHeatingState, captured_at: date
     return Zone(
         id=zone_id,
         # Zones without a name of their own are numbered in the bridge's order.
+        # The bridge lists only zones it can read right now, so such a number is
+        # stable only while every zone is readable (the real gateway names its zones).
         label=room.zone_label if room.HasField("zone_label") and room.zone_label else f"Zone {position}",
         room_temperature=temperature,
         setpoint=setpoint,
