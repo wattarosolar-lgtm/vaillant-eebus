@@ -342,24 +342,6 @@
     color: var(--text-secondary);
   }
 
-  input[type='text'],
-  select {
-    min-height: 44px;
-    padding: 0 10px;
-    border: 1px solid var(--control-border);
-    border-radius: var(--radius-control);
-    background: var(--surface);
-    color: var(--text);
-    font: inherit;
-    font-size: 15px;
-  }
-
-  input[type='text']:focus-visible,
-  select:focus-visible {
-    outline: 3px solid var(--info-text);
-    outline-offset: 1px;
-  }
-
   .picker-width {
     max-width: 560px;
   }

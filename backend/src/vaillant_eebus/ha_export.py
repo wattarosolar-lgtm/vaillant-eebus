@@ -24,7 +24,7 @@ from vaillant_eebus.energy import EnergyMeter
 from vaillant_eebus.ha_client import HomeAssistantClient, HomeAssistantListener, HomeAssistantUnavailable
 from vaillant_eebus.ha_import import HomeAssistantImport
 from vaillant_eebus.settings import ExportGroup, SettingsStore
-from vaillant_eebus.state import HeatPumpState, Reading, StateService
+from vaillant_eebus.state import MODE_NAMES, HeatPumpState, Reading, StateService
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +34,6 @@ MIN_INTERVAL = 10.0
 ENERGY_MIN_INTERVAL = 60.0
 UNAVAILABLE = "unavailable"
 
-_MODE_NAMES = {"off": "Aus", "auto": "Auto", "on": "Ein", "eco": "Eco"}
 _OPERATING_STATES = {
     "normalOperation": "Normalbetrieb",
     "standby": "Bereitschaft",
@@ -255,7 +254,7 @@ class HomeAssistantExport(HomeAssistantListener):
                 )
             if zone.mode is not None:
                 sensors.append(
-                    _text(f"{slug}_mode", f"{zone.label} Betriebsart", _MODE_NAMES.get(zone.mode, zone.mode), "mdi:cog")
+                    _text(f"{slug}_mode", f"{zone.label} Betriebsart", MODE_NAMES.get(zone.mode, zone.mode), "mdi:cog")
                 )
         return sensors
 
@@ -326,7 +325,7 @@ def _hot_water(heat_pump: HeatPumpState) -> list[Sensor]:
             )
         )
     if water.mode is not None:
-        sensors.append(_text("dhw_mode", "Warmwasser Betriebsart", _MODE_NAMES.get(water.mode, water.mode), "mdi:cog"))
+        sensors.append(_text("dhw_mode", "Warmwasser Betriebsart", MODE_NAMES.get(water.mode, water.mode), "mdi:cog"))
     if water.boost is not None:
         sensors.append(
             _binary(

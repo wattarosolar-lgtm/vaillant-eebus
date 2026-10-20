@@ -115,7 +115,7 @@ const DEVICE_TYPES: Record<string, string> = {
   Generic: 'EEBUS-Gerät',
 };
 
-export function deviceTypeName(deviceType: string): string {
+function deviceTypeName(deviceType: string): string {
   return DEVICE_TYPES[deviceType] ?? deviceType;
 }
 
@@ -130,7 +130,7 @@ const CATEGORIES: Record<number, string> = {
   7: 'Messgerät',
 };
 
-export function categoryNames(categories: number[]): string {
+function categoryNames(categories: number[]): string {
   return categories.map((category) => CATEGORIES[category] ?? `Kategorie ${category}`).join(', ');
 }
 

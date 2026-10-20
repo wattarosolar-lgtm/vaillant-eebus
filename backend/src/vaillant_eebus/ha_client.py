@@ -49,7 +49,6 @@ class EntityState:
     entity_id: str
     state: str
     attributes: Mapping[str, Any]
-    last_updated: datetime | None
     # Last time the integration reported the value, also when it did not change (HA 2024.3+).
     last_reported: datetime | None
 
@@ -62,7 +61,6 @@ class EntityState:
             entity_id=data["entity_id"],
             state=str(data.get("state", "")),
             attributes=attributes if isinstance(attributes, dict) else {},
-            last_updated=_time(data.get("last_updated")),
             last_reported=_time(data.get("last_reported")) or _time(data.get("last_updated")),
         )
 

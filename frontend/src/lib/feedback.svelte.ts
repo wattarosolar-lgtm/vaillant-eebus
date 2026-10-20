@@ -6,7 +6,7 @@ import { ApiError } from './api';
 import type { OperatingMode, WriteResult } from './types';
 
 /** How long a demo preview stays visible. */
-export const PREVIEW_MS = 5000;
+const PREVIEW_MS = 5000;
 /** Longest a sent value is shown before the gate's pending entry or the device's report takes over. */
 const SENDING_MS = 5000;
 

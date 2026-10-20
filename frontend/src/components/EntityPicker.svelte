@@ -109,21 +109,6 @@
     color: var(--text-secondary);
   }
 
-  input {
-    min-height: 44px;
-    padding: 0 12px;
-    border: 1px solid var(--control-border);
-    border-radius: 10px;
-    background: var(--surface);
-    color: var(--text);
-    font: inherit;
-  }
-
-  input:focus-visible {
-    outline: 3px solid var(--info-text);
-    outline-offset: 1px;
-  }
-
   .choices {
     margin: 0;
     padding: 0;

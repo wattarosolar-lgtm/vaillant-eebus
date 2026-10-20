@@ -171,7 +171,7 @@
   </p>
 
   <div class="tools">
-    <div class="filters" role="group" aria-label="Einträge filtern">
+    <div class="segments filters" role="group" aria-label="Einträge filtern">
       {#each FILTERS as option (option.key)}
         <button
           type="button"
@@ -243,34 +243,15 @@
   }
 
   .filters {
-    display: flex;
     flex-wrap: wrap;
-    gap: 4px;
-    padding: 4px;
-    background: var(--bg);
-    border-radius: 12px;
   }
 
   .filters button {
-    min-height: 40px;
     padding: 0 14px;
-    border: 0;
-    border-radius: 9px;
-    background: transparent;
+  }
+
+  .filters button:not(.active) {
     color: var(--text-secondary);
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-  }
-
-  .filters button.active {
-    background: var(--text);
-    color: #ffffff;
-  }
-
-  .filters button:focus-visible {
-    outline: 3px solid var(--info-text);
-    outline-offset: 2px;
   }
 
   .jump {
@@ -280,22 +261,6 @@
     gap: 8px;
     font-size: 14px;
     color: var(--text-secondary);
-  }
-
-  .jump input {
-    min-height: 44px;
-    padding: 0 10px;
-    border: 1px solid var(--control-border);
-    border-radius: var(--radius-control);
-    background: var(--surface);
-    color: var(--text);
-    font: inherit;
-    font-size: 15px;
-  }
-
-  .jump input:focus-visible {
-    outline: 3px solid var(--info-text);
-    outline-offset: 2px;
   }
 
   .day {

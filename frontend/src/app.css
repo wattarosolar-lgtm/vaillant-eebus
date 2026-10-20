@@ -122,6 +122,59 @@ button {
   outline-offset: 2px;
 }
 
+/* Text fields and drop-downs, everywhere the same. */
+input[type='text'],
+input[type='search'],
+input[type='date'],
+select {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+}
+
+input[type='text']:focus-visible,
+input[type='search']:focus-visible,
+input[type='date']:focus-visible,
+select:focus-visible {
+  outline: 3px solid var(--info-text);
+  outline-offset: 1px;
+}
+
+/* Segment buttons (spec 8.4): the active one dark with white text, at least 44 px high. */
+.segments {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--bg);
+  border-radius: 12px;
+}
+
+.segments > button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.segments > button.active {
+  background: var(--text);
+  color: #ffffff;
+}
+
+.segments > button:focus-visible {
+  outline: 3px solid var(--info-text);
+  outline-offset: 2px;
+}
+
 .banner {
   padding: 14px 20px;
   border-radius: 12px;

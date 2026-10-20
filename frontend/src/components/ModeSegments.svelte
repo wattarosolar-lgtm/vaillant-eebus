@@ -93,29 +93,8 @@
     color: var(--text-secondary);
   }
 
-  .segments {
-    display: flex;
-    gap: 4px;
-    padding: 4px;
-    background: var(--bg);
-    border-radius: 12px;
-  }
-
   .segment {
     flex: 1 1 0;
-    min-height: 44px;
-    border: 0;
-    border-radius: 9px;
-    background: transparent;
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--text);
-    cursor: pointer;
-  }
-
-  .segment.active {
-    background: var(--text);
-    color: #ffffff;
   }
 
   /* Sent, not reported by the device yet. */
@@ -134,11 +113,6 @@
 
   .segment:disabled:not(.active) {
     color: var(--text-hint);
-  }
-
-  .segment:focus-visible {
-    outline: 3px solid var(--info-text);
-    outline-offset: 2px;
   }
 
   .muted {

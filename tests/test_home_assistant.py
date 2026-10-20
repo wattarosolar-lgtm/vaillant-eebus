@@ -51,7 +51,6 @@ def entity(entity_id: str, value: str, unit: str | None = "°C", *, age: timedel
         entity_id=entity_id,
         state=value,
         attributes={"unit_of_measurement": unit} if unit else {},
-        last_updated=NOW - age,
         last_reported=NOW - age,
     )
 

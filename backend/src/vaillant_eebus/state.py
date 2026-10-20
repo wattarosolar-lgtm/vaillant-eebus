@@ -43,6 +43,9 @@ from vaillant_eebus.pairing import PairingService
 
 _LOGGER = logging.getLogger(__name__)
 
+# German names of the operation modes, as in the UI (protocol, sensors in Home Assistant).
+MODE_NAMES = {"off": "Aus", "auto": "Auto", "on": "Ein", "eco": "Eco"}
+
 # Measurement types of the bridge's catalog (canonical units: W, kWh, A, V, Hz, degC).
 MEASUREMENT_TYPES = frozenset(
     {

@@ -186,10 +186,6 @@ export async function getPowerHistory(): Promise<PowerHistory> {
   return (await send('api/history/power')).json() as Promise<PowerHistory>;
 }
 
-export async function getState(): Promise<ApiState> {
-  return (await send('api/state')).json() as Promise<ApiState>;
-}
-
 /**
  * Follows the backend's server-sent events. The browser reconnects by itself
  * after an interruption; onOpenChange reports whether the stream is up.

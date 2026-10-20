@@ -35,7 +35,7 @@ from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.pairing import NotPairedError, PairingService
 from vaillant_eebus.settings import OperatingMode, SettingsStore
-from vaillant_eebus.state import HeatPumpState, HotWater, Setpoint, StateService, Zone
+from vaillant_eebus.state import MODE_NAMES, HeatPumpState, HotWater, Setpoint, StateService, Zone
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +60,6 @@ _NOT_EXECUTED = frozenset(
     }
 )
 
-_MODE_NAMES = {"off": "Aus", "auto": "Auto", "on": "Ein", "eco": "Eco"}
 _COMPRESSOR_ACTIONS = {"schedule": "einplanen", "pause": "pausieren", "resume": "fortsetzen", "abort": "abbrechen"}
 
 type JsonScalar = str | bool | int | float | None
@@ -732,7 +731,7 @@ def _duration(seconds: int) -> str:
 
 
 def _mode_name(mode: str) -> str:
-    return _MODE_NAMES.get(mode, mode)
+    return MODE_NAMES.get(mode, mode)
 
 
 def _value_part(observed: _Observed) -> str:
