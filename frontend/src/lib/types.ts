@@ -36,6 +36,7 @@ export interface PairingStatus {
   state: ConnectionState;
   paired: Gateway | null;
   discovered: Gateway[];
+  app_version: string;
 }
 
 export interface Reading {

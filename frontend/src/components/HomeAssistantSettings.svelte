@@ -3,10 +3,18 @@
 
   import { ApiError, getSettings, saveSettings } from '../lib/api';
   import { EXPORT_GROUPS } from '../lib/texts';
-  import type { AppSettings, EntityChoice, ExportGroup, Room } from '../lib/types';
+  import type { AppSettings, EntityChoice, ExportGroup, HomeAssistantState, Room } from '../lib/types';
   import EntityPicker from './EntityPicker.svelte';
+  import StatusPill from './StatusPill.svelte';
 
-  let { zones }: { zones: { id: string; label: string }[] } = $props();
+  let {
+    zones,
+    homeAssistant,
+  }: {
+    zones: { id: string; label: string }[];
+    /** Live state of the connection; null until the first update. */
+    homeAssistant: HomeAssistantState | null;
+  } = $props();
 
   /** Heat sensors that are added up, e.g. heating and hot water (backend limit). */
   const HEAT_SENSORS_MAX = 4;
@@ -28,6 +36,17 @@
         JSON.stringify([saved.rooms, saved.heat_energy_entities, [...saved.export].sort()]),
   );
   const available = $derived(saved?.home_assistant_available ?? false);
+  const connection = $derived.by((): { label: string; tone: 'ok' | 'error' | 'neutral' } => {
+    if (!available) {
+      return { label: 'Nicht verfügbar', tone: 'neutral' };
+    }
+    if (homeAssistant === null) {
+      return { label: 'Wird geprüft …', tone: 'neutral' };
+    }
+    return homeAssistant.connected
+      ? { label: 'Verbunden', tone: 'ok' }
+      : { label: 'Nicht erreichbar', tone: 'error' };
+  });
   const roomsValid = $derived(rooms.every((room) => room.name.trim().length > 0));
 
   function adopt(settings: AppSettings): void {
@@ -111,16 +130,25 @@
   {:else if saved === null}
     <p class="secondary" role="status">Einstellungen werden geladen …</p>
   {:else}
+    <div class="section-head">
+      <h2>Home Assistant</h2>
+      <StatusPill label={connection.label} tone={connection.tone} />
+    </div>
     {#if !available}
       <p class="banner info" role="status">
         Home Assistant ist für diese App nicht erreichbar. Räume und Export lassen sich nur einrichten, wenn die App in
         Home Assistant läuft.
       </p>
+    {:else if homeAssistant !== null && !homeAssistant.connected}
+      <p class="banner warn" role="status">
+        Home Assistant antwortet gerade nicht. Die App verbindet sich von selbst neu; bis dahin fehlen Raumtemperaturen
+        und Wärme heute, und der Export pausiert.
+      </p>
     {/if}
 
     <!-- Full width: the room list can grow long and must not stretch a row of other cards. -->
     <section class="card" aria-labelledby="rooms-title">
-      <h2 id="rooms-title">Räume aus Home Assistant</h2>
+      <h3 id="rooms-title">Räume</h3>
       <p class="secondary">
         Wählen Sie Temperatursensoren Ihrer Räume und ordnen Sie sie einer Heizzone zu. Das Rundinstrument jeder Zone
         zeigt den Mittelwert ihrer Räume. Werte, die fehlen oder älter als 30 Minuten sind, zählen nicht mit.
@@ -173,7 +201,7 @@
 
     <div class="pair">
       <section class="card" aria-labelledby="heat-title">
-        <h2 id="heat-title">Wärme heute</h2>
+        <h3 id="heat-title">Wärme heute</h3>
         <p class="secondary">
           Sensoren mit der heute erzeugten Wärme, die jeden Tag bei 0 beginnen – etwa „Heizung“ und „Warmwasser“ der
           myVAILLANT-Integration oder ein Verbrauchszähler-Helfer mit täglichem Zyklus. Die App addiert sie; zusammen
@@ -208,7 +236,7 @@
       </section>
 
       <section class="card" aria-labelledby="export-title">
-        <h2 id="export-title">Export nach Home Assistant</h2>
+        <h3 id="export-title">Export nach Home Assistant</h3>
         <p class="secondary">
           Die App meldet diese Werte als Sensoren <code>sensor.vaillant_eebus_…</code> an Home Assistant, etwa für
           Automationen und das Energie-Dashboard. Nach einem Neustart von Home Assistant meldet sie sie neu.
@@ -262,6 +290,24 @@
     display: flex;
     flex-direction: column;
     gap: 24px;
+  }
+
+  .section-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+  }
+
+  .section-head h2 {
+    font-size: 20px;
+    font-weight: 600;
+  }
+
+  .card h3 {
+    font-size: 18px;
+    font-weight: 600;
   }
 
   .rooms {

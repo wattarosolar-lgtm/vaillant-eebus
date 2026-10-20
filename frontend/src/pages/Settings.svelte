@@ -2,24 +2,24 @@
   import DumpButton from '../components/DumpButton.svelte';
   import HomeAssistantSettings from '../components/HomeAssistantSettings.svelte';
   import StatusPill from '../components/StatusPill.svelte';
-  import { gatewayName, groupedSki, skiEnding } from '../lib/texts';
-  import type { PairingStatus } from '../lib/types';
+  import { PROJECT_LINKS, gatewayName, groupedSki, skiEnding } from '../lib/texts';
+  import type { HomeAssistantState, PairingStatus } from '../lib/types';
 
   let {
     status,
     zones,
+    homeAssistant,
     onRepair,
   }: {
     status: PairingStatus;
     /** Zones the heat pump reports, for assigning rooms. */
     zones: { id: string; label: string }[];
+    /** Live state of the connection to Home Assistant; null until the first update. */
+    homeAssistant: HomeAssistantState | null;
     onRepair: () => void;
   } = $props();
 
   const gateway = $derived(status.paired);
-  const bridgeText = $derived(
-    status.bridge.reachable ? `läuft (Version ${status.bridge.build || 'unbekannt'})` : 'nicht erreichbar',
-  );
 </script>
 
 <div class="page">
@@ -44,7 +44,7 @@
           <div><dt>SKI des Gateways</dt><dd>endet auf {skiEnding(gateway.ski)}</dd></div>
         {/if}
         <div><dt>SKI dieser App</dt><dd><code>{status.bridge.ski ? groupedSki(status.bridge.ski) : '—'}</code></dd></div>
-        <div><dt>EEBUS-Bridge</dt><dd>{bridgeText}</dd></div>
+        <div><dt>EEBUS-Bridge</dt><dd>{status.bridge.reachable ? 'läuft' : 'nicht erreichbar'}</dd></div>
       </dl>
       <div>
         <button type="button" class="button" onclick={onRepair}>Anderes Gateway koppeln</button>
@@ -63,9 +63,28 @@
       {/if}
       <DumpButton enabled={status.state === 'connected'} />
     </section>
+
+    <section class="card" aria-labelledby="about-title">
+      <h2 id="about-title">Über die App</h2>
+      <dl class="facts">
+        <div><dt>Version der App</dt><dd>{status.app_version}</dd></div>
+        <div><dt>Version der EEBUS-Bridge</dt><dd>{status.bridge.build || '—'}</dd></div>
+      </dl>
+      <ul class="links">
+        {#each PROJECT_LINKS as link (link.href)}
+          <li><a href={link.href} target="_blank" rel="noopener noreferrer">{link.label}</a></li>
+        {/each}
+      </ul>
+      <p class="hint">
+        Die App steht unter der MIT-Lizenz. Sie enthält die EEBUS-Bridge aus
+        <a href="https://github.com/volschin/eebus-ha-bridge" target="_blank" rel="noopener noreferrer"
+          >volschin/eebus-ha-bridge</a
+        > (MIT-Lizenz, Copyright © 2024 volschin).
+      </p>
+    </section>
   </div>
 
-  <HomeAssistantSettings {zones} />
+  <HomeAssistantSettings {zones} {homeAssistant} />
 </div>
 
 <style>
@@ -93,6 +112,32 @@
   code {
     font-family: inherit;
     letter-spacing: 0.02em;
+  }
+
+  .links {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    font-size: 15px;
+  }
+
+  a {
+    color: var(--info-text);
+  }
+
+  a:focus-visible {
+    outline: 3px solid var(--info-text);
+    outline-offset: 2px;
+  }
+
+  .links a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-weight: 500;
   }
 
   @media (max-width: 420px) {

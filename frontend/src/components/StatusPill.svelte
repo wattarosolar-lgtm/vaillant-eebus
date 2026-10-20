@@ -1,10 +1,15 @@
 <script lang="ts">
-  import { STATE_LABELS } from '../lib/texts';
+  import { STATE_LABELS, type Tone } from '../lib/texts';
   import type { ConnectionState } from '../lib/types';
 
-  let { connection }: { connection: ConnectionState } = $props();
+  // Either the gateway connection, or any other status with its own label and tone.
+  let {
+    connection,
+    label,
+    tone = 'neutral',
+  }: { connection?: ConnectionState; label?: string; tone?: Tone } = $props();
 
-  const entry = $derived(STATE_LABELS[connection]);
+  const entry = $derived(connection ? STATE_LABELS[connection] : { label: label ?? '', tone });
 </script>
 
 <span class="pill {entry.tone}">

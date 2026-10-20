@@ -86,6 +86,7 @@ async def test_get_pairing_returns_status(client: httpx.AsyncClient) -> None:
     assert body["bridge"]["reachable"] is True
     assert body["paired"] is None
     assert body["discovered"][0]["ski"] == GATEWAY_SKI
+    assert body["app_version"] == "0.2.0-test"
 
 
 async def test_register_pairs_the_gateway(client: httpx.AsyncClient, fake_bridge: FakeBridge) -> None:

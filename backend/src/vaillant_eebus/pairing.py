@@ -95,6 +95,8 @@ class PairingStatus:
     state: ConnectionState
     paired: Gateway | None
     discovered: list[Gateway]
+    # This app's version, shown on the settings page.
+    app_version: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +197,7 @@ class PairingService:
                 state=ConnectionState.SHIP_PORT_IN_USE if in_use else ConnectionState.BRIDGE_UNAVAILABLE,
                 paired=Gateway(ski=ski) if ski else None,
                 discovered=[],
+                app_version=self._app_version,
             )
         if not self._is_own_bridge(info):
             # Never show the foreign bridge's SKI: the user would trust it in myVAILLANT.
@@ -203,12 +206,19 @@ class PairingService:
                 state=ConnectionState.FOREIGN_BRIDGE,
                 paired=Gateway(ski=ski) if ski else None,
                 discovered=[],
+                app_version=self._app_version,
             )
 
         bridge = BridgeInfo(reachable=True, ski=info.local_ski, build=info.bridge_build_version)
         discovered = [_gateway_from_discovered(device) for device in await self._bridge.list_discovered()]
         if ski is None:
-            return PairingStatus(bridge=bridge, state=ConnectionState.NOT_PAIRED, paired=None, discovered=discovered)
+            return PairingStatus(
+                bridge=bridge,
+                state=ConnectionState.NOT_PAIRED,
+                paired=None,
+                discovered=discovered,
+                app_version=self._app_version,
+            )
         paired = await self._paired_gateway(ski, discovered)
         return PairingStatus(
             bridge=bridge,
@@ -217,6 +227,7 @@ class PairingService:
             # Gateways often announce no brand/model over mDNS; the paired one
             # is completed from its device classification.
             discovered=[_with_details_of(gateway, paired) if gateway.ski == ski else gateway for gateway in discovered],
+            app_version=self._app_version,
         )
 
     async def pair(self, ski: str) -> PairingStatus:

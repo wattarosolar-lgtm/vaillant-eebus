@@ -144,6 +144,15 @@ export function gatewayDetails(gateway: Gateway): string {
     .join(' · ');
 }
 
+const PROJECT_URL = 'https://github.com/wattarosolar-lgtm/vaillant-eebus';
+
+/** Links on the settings page ("Über die App"). */
+export const PROJECT_LINKS: { label: string; href: string }[] = [
+  { label: 'Anleitung', href: `${PROJECT_URL}/blob/main/vaillant-eebus/DOCS.md` },
+  { label: 'Änderungen', href: `${PROJECT_URL}/blob/main/vaillant-eebus/CHANGELOG.md` },
+  { label: 'Fehler melden', href: `${PROJECT_URL}/issues` },
+];
+
 /** SKI in groups of four characters, easier to compare by eye. */
 export function groupedSki(ski: string): string {
   return ski.match(/.{1,4}/g)?.join(' ') ?? ski;
