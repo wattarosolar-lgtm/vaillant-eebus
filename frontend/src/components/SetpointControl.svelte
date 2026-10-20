@@ -1,93 +1,41 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-
-  import { WriteFeedback } from '../lib/feedback.svelte';
   import { digitsForStep, formatNumber } from '../lib/format';
-  import type { OperatingMode, Setpoint, WriteResult } from '../lib/types';
+  import type { Setpoint } from '../lib/types';
 
   let {
     title,
     setpoint,
+    shown,
     textColor,
-    mode,
-    pending,
-    note,
-    send,
+    enabled,
+    unconfirmed,
+    preview,
+    locked,
+    error,
+    status,
+    onStep,
   }: {
     title: string;
     setpoint: Setpoint | null;
+    /** The value to show: the user's draft, the demo preview, a sent value or the device's. */
+    shown: number | null;
     textColor: string;
-    mode: OperatingMode;
-    /** Value sent in live mode that the device has not reported yet. */
-    pending: number | null;
-    /** Explanation shown under the value, e.g. what the setpoint means in auto mode. */
-    note?: string | null;
-    /** Sends value as decided while shown was the operating mode on screen. */
-    send: (value: number, shown: OperatingMode) => Promise<WriteResult>;
+    enabled: boolean;
+    /** The value is chosen or sent but not reported by the device yet. */
+    unconfirmed: boolean;
+    /** Demo preview: chosen, but not sent. */
+    preview: boolean;
+    /** Why the setpoint cannot be changed right now, e.g. in auto mode; hides the value. */
+    locked: string | null;
+    error: string | null;
+    /** For screen readers only: what happens with the change. */
+    status: string | null;
+    onStep: (direction: 1 | -1) => void;
   } = $props();
-
-  /** Clicks are collected and sent once after this pause. */
-  const SEND_AFTER_MS = 1200;
-
-  const feedback = new WriteFeedback<number>();
-  let draft = $state<number | null>(null);
-  // The operating mode on screen when the draft was started.
-  let draftMode: OperatingMode | null = null;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  // A change made in one mode is never sent in the other: switching drops it.
-  $effect(() => {
-    feedback.follow(mode);
-    if (draftMode !== null && mode !== draftMode) {
-      clearTimeout(timer);
-      draft = null;
-      draftMode = null;
-    }
-  });
-
-  const shown = $derived(draft ?? feedback.preview ?? setpoint?.value ?? null);
-  const enabled = $derived(setpoint !== null && setpoint.writable && !feedback.busy);
 
   function format(value: number, step: number): string {
     return formatNumber(value, digitsForStep(step));
   }
-
-  function change(direction: 1 | -1): void {
-    if (!setpoint || shown === null) {
-      return;
-    }
-    const steps = Math.round((shown - setpoint.min) / setpoint.step) + direction;
-    const next = Number((setpoint.min + steps * setpoint.step).toFixed(3));
-    if (next < setpoint.min || next > setpoint.max) {
-      return;
-    }
-    feedback.reset();
-    draft = next;
-    draftMode = mode;
-    clearTimeout(timer);
-    timer = setTimeout(() => void commit(), SEND_AFTER_MS);
-  }
-
-  async function commit(): Promise<void> {
-    const value = draft;
-    const shown = draftMode;
-    if (value === null || shown === null || !setpoint) {
-      return;
-    }
-    if (value === setpoint.value && pending === null) {
-      draft = null;
-      draftMode = null;
-      return;
-    }
-    try {
-      await feedback.submit(value, (chosen) => send(chosen, shown));
-    } finally {
-      draft = null;
-      draftMode = null;
-    }
-  }
-
-  onDestroy(() => clearTimeout(timer));
 </script>
 
 <div class="setpoint">
@@ -99,35 +47,37 @@
         class="round"
         aria-label={`Solltemperatur ${title} senken`}
         disabled={!enabled || shown <= setpoint.min}
-        onclick={() => change(-1)}>−</button
+        onclick={() => onStep(-1)}>−</button
       >
-      <output class="value" style:color={textColor} aria-live="polite" aria-label={`Solltemperatur ${title}`}>
-        {format(shown, setpoint.step)}<span class="unit"> °C</span>
-      </output>
+      {#if locked}
+        <output class="value program" aria-label={`Solltemperatur ${title}`}>Zeitprogramm</output>
+      {:else}
+        <output
+          class="value"
+          class:unconfirmed
+          style:color={preview ? 'var(--info-text)' : textColor}
+          aria-live="polite"
+          aria-label={`Solltemperatur ${title}`}
+        >
+          {format(shown, setpoint.step)}<span class="unit"> °C</span>
+        </output>
+      {/if}
       <button
         type="button"
         class="round"
         aria-label={`Solltemperatur ${title} erhöhen`}
         disabled={!enabled || shown >= setpoint.max}
-        onclick={() => change(1)}>+</button
+        onclick={() => onStep(1)}>+</button
       >
     </div>
-    {#if feedback.error}
-      <p class="error" role="alert">{feedback.error}</p>
-    {:else if pending !== null}
-      <p class="state" role="status">Wird gesendet … ({format(pending, setpoint.step)} °C)</p>
-    {:else if feedback.note}
-      <p class="state" role="status">{feedback.note}</p>
-    {:else if draft !== null}
-      <p class="state">Wird gleich übernommen …</p>
-    {:else if mode === 'demo'}
-      <p class="state demo">Demo: wird nicht gesendet</p>
+    <span class="sr-only" role="status">{status ?? ''}</span>
+    {#if error}
+      <p class="error" role="alert">{error}</p>
     {/if}
     {#if !setpoint.writable}
       <p class="state">Am Gerät nicht änderbar</p>
-    {/if}
-    {#if note}
-      <p class="note">{note}</p>
+    {:else if locked}
+      <p class="note">{locked}</p>
     {/if}
   {:else}
     <span class="value muted">nicht verfügbar</span>
@@ -180,6 +130,18 @@
     text-align: center;
     font-size: 32px;
     font-weight: 600;
+    transition: opacity 0.15s;
+  }
+
+  /* Chosen or sent, not yet reported by the device. */
+  .value.unconfirmed {
+    opacity: 0.55;
+  }
+
+  .value.program {
+    font-size: 20px;
+    font-weight: 500;
+    color: var(--text-secondary);
   }
 
   .value.muted {
@@ -204,10 +166,6 @@
 
   .state {
     color: var(--text-secondary);
-  }
-
-  .state.demo {
-    color: var(--info-text);
   }
 
   .note {

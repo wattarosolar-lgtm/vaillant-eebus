@@ -8,8 +8,8 @@
     setZoneMode,
     setZoneSetpoint,
   } from '../lib/api';
-  import { kilowattHours, kilowatts, temperature, timeOfDay, watts } from '../lib/format';
-  import { AUTO_MODE_SETPOINT_NOTE, BRIDGE_PROBLEMS } from '../lib/texts';
+  import { energyToday, kilowattHours, kilowatts, temperature, timeOfDay, watts } from '../lib/format';
+  import { AUTO_MODE_SETPOINT_LOCKED, BRIDGE_PROBLEMS } from '../lib/texts';
   import type { ApiState, Control, Reading } from '../lib/types';
 
   let { live, streamOpen }: { live: ApiState | null; streamOpen: boolean } = $props();
@@ -32,6 +32,7 @@
   }
 
   const energyRows = $derived([
+    ['Energie heute (berechnet)', energyToday(live?.energy_today)],
     ['Verdichterleistung', watts(measurements['compressor_power'])],
     ['Energie gesamt', kilowattHours(measurements['energy_consumed'])],
     ['Erzeugte Energie', kilowattHours(measurements['energy_produced'])],
@@ -76,11 +77,13 @@
     {#if values}
       <section class="grid" aria-label="Heizzonen und Warmwasser">
         {#each values.zones as zone (zone.id)}
+          <!-- The room temperature will be the average of chosen Home Assistant
+               sensors; the gateway's own value is unreliable (field finding). -->
           <Dial
             title={zone.label}
             label="Raumtemperatur"
-            current={temperature(zone.room_temperature)}
-            subline={zone.room_temperature ? 'Raumfühler (EEBUS)' : 'Kommt später aus Home Assistant'}
+            current={null}
+            subline="Kommt später aus Home Assistant"
             setpoint={zone.setpoint}
             operationMode={zone.mode}
             availableModes={zone.available_modes}
@@ -88,7 +91,7 @@
             appMode={live.mode}
             pendingSetpoint={pending('zone_setpoint', zone.id) as number | null}
             pendingMode={pending('zone_mode', zone.id) as string | null}
-            setpointNote={zone.mode === 'auto' ? AUTO_MODE_SETPOINT_NOTE : null}
+            setpointLocked={zone.mode === 'auto' ? AUTO_MODE_SETPOINT_LOCKED : null}
             sendSetpoint={(value, shown) => setZoneSetpoint(zone.id, value, shown)}
             sendMode={(mode, shown) => setZoneMode(zone.id, mode, shown)}
             color="var(--heat)"

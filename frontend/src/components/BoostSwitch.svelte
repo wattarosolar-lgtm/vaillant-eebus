@@ -20,25 +20,26 @@
   } = $props();
 
   const feedback = new WriteFeedback<boolean>();
-  $effect(() => feedback.follow(mode));
-
   const active = $derived(boost === 'active' || boost === 'running');
-  const shown = $derived(feedback.preview ?? active);
-  const enabled = $derived(writable && !feedback.busy && pending === null);
+  $effect(() => feedback.follow(mode));
+  $effect(() => feedback.settle(active, pending));
+
+  // Sent, not reported by the device yet.
+  const unconfirmed = $derived(feedback.sending ?? pending);
+  const shown = $derived(feedback.preview ?? unconfirmed ?? active);
+  const enabled = $derived(writable && !feedback.busy);
+  const status = $derived(
+    feedback.busy || unconfirmed !== null ? 'Wird gesendet' : feedback.preview !== null ? 'Demo: nicht gesendet' : '',
+  );
 </script>
 
 <div class="boost">
   <div class="text">
     <span class="title" id="boost-title">Einmalladung</span>
     <span class="hint">Speicher jetzt einmal aufheizen</span>
+    <span class="sr-only" role="status">{status}</span>
     {#if feedback.error}
       <span class="error" role="alert">{feedback.error}</span>
-    {:else if pending !== null}
-      <span class="state" role="status">Wird gesendet …</span>
-    {:else if feedback.note}
-      <span class="state" role="status">{feedback.note}</span>
-    {:else if mode === 'demo' && feedback.preview !== null}
-      <span class="state demo">Demo: wird nicht gesendet</span>
     {:else}
       <span class="state">Status: {BOOST_LABELS[boost]}</span>
     {/if}
@@ -47,6 +48,8 @@
     type="button"
     class="switch"
     class:on={shown}
+    class:unconfirmed={unconfirmed !== null && feedback.preview === null}
+    class:preview={feedback.preview !== null}
     role="switch"
     aria-checked={shown}
     aria-labelledby="boost-title"
@@ -90,10 +93,6 @@
     color: var(--text-secondary);
   }
 
-  .state.demo {
-    color: var(--info-text);
-  }
-
   .error {
     color: var(--error-text);
   }
@@ -124,6 +123,16 @@
 
   .switch.on::before {
     background: var(--water);
+  }
+
+  /* Demo preview: chosen, not sent. */
+  .switch.on.preview::before {
+    background: var(--info-text);
+  }
+
+  /* Sent, not reported by the device yet. */
+  .switch.unconfirmed {
+    opacity: 0.55;
   }
 
   .knob {

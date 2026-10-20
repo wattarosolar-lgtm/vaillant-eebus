@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { LIVE_CONFIRMATION, OPERATING_MODE_BANNERS } from '../lib/texts';
+  import { DEMO_BANNER, LIVE_CONFIRMATION } from '../lib/texts';
   import type { OperatingMode } from '../lib/types';
 
   let {
@@ -39,10 +39,8 @@
       </button>
     </div>
   </div>
-{:else}
-  <p class="banner" class:info={mode === 'demo'} class:live={mode === 'live'} role="status">
-    {OPERATING_MODE_BANNERS[mode]}
-  </p>
+{:else if mode === 'demo'}
+  <p class="banner info" role="status">{DEMO_BANNER}</p>
 {/if}
 {#if error}
   <p class="banner error" role="alert">{error}</p>

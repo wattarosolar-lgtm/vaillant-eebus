@@ -25,14 +25,20 @@
 
   const feedback = new WriteFeedback<string>();
   $effect(() => feedback.follow(mode));
+  $effect(() => feedback.settle(current, pending));
 
   // Only the modes the device offers, in the design's order (eco only if offered).
   const modes = $derived([
     ...MODE_ORDER.filter((candidate) => availableModes.includes(candidate)),
     ...availableModes.filter((candidate) => !MODE_ORDER.includes(candidate)),
   ]);
-  const shown = $derived(feedback.preview ?? current);
-  const enabled = $derived(writable && !feedback.busy && pending === null);
+  // Sent or chosen in demo, not reported by the device yet.
+  const unconfirmed = $derived(feedback.sending ?? pending);
+  const shown = $derived(feedback.preview ?? unconfirmed ?? current);
+  const enabled = $derived(writable && !feedback.busy);
+  const status = $derived(
+    feedback.busy || unconfirmed !== null ? 'Wird gesendet' : feedback.preview !== null ? 'Demo: nicht gesendet' : '',
+  );
 
   function label(candidate: string | null): string {
     return candidate ? (MODE_LABELS[candidate] ?? candidate) : 'unbekannt';
@@ -55,21 +61,17 @@
           type="button"
           class="segment"
           class:active={candidate === shown}
-          class:pending={candidate === pending}
+          class:pending={candidate === unconfirmed && feedback.preview === null}
+          class:preview={candidate === feedback.preview}
           aria-pressed={candidate === shown}
           disabled={!enabled}
           onclick={() => choose(candidate)}>{label(candidate)}</button
         >
       {/each}
     </div>
+    <span class="sr-only" role="status">{status}</span>
     {#if feedback.error}
       <p class="error" role="alert">{feedback.error}</p>
-    {:else if pending !== null}
-      <p class="state" role="status">Wird gesendet … ({label(pending)})</p>
-    {:else if feedback.note}
-      <p class="state" role="status">{feedback.note}</p>
-    {:else if mode === 'demo' && feedback.preview !== null}
-      <p class="state demo">Demo: wird nicht gesendet</p>
     {:else if !writable}
       <p class="state">Am Gerät nicht änderbar</p>
     {/if}
@@ -116,9 +118,14 @@
     color: #ffffff;
   }
 
+  /* Sent, not reported by the device yet. */
   .segment.pending {
-    outline: 2px dashed var(--text-secondary);
-    outline-offset: -4px;
+    opacity: 0.55;
+  }
+
+  /* Demo preview: chosen, not sent. */
+  .segment.active.preview {
+    background: var(--info-text);
   }
 
   .segment:disabled {
@@ -146,10 +153,6 @@
 
   .state {
     color: var(--text-secondary);
-  }
-
-  .state.demo {
-    color: var(--info-text);
   }
 
   .error {

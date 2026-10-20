@@ -112,11 +112,18 @@ export interface WriteResult {
   would_send: Record<string, string | number | boolean | null> | null;
 }
 
+/** Summed up by the app from the power; incomplete when part of the day is missing. */
+export interface EnergyToday {
+  kwh: number;
+  incomplete: boolean;
+}
+
 export interface ApiState {
   connection: ConnectionState;
   mode: OperatingMode;
   pending: PendingWrite[];
   heat_pump: HeatPumpState | null;
+  energy_today: EnergyToday | null;
 }
 
 export type LogCategory = 'mode' | 'write' | 'connection' | 'device';

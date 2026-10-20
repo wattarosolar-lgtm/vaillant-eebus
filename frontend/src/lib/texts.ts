@@ -53,17 +53,16 @@ export function operatingStateName(state: string): string {
 }
 
 /**
- * In auto mode the controller follows its time program. The gateway reports
- * only one setpoint per zone, not the time program's current temperature
- * (field finding: myVAILLANT showed 21,5 °C while the gateway reported 23 °C).
+ * In auto mode the controller follows its time program, which the gateway does
+ * not report; a setpoint written over EEBUS has no effect there (field test of
+ * 0.5.1). myVAILLANT starts a boost instead, so the app points there.
  */
-export const AUTO_MODE_SETPOINT_NOTE =
-  'Im Auto-Betrieb regelt der Regler nach seinem Zeitprogramm; dessen aktuelle Solltemperatur meldet das Gateway nicht.';
+export const AUTO_MODE_SETPOINT_LOCKED =
+  'Im Auto-Betrieb gilt das Zeitprogramm. Die Solltemperatur wirkt nur in „Ein“; für einen Boost myVAILLANT oder Home Assistant nutzen.';
 
-export const OPERATING_MODE_BANNERS = {
-  demo: 'Demo-Betrieb: Die App liest nur Werte. Änderungen werden angezeigt, aber nicht an die Wärmepumpe gesendet.',
-  live: 'Live-Betrieb: Änderungen werden an die Wärmepumpe gesendet.',
-} as const;
+/** Shown in demo mode only; live mode shows the orange switch, no banner. */
+export const DEMO_BANNER =
+  'Demo-Betrieb: Die App liest nur Werte. Änderungen werden angezeigt, aber nicht an die Wärmepumpe gesendet.';
 
 export const LIVE_CONFIRMATION =
   'Live-Betrieb einschalten? Danach sendet die App Änderungen wirklich an die Wärmepumpe.';

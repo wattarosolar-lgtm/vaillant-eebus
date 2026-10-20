@@ -1,6 +1,6 @@
 // German number formatting only; the values themselves come from the backend.
 
-import type { Reading } from './types';
+import type { EnergyToday, Reading } from './types';
 
 const formatters = new Map<number, Intl.NumberFormat>();
 
@@ -33,6 +33,10 @@ export function watts(reading: Reading | null | undefined): string | null {
 
 export function kilowattHours(reading: Reading | null | undefined): string | null {
   return reading ? `${formatNumber(reading.value, 1)} kWh` : null;
+}
+
+export function energyToday(energy: EnergyToday | null | undefined): string | null {
+  return energy ? `${formatNumber(energy.kwh, 2)} kWh${energy.incomplete ? ' (lückenhaft)' : ''}` : null;
 }
 
 export function timeOfDay(iso: string | null): string | null {
