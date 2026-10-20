@@ -63,9 +63,14 @@ class ZoneAverage:
 
 @dataclass(frozen=True, slots=True)
 class HeatToday:
-    entity_id: str
+    """The heat of the day: the sum of the chosen sensors, e.g. heating and hot water."""
+
+    entity_ids: list[str]
+    # None unless every sensor has a value: a partial sum would understate the day.
     kwh: float | None
+    # The worst status among the sensors.
     status: ValueStatus
+    # The oldest report among the sensors.
     reported_at: datetime | None
 
 
@@ -100,8 +105,7 @@ class HomeAssistantImport(HomeAssistantListener):
     def watched(self) -> frozenset[str]:
         """The entities whose states the app needs."""
         settings = self._settings.current
-        heat = {settings.heat_energy_entity} if settings.heat_energy_entity else set()
-        return frozenset({room.entity_id for room in settings.rooms} | heat)
+        return frozenset({room.entity_id for room in settings.rooms} | set(settings.heat_energy_entities))
 
     def snapshot(self) -> HomeAssistantState:
         now = self._clock()
@@ -120,7 +124,7 @@ class HomeAssistantImport(HomeAssistantListener):
                     of=len(assigned),
                 )
             )
-        heat = self._heat(settings.heat_energy_entity, now) if settings.heat_energy_entity else None
+        heat = self._heat(settings.heat_energy_entities, now) if settings.heat_energy_entities else None
         return HomeAssistantState(
             available=self._available, connected=self._connected, rooms=rooms, zones=zones, heat_today=heat
         )
@@ -170,17 +174,26 @@ class HomeAssistantImport(HomeAssistantListener):
             reported_at=reported_at,
         )
 
-    def _heat(self, entity_id: str, now: datetime) -> HeatToday:
-        state = self._states.get(entity_id)
-        value = _number(state)
-        factor = _TO_KWH.get(str(state.attributes.get("unit_of_measurement"))) if state else None
-        kwh = round(value * factor, 3) if factor is not None and value is not None else None
-        reported_at = state.last_reported if state else None
+    def _heat(self, entity_ids: tuple[str, ...], now: datetime) -> HeatToday:
+        parts: list[float | None] = []
+        statuses: list[ValueStatus] = []
+        reports: list[datetime] = []
+        for entity_id in entity_ids:
+            state = self._states.get(entity_id)
+            value = _number(state)
+            factor = _TO_KWH.get(str(state.attributes.get("unit_of_measurement"))) if state else None
+            kwh = value * factor if factor is not None and value is not None else None
+            reported_at = state.last_reported if state else None
+            parts.append(kwh)
+            statuses.append(_status(kwh, reported_at, now, HEAT_STALE_AFTER))
+            if reported_at is not None:
+                reports.append(reported_at)
+        complete = [part for part in parts if part is not None]
         return HeatToday(
-            entity_id=entity_id,
-            kwh=kwh,
-            status=_status(kwh, reported_at, now, HEAT_STALE_AFTER),
-            reported_at=reported_at,
+            entity_ids=list(entity_ids),
+            kwh=round(sum(complete), 3) if len(complete) == len(parts) else None,
+            status=max(statuses, key=_SEVERITY.__getitem__),
+            reported_at=min(reports) if len(reports) == len(parts) else None,
         )
 
     def _notify(self) -> None:
@@ -200,6 +213,9 @@ class HomeAssistantImport(HomeAssistantListener):
             self._on_change()
 
         asyncio.get_running_loop().call_later(wait, later)
+
+
+_SEVERITY = {ValueStatus.OK: 0, ValueStatus.STALE: 1, ValueStatus.UNAVAILABLE: 2}
 
 
 def _number(state: EntityState | None) -> float | None:

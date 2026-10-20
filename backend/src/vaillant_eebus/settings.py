@@ -47,6 +47,8 @@ ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 # The bridge's zone ID, the SPINE address of the zone's room entity, e.g. "5.1.1".
 ZONE_ID = re.compile(r"^[0-9]{1,5}(\.[0-9]{1,5}){0,7}$")
 ROOM_NAME_MAX = 60
+# Heat sensors that are added up, e.g. heating and hot water of the myVAILLANT integration.
+HEAT_SENSORS_MAX = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,8 +69,8 @@ class Settings:
     # A new installation starts in demo; the app keeps the last chosen mode.
     operating_mode: OperatingMode = OperatingMode.DEMO
     rooms: tuple[Room, ...] = ()
-    # A Home Assistant sensor with the heat produced today (starts at 0 every day).
-    heat_energy_entity: str | None = None
+    # Home Assistant sensors with the heat produced today (each starts at 0 every day); their sum counts.
+    heat_energy_entities: tuple[str, ...] = ()
     export: frozenset[ExportGroup] = DEFAULT_EXPORT
 
 
@@ -124,7 +126,7 @@ class SettingsStore:
                 paired_ski=paired_ski,
                 operating_mode=OperatingMode(mode),
                 rooms=_rooms(data.get("rooms", [])),
-                heat_energy_entity=_entity(data.get("heat_energy_entity"), "heat_energy_entity"),
+                heat_energy_entities=_heat_entities(data),
                 export=_export(data.get("export")),
             )
         except (ValueError, AttributeError) as err:
@@ -177,13 +179,19 @@ def _rooms(raw: Any) -> tuple[Room, ...]:
     return tuple(rooms)
 
 
-def _entity(raw: Any, name: str) -> str | None:
-    if raw is None:
-        return None
-    if isinstance(raw, str) and ENTITY_ID.match(raw):
-        return raw
-    _LOGGER.warning("Settings: invalid %s %r ignored", name, raw)
-    return None
+def _heat_entities(data: dict[str, Any]) -> tuple[str, ...]:
+    # 0.6.0 kept a single sensor as heat_energy_entity.
+    raw = data.get("heat_energy_entities", [data["heat_energy_entity"]] if data.get("heat_energy_entity") else [])
+    if not isinstance(raw, list):
+        _LOGGER.warning("Settings: heat_energy_entities is not a list, ignored")
+        return ()
+    entities: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not ENTITY_ID.match(item):
+            _LOGGER.warning("Settings: invalid heat sensor %r ignored", item)
+        elif item not in entities and len(entities) < HEAT_SENSORS_MAX:
+            entities.append(item)
+    return tuple(entities)
 
 
 def _export(raw: Any) -> frozenset[ExportGroup]:
@@ -204,6 +212,6 @@ def _to_json(settings: Settings) -> dict[str, Any]:
         "paired_ski": settings.paired_ski,
         "operating_mode": settings.operating_mode.value,
         "rooms": [{"entity_id": room.entity_id, "name": room.name, "zone_id": room.zone_id} for room in settings.rooms],
-        "heat_energy_entity": settings.heat_energy_entity,
+        "heat_energy_entities": list(settings.heat_energy_entities),
         "export": sorted(group.value for group in settings.export),
     }

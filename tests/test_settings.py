@@ -24,7 +24,7 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
         "paired_ski": "6C2B9E41D7A0F3851E2C4B6D8F0A1C3E5B7D9F02",
         "operating_mode": "demo",
         "rooms": [],
-        "heat_energy_entity": None,
+        "heat_energy_entities": [],
         "export": ["energy", "hot_water", "status", "temperatures", "zones"],
     }
 
@@ -37,12 +37,19 @@ def test_home_assistant_choices_round_trip(tmp_path: Path) -> None:
             Room(entity_id="sensor.wohnzimmer_temperatur", name="Wohnzimmer", zone_id="5.1.1"),
             Room(entity_id="sensor.keller_temperatur", name="Keller"),
         ),
-        heat_energy_entity="sensor.waerme_heute",
+        heat_energy_entities=("sensor.waerme_heizung", "sensor.waerme_warmwasser"),
         export=frozenset({ExportGroup.STATUS, ExportGroup.POWER_LIMITS}),
     )
     store.save(settings)
 
     assert SettingsStore(tmp_path).load() == settings
+
+
+def test_the_single_heat_sensor_of_0_6_0_is_taken_over(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    store.path.write_text(json.dumps({"paired_ski": "A" * 40, "heat_energy_entity": "sensor.waerme"}), encoding="utf-8")
+
+    assert store.load().heat_energy_entities == ("sensor.waerme",)
 
 
 def test_invalid_home_assistant_choices_keep_the_pairing(tmp_path: Path) -> None:
@@ -59,7 +66,7 @@ def test_invalid_home_assistant_choices_keep_the_pairing(tmp_path: Path) -> None
                     {"entity_id": "sensor.leer", "name": " "},
                     "kein Raum",
                 ],
-                "heat_energy_entity": 42,
+                "heat_energy_entities": ["sensor.ok", 42, "Kein Sensor", "sensor.ok"],
                 "export": ["status", "unbekannt"],
             }
         ),
@@ -70,7 +77,7 @@ def test_invalid_home_assistant_choices_keep_the_pairing(tmp_path: Path) -> None
 
     assert (settings.paired_ski, settings.operating_mode) == ("A" * 40, OperatingMode.LIVE)
     assert settings.rooms == (Room(entity_id="sensor.ok", name="Bad", zone_id="6.1.1"),)
-    assert settings.heat_energy_entity is None
+    assert settings.heat_energy_entities == ("sensor.ok",)
     assert settings.export == frozenset({ExportGroup.STATUS})
     assert not store.path.with_name("settings.json.corrupt").exists()
 

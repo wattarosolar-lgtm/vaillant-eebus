@@ -121,17 +121,18 @@ class HomeAssistant:
         return choices[:MAX_CHOICES]
 
     def change(
-        self, rooms: tuple[Room, ...], heat_energy_entity: str | None, export: frozenset[ExportGroup]
+        self, rooms: tuple[Room, ...], heat_energy_entities: tuple[str, ...], export: frozenset[ExportGroup]
     ) -> Settings:
         """Save the user's Home Assistant choices and follow them at once."""
         before = self._settings.current
         after = self._settings.update(
-            lambda settings: replace(settings, rooms=rooms, heat_energy_entity=heat_energy_entity, export=export)
+            lambda settings: replace(settings, rooms=rooms, heat_energy_entities=heat_energy_entities, export=export)
         )
         if after.rooms != before.rooms:
             self._log.add(LogCategory.SETTINGS, f"Räume geändert: {self._describe_rooms(after.rooms)}")
-        if after.heat_energy_entity != before.heat_energy_entity:
-            self._log.add(LogCategory.SETTINGS, f"Wärmemenge heute: {after.heat_energy_entity or 'keine'}")
+        if after.heat_energy_entities != before.heat_energy_entities:
+            sensors = " + ".join(after.heat_energy_entities) or "keine"
+            self._log.add(LogCategory.SETTINGS, f"Wärme heute: {sensors}")
         if after.export != before.export:
             groups = [name for group, name in _EXPORT_NAMES.items() if group in after.export]
             self._log.add(LogCategory.SETTINGS, f"Export nach Home Assistant: {', '.join(groups) or 'nichts'}")

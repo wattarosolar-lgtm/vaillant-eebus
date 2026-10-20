@@ -107,15 +107,43 @@ async def test_stale_rooms_and_unknown_units_are_left_out(settings_store: Settin
     assert importer.zone_average("5.1.1") == ZoneAverage(zone_id="5.1.1", celsius=None, rooms=0, of=2)
 
 
-async def test_heat_of_the_day_is_read_in_kwh(settings_store: SettingsStore) -> None:
-    settings_store.update(lambda settings: replace(settings, heat_energy_entity="sensor.waerme_heute"))
+HEAT = ("sensor.waerme_heizung", "sensor.waerme_warmwasser")
+
+
+async def test_the_heat_of_the_day_adds_up_its_sensors_in_kwh(settings_store: SettingsStore) -> None:
+    settings_store.update(lambda settings: replace(settings, heat_energy_entities=HEAT))
     importer = HomeAssistantImport(settings_store, available=True, clock=lambda: NOW)
-    importer.ha_state("sensor.waerme_heute", entity("sensor.waerme_heute", "12345", "Wh"))
+    importer.ha_state(HEAT[0], entity(HEAT[0], "12345", "Wh"))
+    importer.ha_state(HEAT[1], entity(HEAT[1], "2.5", "kWh", age=timedelta(minutes=20)))
 
     heat = importer.snapshot().heat_today
 
     assert heat is not None
-    assert (heat.kwh, heat.status) == (12.345, ValueStatus.OK)
+    assert (heat.kwh, heat.status, heat.reported_at) == (14.845, ValueStatus.OK, NOW - timedelta(minutes=20))
+
+
+async def test_a_missing_heat_sensor_leaves_no_partial_sum(settings_store: SettingsStore) -> None:
+    settings_store.update(lambda settings: replace(settings, heat_energy_entities=HEAT))
+    importer = HomeAssistantImport(settings_store, available=True, clock=lambda: NOW)
+    importer.ha_state(HEAT[0], entity(HEAT[0], "12.3", "kWh"))
+    importer.ha_state(HEAT[1], entity(HEAT[1], "unavailable", "kWh"))
+
+    heat = importer.snapshot().heat_today
+
+    assert heat is not None
+    assert (heat.kwh, heat.status) == (None, ValueStatus.UNAVAILABLE)
+
+
+async def test_an_old_heat_sensor_marks_the_sum_stale(settings_store: SettingsStore) -> None:
+    settings_store.update(lambda settings: replace(settings, heat_energy_entities=HEAT))
+    importer = HomeAssistantImport(settings_store, available=True, clock=lambda: NOW)
+    importer.ha_state(HEAT[0], entity(HEAT[0], "12.3", "kWh"))
+    importer.ha_state(HEAT[1], entity(HEAT[1], "2.0", "kWh", age=timedelta(hours=4)))
+
+    heat = importer.snapshot().heat_today
+
+    assert heat is not None
+    assert (heat.kwh, heat.status) == (14.3, ValueStatus.STALE)
 
 
 async def test_losing_home_assistant_drops_its_values(settings_store: SettingsStore) -> None:
@@ -134,12 +162,12 @@ async def test_losing_home_assistant_drops_its_values(settings_store: SettingsSt
 @pytest.mark.parametrize(
     ("heat", "electricity", "expected"),
     [
-        (HeatToday("sensor.w", 12.0, ValueStatus.OK, NOW), EnergyToday(kwh=3.0, incomplete=False), 4.0),
+        (HeatToday(["sensor.w"], 12.0, ValueStatus.OK, NOW), EnergyToday(kwh=3.0, incomplete=False), 4.0),
         # A day with gaps or an outdated heat value would give a wrong ratio.
-        (HeatToday("sensor.w", 12.0, ValueStatus.OK, NOW), EnergyToday(kwh=3.0, incomplete=True), None),
-        (HeatToday("sensor.w", 12.0, ValueStatus.STALE, NOW), EnergyToday(kwh=3.0, incomplete=False), None),
+        (HeatToday(["sensor.w"], 12.0, ValueStatus.OK, NOW), EnergyToday(kwh=3.0, incomplete=True), None),
+        (HeatToday(["sensor.w"], 12.0, ValueStatus.STALE, NOW), EnergyToday(kwh=3.0, incomplete=False), None),
         # Too little electrical energy yet, e.g. early in the morning.
-        (HeatToday("sensor.w", 1.0, ValueStatus.OK, NOW), EnergyToday(kwh=0.2, incomplete=False), None),
+        (HeatToday(["sensor.w"], 1.0, ValueStatus.OK, NOW), EnergyToday(kwh=0.2, incomplete=False), None),
         (None, EnergyToday(kwh=3.0, incomplete=False), None),
     ],
 )
@@ -186,7 +214,7 @@ async def test_a_new_room_is_followed_without_reconnecting(
 
     async with running(home_assistant.run()):
         await eventually(lambda: ha_client.connected)
-        home_assistant.change(rooms=ROOMS[2:3], heat_energy_entity=None, export=frozenset())
+        home_assistant.change(rooms=ROOMS[2:3], heat_energy_entities=(), export=frozenset())
         await eventually(lambda: home_assistant.importer.zone_average("6.1.1") == ZoneAverage("6.1.1", 20.5, 1, 1))
         fake_ha.set("sensor.bad", "21.5", unit="°C")
         await eventually(lambda: home_assistant.importer.zone_average("6.1.1") == ZoneAverage("6.1.1", 21.5, 1, 1))
@@ -353,7 +381,7 @@ async def test_a_group_no_longer_exported_is_removed(
     }
     async with running(home_assistant.run()):
         await eventually(lambda: "sensor.vaillant_eebus_zone_1_setpoint" in fake_ha.own_states())
-        home_assistant.change(rooms=(), heat_energy_entity=None, export=frozenset({ExportGroup.STATUS}))
+        home_assistant.change(rooms=(), heat_energy_entities=(), export=frozenset({ExportGroup.STATUS}))
         # The other groups' sensors are removed one after another.
         await eventually(lambda: fake_ha.own_states().keys() == status)
 
@@ -433,7 +461,7 @@ async def test_settings_are_saved_and_logged(
             {"entity_id": "sensor.wohnzimmer", "name": " Wohnzimmer ", "zone_id": "5.1.1"},
             {"entity_id": "sensor.keller", "name": "Keller", "zone_id": None},
         ],
-        "heat_energy_entity": "sensor.waerme_heute",
+        "heat_energy_entities": ["sensor.waerme_heizung", "sensor.waerme_warmwasser"],
         "export": ["status", "zones"],
     }
     async with _api(pairing, state, gate, log_store, energy_meter, home_assistant) as http:
@@ -444,7 +472,7 @@ async def test_settings_are_saved_and_logged(
     assert loaded["rooms"][0] == {"entity_id": "sensor.wohnzimmer", "name": "Wohnzimmer", "zone_id": "5.1.1"}
     assert loaded["export"] == ["status", "zones"]
     assert loaded["home_assistant_available"] is False
-    assert settings_store.load().heat_energy_entity == "sensor.waerme_heute"
+    assert settings_store.load().heat_energy_entities == ("sensor.waerme_heizung", "sensor.waerme_warmwasser")
     log = [entry.message for entry in (await log_store.page(category=LogCategory.SETTINGS)).entries]
     assert "Räume geändert: Wohnzimmer (5.1.1), Keller (keine Zone)" in log
     assert "Export nach Home Assistant: Status, Zonen" in log

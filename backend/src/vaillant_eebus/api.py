@@ -29,7 +29,15 @@ from vaillant_eebus.ha_import import HomeAssistantState
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
-from vaillant_eebus.settings import ENTITY_ID, ROOM_NAME_MAX, ZONE_ID, ExportGroup, OperatingMode, Room
+from vaillant_eebus.settings import (
+    ENTITY_ID,
+    HEAT_SENSORS_MAX,
+    ROOM_NAME_MAX,
+    ZONE_ID,
+    ExportGroup,
+    OperatingMode,
+    Room,
+)
 from vaillant_eebus.state import HeatPumpState, StateService
 from vaillant_eebus.write_gate import (
     ControlCompressor,
@@ -126,14 +134,16 @@ class RoomModel(BaseModel):
 
 class SettingsRequest(BaseModel):
     rooms: list[RoomModel] = Field(max_length=50)
-    heat_energy_entity: str | None = Field(default=None, pattern=ENTITY_ID.pattern)
+    heat_energy_entities: list[Annotated[str, Field(pattern=ENTITY_ID.pattern)]] = Field(
+        default=[], max_length=HEAT_SENSORS_MAX
+    )
     export: list[ExportGroup]
 
 
 @dataclass(frozen=True, slots=True)
 class SettingsStatus:
     rooms: list[Room]
-    heat_energy_entity: str | None
+    heat_energy_entities: list[str]
     export: list[ExportGroup]
     # Entity IDs the app currently reports to Home Assistant.
     exported: list[str]
@@ -245,7 +255,7 @@ def create_app(
         current = home_assistant.settings
         return SettingsStatus(
             rooms=list(current.rooms),
-            heat_energy_entity=current.heat_energy_entity,
+            heat_energy_entities=list(current.heat_energy_entities),
             export=sorted(current.export),
             exported=home_assistant.exported(),
             home_assistant_available=home_assistant.available,
@@ -338,11 +348,13 @@ def create_app(
         entity_ids = [room.entity_id for room in request.rooms]
         if len(set(entity_ids)) != len(entity_ids):
             raise WriteRejected(422, "Jeder Sensor kann nur einem Raum zugeordnet werden.")
+        if len(set(request.heat_energy_entities)) != len(request.heat_energy_entities):
+            raise WriteRejected(422, "Jeder Wärmesensor kann nur einmal gewählt werden.")
         home_assistant.change(
             rooms=tuple(
                 Room(entity_id=room.entity_id, name=room.name.strip(), zone_id=room.zone_id) for room in request.rooms
             ),
-            heat_energy_entity=request.heat_energy_entity,
+            heat_energy_entities=tuple(request.heat_energy_entities),
             export=frozenset(request.export),
         )
         return settings_status()
