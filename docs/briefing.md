@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v0.6.1)
+# Briefing: Vaillant EEBUS (Stand v1.0.0)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -9,11 +9,12 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 0.6.1, Phasen 1–6 von 7 umgesetzt (Abnahme von Phase 5 und 6 an der Anlage offen). 0.5.1 enthält
+- **Stand:** Version 1.0.0, alle 7 Phasen umgesetzt (Abnahme von Phase 7 an der Anlage offen). 0.5.1 enthält
   die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a), 0.5.2 die aus der ersten Abnahme an der
   Anlage (ziehbarer Regler, Sperre im Auto-Betrieb, ruhigere Bedienung, „Energie heute“), 0.5.3 zeigt im
   Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt). 0.6.0 bindet Home Assistant an (Abschnitt 5b), 0.6.1
-  ordnet die Einstellungsseite neu und addiert mehrere Wärmesensoren.
+  ordnet die Einstellungsseite neu und addiert mehrere Wärmesensoren. 1.0.0 schließt ab: Protokoll (Probleme,
+  Datum, CSV), Verlauf 24 h, „Über die App“, TLS mit Token für die Bridge (Abschnitt 5c), Doku, Aufräumen.
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -24,9 +25,9 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | 2 | Kopplung, Diagnose-Dump, Einrichtungsassistent | erledigt (0.2.0/0.2.1) |
 | 3 | Lesen: Zustand, API, Übersicht, Live-Updates | erledigt (0.3.0) |
 | 4 | Mehrere Heizzonen in der Bridge, Eco nur wenn angeboten | erledigt (0.4.0), an der Anlage abgenommen |
-| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1–0.5.3), Abnahme an der Anlage offen |
-| 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärme heute), HA-Export als Sensoren | umgesetzt (0.6.0), Abnahme an der Anlage offen |
-| 7 | Einstellungs-/Protokollseite fertig, Doku, Release | offen |
+| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1–0.5.3), an der Anlage abgenommen |
+| 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärme heute), HA-Export als Sensoren | umgesetzt (0.6.0/0.6.1), weitgehend abgenommen (Prüfung von 0.6.1 offen) |
+| 7 | Einstellungs-/Protokollseite fertig, Verlauf 24 h, Absicherung der Bridge, Doku, Release | umgesetzt (1.0.0), Abnahme an der Anlage offen |
 
 ## 2. Repositories
 
@@ -56,7 +57,7 @@ Ein Container mit zwei s6-Diensten (s6-overlay aus dem HA-Basis-Image):
 
 ```
 Vaillant-Gateway (VR921/VR940f) ──SHIP/SPINE, TCP 4712, mDNS──▶ eebus-bridge (Go)
-                                                                     │ gRPC, Klartext, nur 127.0.0.1:50471
+                                                                     │ gRPC, TLS + Token, nur 127.0.0.1:50471
                                                                      ▼
 Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, FastAPI, 172.30.32.1:8714)
                                                        └─ liefert auch die Oberfläche (Svelte, statische Dateien)
@@ -66,7 +67,8 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
   eigener gRPC-Port 50471 (statt 50051) und eine Identitätsprüfung: Das Backend spricht nur mit einer Bridge, die
   die EEBUS-Seriennummer aus `/data/eebus/serial` meldet (`ServerInfo.device_serial`).
 - Persistente Daten: `/data/eebus/` (Zertifikat und Seriennummer = SKI der App; Verlust erzwingt Neukopplung),
-  `/data/settings.json` (gekoppelte Gateway-SKI, Demo/Live), `/data/app.db` (Protokoll, SQLite).
+  `/data/eebus/grpc/` (TLS-Zertifikat, Schlüssel und Token der gRPC-API, Abschnitt 5c), `/data/settings.json`
+  (gekoppelte Gateway-SKI, Demo/Live, Räume, Export), `/data/app.db` (Protokoll, SQLite), `/data/energy.json`.
 - Das Gateway erlaubt **nur eine EEBUS-Verbindung** gleichzeitig.
 - Image: `ghcr.io/wattarosolar-lgtm/vaillant-eebus:<version>` für amd64 und aarch64, von der CI gebaut; der
   Supervisor baut nicht selbst.
@@ -78,9 +80,10 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `repository.yaml` | App-Repository für den HA-App-Store |
 | `vaillant-eebus/config.yaml` | App-Konfiguration (Version, Ingress-Port 8714, `host_network`, Option `log_level`) |
 | `vaillant-eebus/Dockerfile` | Mehrstufig: Go-Bridge (Cross-Compile, CGO aus), Python-Stubs aus den Protos, Svelte-Build, Laufzeit auf `ghcr.io/home-assistant/base-python:3.13-alpine3.24-2026.10.0`; Rauchtest `import vaillant_eebus.main` |
-| `vaillant-eebus/rootfs/etc/s6-overlay/s6-rc.d/eebus-bridge/run` | Erzeugt Seriennummer (einmalig) und Bridge-Konfiguration, startet die Bridge |
+| `vaillant-eebus/rootfs/etc/s6-overlay/s6-rc.d/init-grpc-credentials/` | s6-Oneshot vor Bridge und Backend: `python -m vaillant_eebus.bridge_auth /data/eebus/grpc` (Abschnitt 5c) |
+| `vaillant-eebus/rootfs/etc/s6-overlay/s6-rc.d/eebus-bridge/run` | Erzeugt Seriennummer (einmalig) und Bridge-Konfiguration (`grpc.security.mode: tls_token`), startet die Bridge |
 | `vaillant-eebus/rootfs/etc/s6-overlay/s6-rc.d/backend/run` | Setzt Umgebungsvariablen, startet das Backend |
-| `vaillant-eebus/DOCS.md`, `CHANGELOG.md`, `translations/de.yaml` | Nutzer-Doku |
+| `vaillant-eebus/DOCS.md`, `CHANGELOG.md`, `translations/de.yaml`, `icon.png`, `logo.png` | Nutzer-Doku, Symbol und Logo im App-Store |
 | `backend/src/vaillant_eebus/` | Backend (Module siehe unten) |
 | `backend/scripts/generate_proto.py` | Erzeugt die gRPC-Stubs nach `backend/gen/` (nicht eingecheckt) |
 | `backend/requirements*.in/.lock` | Abhängigkeiten, Lock-Dateien mit Hashes (uv) |
@@ -94,25 +97,30 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | Modul | Aufgabe |
 |---|---|
 | `main.py` | Konfiguration aus Umgebungsvariablen (`BRIDGE_ADDRESS`, `DATA_DIR`, `HTTP_HOST`, `HTTP_PORT`, `TRUSTED_CLIENTS`, `STATIC_DIR`, `BRIDGE_SERIAL_FILE`, `SHIP_PORT`, `TZ`, …; ungültige Ports → klare Fehlermeldung); startet uvicorn, `PairingService.run()`, `StateService.run()`, `WriteGate.run()` und `EnergyMeter.run()` in einer `asyncio.TaskGroup`, speichert danach den Energiezähler und schließt das Protokoll |
-| `bridge_client.py` | gRPC-Client (`grpc.aio`): Server-Info, Gerätesuche, Kopplung, Gerätestatus, Snapshot, Ereignis-Streams, Struktur-Dump; **Schreibmethoden** (`WRITE_METHODS`: Zone-Soll/-Betriebsart mit `zone_id`, Warmwasser-Soll/-Betriebsart/Einmalladung, Leistungsdeckel, Failsafe, Verdichter-Flexibilität) mit 15 s Zeitlimit (die Bridge wartet bis zu 10 s auf das Gerät); Backoff, `RETRYABLE_CODES`, max. Nachrichtengröße 64 MB |
+| `bridge_auth.py` | Erzeugt einmalig selbstsigniertes Zertifikat (EC P-256, SAN `eebus-bridge` und `127.0.0.1`), Schlüssel und Token in `/data/eebus/grpc` (0600, alle drei zusammen über ein umbenanntes Verzeichnis); `BridgeCredentials.load()` für das Backend |
+| `bridge_client.py` | gRPC-Client (`grpc.aio`), mit Zugangsdaten TLS (vertraut nur diesem Zertifikat) und Bearer-Token, sonst Klartext (Fake-Bridge); `refused_tls()` erkennt einen fehlgeschlagenen TLS-Handshake (→ fremde Bridge): Server-Info, Gerätesuche, Kopplung, Gerätestatus, Snapshot, Ereignis-Streams, Struktur-Dump; **Schreibmethoden** (`WRITE_METHODS`: Zone-Soll/-Betriebsart mit `zone_id`, Warmwasser-Soll/-Betriebsart/Einmalladung, Leistungsdeckel, Failsafe, Verdichter-Flexibilität) mit 15 s Zeitlimit (die Bridge wartet bis zu 10 s auf das Gerät); Backoff, `RETRYABLE_CODES`, max. Nachrichtengröße 64 MB |
 | `pairing.py` | Kopplung und Verbindungszustand (`ConnectionState`); prüft, ob die eigene Bridge antwortet; erkennt fremde Bridge und belegten SHIP-Port; meldet das gekoppelte Gateway nach jedem Bridge-Neustart wieder an; `ConnectionLog` fasst abgelehnte Verbindungsversuche beim Start zusammen und schreibt Verbindungsereignisse deutsch ins Protokoll; Diagnose-Dump |
 | `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a). |
 | `energy.py` | `EnergyMeter`: summiert die gemeldete Gesamtleistung (`power_consumption`) über die Zeit zu Wh je Tag (die Anlage liefert keine Energiezähler); > 3 min ohne Messwert wird nicht überbrückt, der Tag gilt dann als lückenhaft (auch der erste Tag); Tageswechsel um Mitternacht in `TZ` (Rückfall UTC mit Warnung); `/data/energy.json` atomar, höchstens einmal pro Minute und beim Beenden, 400 Tage; kurzer Neustart (< 3 min) wird überbrückt. `today()` zählt das laufende Intervall bis jetzt mit. |
-| `ha_client.py` | Zugriff auf HA Core über den Supervisor (`SUPERVISOR_TOKEN`, `http://supervisor/core`): REST (Zustände, eigene Sensoren setzen/entfernen) und eine WebSocket-Verbindung (Anmeldung, `subscribe_trigger` auf die gewählten Entitäten mit Rückfall auf `platform`, `homeassistant_started`), Wiederverbindung mit Backoff, alle 5 min erneutes Lesen (`last_reported`). Schreibt nur `sensor.vaillant_eebus_*`/`binary_sensor.vaillant_eebus_*` (`OWN_ENTITY`, sonst `ValueError`). Listener-Schnittstelle `HomeAssistantListener`. |
+| `ha_client.py` | Zugriff auf HA Core über den Supervisor (`SUPERVISOR_TOKEN`, `http://supervisor/core`): REST (Zustände, Verlauf `history()` über `/api/history/period`, eigene Sensoren setzen/entfernen) und eine WebSocket-Verbindung (Anmeldung, `subscribe_trigger` auf die gewählten Entitäten mit Rückfall auf `platform`, `homeassistant_started`), Wiederverbindung mit Backoff, alle 5 min erneutes Lesen (`last_reported`). Schreibt nur `sensor.vaillant_eebus_*`/`binary_sensor.vaillant_eebus_*` (`OWN_ENTITY`, sonst `ValueError`). Listener-Schnittstelle `HomeAssistantListener`. |
 | `ha_import.py` | Räume (Name, Zone), Mittelwert je Zone aus gültigen Werten (Zahl, °C/°F, ≤ 30 min alt), Wärme heute als Summe von bis zu 4 Sensoren (Wh/kWh/MWh, ≤ 3 h alt; Summe nur, wenn jeder einen Wert hat, Status = schlechtester); bei Verbindungsverlust werden Werte verworfen; meldet Änderungen gedrosselt (2 s) per `state.republish()`. |
 | `ha_export.py` | Sensoren nach Gruppen (`ExportGroup`): Status, Zonen (Raumtemperatur = HA-Mittelwert, Soll, Betriebsart), Warmwasser, Temperaturen, Leistung/Energie (inkl. `energy_today`, `total_increasing`), Leistungsdeckel, Verdichter. Nur Werte, die die Anlage je geliefert hat; fehlt einer später → `unavailable`. Je Sensor höchstens alle 10 s, Energie 60 s; nach Neuverbindung/`homeassistant_started` alles neu; abgewählte Gruppen per DELETE entfernt. |
-| `home_assistant.py` | Fassade für `main`/`api`: verbindet Client, Import und Export; `entities(kind, q)` für die Auswahl; `change()` speichert Räume/Wärmesensor/Export und protokolliert (`settings`); `performance_today()` (Wärme ÷ Strom, nur aktuell, lückenlos, ≥ 0,5 kWh). Ohne Token kein Client. |
-| `log_store.py` | Protokoll in SQLite (`/data/app.db`): `add()` kehrt sofort zurück, alle DB-Arbeit läuft geordnet in einem Worker-Thread; höchstens 10.000 Einträge; Kategorien `mode`, `write`, `connection`, `device`; beschädigte DB wird beiseitegelegt |
+| `home_assistant.py` | Fassade für `main`/`api`: verbindet Client, Import und Export; `entities(kind, q)` für die Auswahl; `change()` speichert Räume/Wärmesensor/Export und protokolliert (`settings`); `performance_today()` (Wärme ÷ Strom, nur aktuell, lückenlos, ≥ 0,5 kWh); `power_history()` (Verlauf von `sensor.vaillant_eebus_power`, 60 s zwischengespeichert, sonst Grund). Ohne Token kein Client. |
+| `history.py` | `bucket_means()`: zeitgewichtete 5-Minuten-Mittelwerte über 24 h aus den Zustandswechseln (Zustand gilt bis zum nächsten), Lücke bei weniger als 50 % Abdeckung, keine Zahl = fehlt; Mittel- und Höchstwert |
+| `log_store.py` | Protokoll in SQLite (`/data/app.db`): `add()` kehrt sofort zurück, alle DB-Arbeit läuft geordnet in einem Worker-Thread; höchstens 10.000 Einträge; Kategorien `mode`, `write`, `connection`, `device`, `settings`; Kennzeichen `problem` (Spalte wird in alten DBs ergänzt); Seiten mit `before`/`after`/`before_time`; `entries()` und `csv_document()` für den Download; beschädigte DB wird beiseitegelegt |
 | `state.py` | `StateService`: liest den Geräte-Snapshot nach jedem Zustandsereignis der Bridge (1 s gebündelt) und **spätestens jede Minute** – diese Leseanfrage braucht auch die Verbindungsüberwachung der Bridge (ohne Lesezugriff baut sie die Verbindung nach 2 min neu auf). Bildet `DeviceSnapshot` auf `HeatPumpState` ab (Messwerte, Zonen, Warmwasser, Status). Nicht gemeldete Werte bleiben `None`, nie Ersatzwerte. Verdichter gilt als aktiv ab 100 W. Liest auch `mode_writable`, Leistungsdeckel, Failsafe und Verdichter-Flexibilität. `refresh_now()` (nach einem Schreibvorgang) und `republish()` (Modus/offene Schreibvorgänge geändert). |
-| `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, Keep-alive alle 15 s; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
+| `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, Keep-alive alle 15 s; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log` (`category`, `problems`, `before`, `after`, `until`), `GET api/log/export` (CSV), `GET api/history/power`, `GET/PUT api/settings`, `GET api/ha/entities`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
 | `settings.py` | `SettingsStore` ist alleiniger Besitzer der aktuellen Einstellungen (`current`, `update()`), damit Kopplung und Moduswechsel sich nicht überschreiben; `settings.json` atomar schreiben; beschädigte Datei wird beiseitegelegt (→ Demo) |
 
 ### Oberfläche (`frontend/src/`)
 
 Svelte 5 (Runes), Hash-Routing (`#/uebersicht`, `#/protokoll`, `#/einstellungen`, `#/einrichtung`), nur relative URLs
 (Ingress-Pfad), Live-Daten über `EventSource('api/events')`. Seiten: `Overview.svelte` (Rundinstrumente je Zone und
-Warmwasser mit Bedienelementen, Karten für Leistung/Energie und Temperaturen), `Log.svelte` (Protokoll mit Filter und
-„Ältere laden“), `Setup.svelte` (Einrichtungsassistent), `Settings.svelte` (Kopplung, Diagnose-Dump).
+Warmwasser mit Bedienelementen, Karten für Leistung/Energie mit `PowerChart.svelte` (Verlauf 24 h, eigenes SVG,
+Fadenkreuz, Tastatur als `role="slider"`, alle 5 min neu), Temperaturen, Innentemperaturen, gestrichelte Karte
+„PV-Überschuss-Steuerung“), `Log.svelte` (Protokoll nach Tagen, Filter inkl. „Probleme“, „Springen zu“, alle 10 s
+neue Einträge über `after`, CSV-Download, „Ältere laden“), `Setup.svelte` (Einrichtungsassistent), `Settings.svelte`
+(Kopplung, Diagnose-Dump, „Über die App“, darunter `HomeAssistantSettings.svelte` mit Verbindungszustand).
 Komponenten: `Dial.svelte` (Rundinstrument; besitzt den Entwurf der Solltemperatur: Bogen ziehbar per Pointer,
 Pfeiltasten als `role="slider"`, −/+; gesendet 1,2 s nach dem Loslassen bzw. letzten Klick, im Live-Betrieb nicht
 vor Ablauf der 5 s seit dem letzten Senden; Zone im Auto-Betrieb zeigt den gemeldeten Sollwert, gesperrt),
@@ -187,7 +195,22 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 - Oberfläche: Einstellungen „Räume aus Home Assistant“, „Wärme heute“, „Export nach Home Assistant“; Zonenkreis mit
   Mittelwert, Karte „Innentemperaturen“, „Wärme heute“ und „Arbeitszahl heute“ in „Leistung und Energie“.
 - Tests gegen `tests/fake_home_assistant.py` (aiohttp: REST, WebSocket mit Anmeldung, Trigger, Neustart).
-- Nicht umgesetzt: aktiver Sollwert je Zone aus der myVAILLANT-Integration (Nutzer: „noch nicht“), Verlauf 24 h.
+- Nicht umgesetzt: aktiver Sollwert je Zone aus der myVAILLANT-Integration (Nutzer: „noch nicht“). Der Verlauf 24 h kam mit 1.0.0.
+
+## 5c. Absicherung der gRPC-API der Bridge (1.0.0)
+
+- Alle Apps mit Host-Netzwerk (unter HAOS auch HA Core) teilen sich Loopback; ohne Anmeldung hätten sie an
+  `write_gate` und dem Demo-Betrieb vorbei schreiben können (früher Punkt 10 der offenen Punkte).
+- Die Bridge läuft im Modus `tls_token` des **Originals** (`internal/grpc/security.go`, `internal/config/config.go`):
+  TLS mit Zertifikat/Schlüssel aus Dateien, Bearer-Token geprüft per SHA-256 und `ConstantTimeCompare` in Unary- und
+  Stream-Interceptoren. Der Fork ist dafür **nicht** geändert.
+- `bridge_auth.py` erzeugt Zertifikat, Schlüssel und Token einmalig im s6-Oneshot `init-grpc-credentials`, von dem
+  Bridge und Backend abhängen (kein Wettlauf beim Start). Das Backend lädt sie über `BRIDGE_CREDENTIALS_DIR` und
+  setzt `grpc.ssl_target_name_override = eebus-bridge`.
+- Schlägt der TLS-Handshake fehl (Klartext-Dienst oder fremdes Zertifikat auf dem Port), meldet `api/pairing`
+  `foreign_bridge`; die Prüfung der Seriennummer bleibt zusätzlich bestehen.
+- Lokal Ende-zu-Ende gegen das echte Bridge-Binary geprüft: mit Zertifikat und Token Antwort, falsches Token
+  `UNAUTHENTICATED`, Klartext abgewiesen.
 
 ## 6. Die echte Anlage (Feldbefunde)
 
@@ -217,7 +240,7 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 
 ## 7. Tests
 
-- Python: 152 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+- Python: 178 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
   Kein Test spricht mit echter Hardware.
@@ -235,7 +258,7 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 | go | `go vet`, `go test -race` im Submodul |
 | frontend | `npm ci`, `svelte-check`, ESLint, Build |
 | app | HA-App-Linter, hadolint, shellcheck der s6-Skripte |
-| image | Multi-Arch-Build; bei Tag `v*` Veröffentlichung auf ghcr.io (Tag muss zur Version in `config.yaml` passen) |
+| image | Multi-Arch-Build (Rauchtest: Import und ein erzeugtes gRPC-Zertifikat); bei Tag `v*` Veröffentlichung auf ghcr.io (Tag muss zur Version in `config.yaml` passen), danach Prüfung ohne Anmeldung, dass amd64 und arm64 abrufbar sind |
 
 Release: Version in `config.yaml`, `pyproject.toml`, `frontend/package.json` und `CHANGELOG.md` erhöhen, Tag
 `v<version>` pushen.
@@ -250,9 +273,8 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
 3. Leistungsdeckel, Failsafe und Verdichter-Flexibilität sind nur über die API erreichbar und **nicht an der Anlage
    getestet**. Ein niedriger Failsafe-Wert würde die Wärmepumpe nach jedem Neustart der App bis zu 2 h drosseln. Für
    Leistungsdeckel und Failsafe wartet die Bridge nicht auf eine Quittung des Geräts („Gesendet“ = abgeschickt).
-10. Der gRPC-Port der Bridge (127.0.0.1:50471) hat keine Anmeldung. Andere Prozesse im Host-Netzwerk (unter HAOS auch
-    HA Core) könnten an der App und ihrem Demo-Betrieb vorbei schreiben. Absicherung (Token) ist für eine spätere
-    Phase vorgesehen.
+10. Erledigt in 1.0.0: Der gRPC-Port der Bridge hat jetzt TLS und Token (Abschnitt 5c). Wer root im Container oder
+    Zugriff auf `/data` der App hat (Supervisor, Sicherungen), kann das Token lesen – das ist gewollt.
 4. Raumtemperatur und Wärmemenge aus Home Assistant sowie Export nach HA sind umgesetzt (0.6.0), an der Anlage noch nicht geprüft.
 5. Im Fork gibt es einen Alt-Pfad in `hvac_service.go` für Quellen ohne Zonenliste (per Typ-Zusicherung). Er existiert
    für bestehende Test-Doubles; im Produktivbetrieb liefern alle Use Cases Zonenlisten.
@@ -273,7 +295,8 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
    Befehl die falsche Zone treffen (App → `zone_id` → Fork `78a1a5a`)?
 2. **Nebenläufigkeit im Backend**: `StateService` (Ereignis-Stream, Entprellung, Listener-Queues, SSE),
    `PairingService.run()` (Wiederverbindung, Backoff), Abbruch beim Herunterfahren, Verhalten bei Bridge-Neustart.
-3. **Sicherheit**: Ingress-Prüfung (nur 172.30.32.2), gRPC nur auf Loopback, Umgang mit fremder Bridge,
+3. **Sicherheit**: Ingress-Prüfung (nur 172.30.32.2), gRPC nur auf Loopback mit TLS und Token (`bridge_auth.py`,
+   s6-Oneshot, Erkennung einer fremden Bridge), Umgang mit fremder Bridge,
    Diagnose-Dump (enthält Seriennummern; SKI gekürzt), statische Dateien, Eingabeprüfung (`POST api/pairing/register`).
 4. **Paketierung**: Dockerfile (Stufen, Pinning, Rauchtest), s6-Skripte (Quoting, atomares Schreiben der Seriennummer,
    Konfigurationsdatei), `config.yaml`.

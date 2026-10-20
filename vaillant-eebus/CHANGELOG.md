@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.0
+
+Abschluss der geplanten Phasen:
+
+- **Protokoll:** Einträge nach Tagen geordnet, neue erscheinen von selbst. Neuer Filter **Probleme** (abgelehnte,
+  nicht ausgeführte oder nicht bestätigte Änderungen, unbekanntes Ergebnis, Verbindungsabbrüche); solche Einträge
+  sind rot markiert. **Springen zu** einem Tag und **Herunterladen (CSV)** für Excel. Die Filtertasten sind jetzt
+  44 px hoch.
+- **Verlauf 24 Stunden:** Die Karte „Leistung und Energie“ zeigt die Leistungsaufnahme der letzten 24 Stunden aus
+  dem Verlauf von Home Assistant (5-Minuten-Mittelwerte, Lücken, wo nichts aufgezeichnet ist), mit Wert beim Zeigen
+  und Bedienung per Tastatur. Voraussetzung ist der Export „Leistung und Energie“.
+- **Einstellungen:** Der Teil „Home Assistant“ zeigt, ob die Verbindung steht. Neue Karte **Über die App** mit
+  den Versionen von App und EEBUS-Bridge, Links zu Anleitung, Änderungen und Fehlermeldungen sowie dem
+  Lizenzhinweis.
+- **Sicherheit:** Die EEBUS-Bridge in der App nimmt Befehle nur noch mit dem eigenen Zertifikat und einem Token
+  der App an. Bisher hätte jede andere App mit Host-Netzwerk an der App und ihrem Demo-Betrieb vorbei an die
+  Wärmepumpe schreiben können. Zertifikat und Token entstehen beim ersten Start von selbst; nichts einzurichten.
+- Übersicht: gestrichelte Karte „PV-Überschuss-Steuerung – folgt mit dem HEMS“.
+- Symbol und Logo für den App-Store.
+- Anleitung: neue Abschnitte Installation, Update, Fehlerbehebung und Deinstallieren.
+- Aufgeräumt: doppelte Stile und ungenutzter Code entfernt.
+
 ## 0.6.1
 
 Korrekturen aus der Abnahme von 0.6.0:

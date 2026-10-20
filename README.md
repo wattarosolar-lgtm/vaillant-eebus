@@ -29,6 +29,14 @@ und `backend` (Python), das nur über gRPC mit der Bridge spricht. Das Backend l
 Host-Netzwerk teilen sich die Ports des Hosts; das Backend prüft deshalb, dass die Bridge auf seinem Port die
 eigene ist (sie muss die EEBUS-Seriennummer aus `/data/eebus/serial` melden).
 
+**Absicherung der Bridge:** Auch Loopback teilen sich alle Apps mit Host-Netzwerk (unter HAOS auch HA Core). Die
+Bridge läuft deshalb im Modus `tls_token` des Originals: TLS mit einem eigenen, selbstsignierten Zertifikat und ein
+Bearer-Token. Beides erzeugt der s6-Oneshot `init-grpc-credentials` einmalig in `/data/eebus/grpc`
+(`backend/src/vaillant_eebus/bridge_auth.py`, Dateien nur für root lesbar), bevor Bridge und Backend starten. Das
+Backend vertraut genau diesem Zertifikat und schickt das Token mit (`BRIDGE_CREDENTIALS_DIR`). Scheitert der
+TLS-Handshake, gilt der Dienst auf dem Port als fremde Bridge. Ohne `BRIDGE_CREDENTIALS_DIR` (Entwicklung mit der
+Fake-Bridge) spricht das Backend Klartext.
+
 Die Oberfläche holt den Zustand der Wärmepumpe über `api/state` und bekommt jede Änderung per Server-Sent Events
 über `api/events`. Das Backend liest den Zustand neu, sobald die Bridge eine Änderung meldet, und spätestens jede
 Minute. Diese regelmäßige Leseanfrage braucht auch die Verbindungsüberwachung der Bridge: Bleibt sie aus, baut die
@@ -49,7 +57,9 @@ Mittelwert je Zone (nur Zahlen in °C/°F, höchstens 30 Minuten alt) und die W�
 die Wärmepumpe als Sensoren (je Sensor höchstens alle 10 s, Energie jede Minute, alles neu nach einer
 Neuverbindung oder `homeassistant_started`, abgewählte Gruppen werden entfernt). Der Zustand enthält dazu
 `home_assistant` und `performance_today` (Wärme ÷ Strom des Tages, nur aus verlässlichen Werten). Ohne Token läuft
-die App ohne Home Assistant.
+die App ohne Home Assistant. Den Verlauf der Leistung liest `ha_client.history()` aus der Historie von Home
+Assistant; `history.py` rechnet daraus zeitgewichtete 5-Minuten-Mittelwerte mit Lücken, wo nichts aufgezeichnet
+ist.
 
 Die Bridge liefert jede Heizzone einzeln (`room_heating_zones` im Snapshot, `ListRoomHeatingZones`). Eine Zone heißt
 nach der SPINE-Adresse ihres Raum-Eintrags, z. B. `5.1.1`. Schreibende Aufrufe brauchen bei mehreren Zonen diese
@@ -67,7 +77,9 @@ Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
 | POST | `api/dhw/setpoint`, `api/dhw/mode`, `api/dhw/boost` | Warmwasser: `value`, `mode`, `active` |
 | POST | `api/lpc`, `api/lpc/failsafe` | Leistungsdeckel und Failsafe-Grenze (nur API, im Demo-Betrieb gesperrt; die Bridge wartet hier nicht auf eine Quittung des Geräts, „Gesendet“ heißt nur abgeschickt) |
 | POST | `api/ohpcf` | Verdichter-Flexibilität (`schedule`, `pause`, `resume`, `abort`; nur API, im Demo gesperrt) |
-| GET | `api/log` | Protokoll, seitenweise (`before`, `limit`) und nach `category` gefiltert |
+| GET | `api/log` | Protokoll, neueste zuerst: seitenweise (`before`, `limit`), neuere als ein Eintrag (`after`), bis zu einem Tag in Ortszeit (`until=JJJJ-MM-TT`), gefiltert nach `category` oder `problems=true` |
+| GET | `api/log/export` | Protokoll als CSV (Semikolon, UTF-8 mit BOM, Ortszeit), gleiche Filter |
+| GET | `api/history/power` | Leistung der letzten 24 h als 5-Minuten-Mittelwerte aus der HA-Historie von `sensor.vaillant_eebus_power`; ohne Daten mit Grund in `gap` (`no_home_assistant`, `not_exported`, `unreachable`) |
 | GET/PUT | `api/settings` | Räume (`entity_id`, `name`, `zone_id`), Wärmesensoren (`heat_energy_entities`, bis zu 4, addiert), Export-Gruppen (`export`); dazu `exported` und `home_assistant_available` |
 | GET | `api/ha/entities?kind=temperature\|energy&q=…` | Sensoren aus Home Assistant zur Auswahl (503, wenn Home Assistant nicht erreichbar ist) |
 
@@ -134,8 +146,13 @@ done
 
 ## Release
 
-1. Version in `vaillant-eebus/config.yaml` und `CHANGELOG.md` erhöhen.
-2. Tag `v<version>` pushen. Die CI baut das Image für amd64 und aarch64 und veröffentlicht es als
-   `ghcr.io/wattarosolar-lgtm/vaillant-eebus:<version>`.
-3. Nur beim ersten Release: das Paket `vaillant-eebus` auf GitHub unter *Packages → Package settings*
-   auf **Public** stellen, sonst kann Home Assistant das Image nicht laden.
+1. Version in `vaillant-eebus/config.yaml`, `pyproject.toml`, `frontend/package.json` (und `package-lock.json`)
+   erhöhen und in `vaillant-eebus/CHANGELOG.md` einen Abschnitt `## <version>` anlegen. Die CI prüft, dass alle
+   übereinstimmen.
+2. Branch pushen und warten, bis die CI grün ist; dann `main` vorspulen.
+3. Tag `v<version>` auf `main` pushen. Die CI baut das Image für amd64 und aarch64, veröffentlicht es als
+   `ghcr.io/wattarosolar-lgtm/vaillant-eebus:<version>` und prüft danach ohne Anmeldung, dass Home Assistant es für
+   beide Architekturen laden kann.
+4. Nur beim ersten Release: das Paket `vaillant-eebus` auf GitHub unter *Packages → Package settings*
+   auf **Public** stellen; sonst schlägt die Prüfung aus Schritt 3 fehl und Home Assistant kann das Image nicht
+   laden.

@@ -125,3 +125,22 @@ jobs:
             BRIDGE_VERSION=${{ steps.meta.outputs.bridge }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Home Assistant pulls without credentials: a private package would offer
+      # an update that cannot be installed.
+      - name: Published image can be pulled without login
+        if: env.PUBLISH == 'true'
+        env:
+          REPO: ${{ github.repository_owner }}/vaillant-eebus
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:${REPO}:pull" | jq -r .token)" || {
+            echo "::error::ghcr.io refuses anonymous access to ${REPO}; set the package to public"
+            exit 1
+          }
+          manifest="$(curl -fsS -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/${REPO}/manifests/${VERSION}")"
+          for arch in amd64 arm64; do
+            jq -e --arg arch "${arch}" 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == $arch)' \
+              <<< "${manifest}" > /dev/null || { echo "::error::no linux/${arch} image in ${REPO}:${VERSION}"; exit 1; }
+          done
