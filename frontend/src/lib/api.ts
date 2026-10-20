@@ -6,7 +6,7 @@ import type {
   AppSettings,
   EntityChoice,
   ExportGroup,
-  LogCategory,
+  LogFilter,
   LogPage,
   OperatingMode,
   PairingStatus,
@@ -122,36 +122,63 @@ export async function getEntities(kind: 'temperature' | 'energy', query: string)
   return (await send(`api/ha/entities?${params.toString()}`)).json() as Promise<EntityChoice[]>;
 }
 
-/** Protocol entries, newest first; before continues after the last entry of a page. */
-export async function getLog(category: LogCategory | null, before: number | null): Promise<LogPage> {
+function logParams(filter: LogFilter): URLSearchParams {
   const params = new URLSearchParams();
-  if (category) {
-    params.set('category', category);
+  if (filter.category) {
+    params.set('category', filter.category);
   }
-  if (before !== null) {
-    params.set('before', String(before));
+  if (filter.problems) {
+    params.set('problems', 'true');
+  }
+  return params;
+}
+
+/**
+ * Protocol entries, newest first. before continues after the last entry of a
+ * page, after asks for entries newer than the newest one shown, until (a local
+ * day, YYYY-MM-DD) starts at the end of that day.
+ */
+export async function getLog(
+  filter: LogFilter,
+  position: { before?: number; after?: number; until?: string } = {},
+): Promise<LogPage> {
+  const params = logParams(filter);
+  for (const [name, value] of Object.entries(position)) {
+    if (value !== undefined) {
+      params.set(name, String(value));
+    }
   }
   const query = params.toString();
   return (await send(query ? `api/log?${query}` : 'api/log')).json() as Promise<LogPage>;
 }
 
-function filenameFrom(disposition: string | null): string {
+function filenameFrom(disposition: string | null, fallback: string): string {
   const match = disposition?.match(/filename="([^"]+)"/);
-  return match?.[1] ?? 'vaillant-eebus-diagnose.json';
+  return match?.[1] ?? fallback;
 }
 
-/** Fetches the diagnostic dump and hands it to the browser as a file download. */
-export async function downloadDump(): Promise<void> {
-  const response = await send('api/diagnostics/dump');
+/** Fetches a file from the backend and hands it to the browser as a download. */
+async function download(path: string, fallbackName: string): Promise<void> {
+  const response = await send(path);
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = filenameFrom(response.headers.get('Content-Disposition'));
+  link.download = filenameFrom(response.headers.get('Content-Disposition'), fallbackName);
   document.body.append(link);
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+export async function downloadDump(): Promise<void> {
+  await download('api/diagnostics/dump', 'vaillant-eebus-diagnose.json');
+}
+
+/** The protocol as a CSV file, with the same filter as the list. */
+export async function downloadLog(filter: LogFilter): Promise<void> {
+  const query = logParams(filter).toString();
+  await download(query ? `api/log/export?${query}` : 'api/log/export', 'vaillant-eebus-protokoll.csv');
 }
 
 export async function getState(): Promise<ApiState> {

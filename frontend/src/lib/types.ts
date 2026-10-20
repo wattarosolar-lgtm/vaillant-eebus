@@ -206,6 +206,14 @@ export interface LogEntry {
   time: string;
   category: LogCategory;
   message: string;
+  /** A change did not take effect, or a connection broke. */
+  problem: boolean;
+}
+
+/** What the protocol page lists: one category, only problems, or everything. */
+export interface LogFilter {
+  category: LogCategory | null;
+  problems: boolean;
 }
 
 export interface LogPage {
