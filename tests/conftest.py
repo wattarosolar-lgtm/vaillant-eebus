@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 
 from tests.fake_bridge import FakeBridge, start_fake_bridge
+from tests.fake_home_assistant import FakeHomeAssistant, start_fake_home_assistant
 from tests.support import FAST_BACKOFF
 from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.energy import EnergyMeter
+from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import PairingService
 from vaillant_eebus.settings import SettingsStore
@@ -54,6 +56,21 @@ def state(bridge_client: BridgeClient, pairing: PairingService) -> StateService:
 @pytest.fixture
 def energy_meter(state: StateService, tmp_path: Path) -> EnergyMeter:
     return EnergyMeter(state, tmp_path)
+
+
+@pytest.fixture
+def home_assistant(
+    settings_store: SettingsStore, state: StateService, energy_meter: EnergyMeter, log_store: LogStore
+) -> HomeAssistant:
+    """The app outside Home Assistant: no Supervisor token, no client."""
+    return HomeAssistant(settings_store, state, energy_meter, log_store, None)
+
+
+@pytest.fixture
+async def fake_ha() -> AsyncIterator[FakeHomeAssistant]:
+    fake = await start_fake_home_assistant()
+    yield fake
+    await fake.stop()
 
 
 @pytest.fixture

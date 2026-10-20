@@ -13,6 +13,8 @@ from tests.fake_bridge import GATEWAY_SKI, FakeBridge
 from vaillant_eebus.api import INGRESS_CLIENT, ApiState, create_app, state_events
 from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.energy import EnergyMeter
+from vaillant_eebus.ha_import import HomeAssistantState
+from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import ConnectionState, PairingService
 from vaillant_eebus.settings import OperatingMode, SettingsStore
@@ -26,12 +28,20 @@ def _client(
     gate: WriteGate,
     log: LogStore,
     energy: EnergyMeter,
+    home_assistant: HomeAssistant,
     *,
     client_ip: str = INGRESS_CLIENT,
     static_dir: Path | None = None,
 ) -> httpx.AsyncClient:
     app = create_app(
-        pairing, state, gate, log, energy, static_dir=static_dir, trusted_clients=frozenset({INGRESS_CLIENT})
+        pairing,
+        state,
+        gate,
+        log,
+        energy,
+        home_assistant,
+        static_dir=static_dir,
+        trusted_clients=frozenset({INGRESS_CLIENT}),
     )
     transport = httpx.ASGITransport(app=app, client=(client_ip, 51234))
     return httpx.AsyncClient(transport=transport, base_url="http://ingress")
@@ -39,16 +49,28 @@ def _client(
 
 @pytest.fixture
 async def client(
-    pairing: PairingService, state: StateService, gate: WriteGate, log_store: LogStore, energy_meter: EnergyMeter
+    pairing: PairingService,
+    state: StateService,
+    gate: WriteGate,
+    log_store: LogStore,
+    energy_meter: EnergyMeter,
+    home_assistant: HomeAssistant,
 ) -> AsyncIterator[httpx.AsyncClient]:
-    async with _client(pairing, state, gate, log_store, energy_meter) as http:
+    async with _client(pairing, state, gate, log_store, energy_meter, home_assistant) as http:
         yield http
 
 
 async def test_requests_from_outside_ingress_are_rejected(
-    pairing: PairingService, state: StateService, gate: WriteGate, log_store: LogStore, energy_meter: EnergyMeter
+    pairing: PairingService,
+    state: StateService,
+    gate: WriteGate,
+    log_store: LogStore,
+    energy_meter: EnergyMeter,
+    home_assistant: HomeAssistant,
 ) -> None:
-    async with _client(pairing, state, gate, log_store, energy_meter, client_ip="192.168.178.23") as http:
+    async with _client(
+        pairing, state, gate, log_store, energy_meter, home_assistant, client_ip="192.168.178.23"
+    ) as http:
         response = await http.get("/api/pairing")
 
     assert response.status_code == 403
@@ -117,12 +139,13 @@ async def test_ui_is_served_from_the_static_directory(
     gate: WriteGate,
     log_store: LogStore,
     energy_meter: EnergyMeter,
+    home_assistant: HomeAssistant,
     tmp_path: Path,
 ) -> None:
     (tmp_path / "index.html").write_text("<!doctype html><title>Wärmepumpe</title>", encoding="utf-8")
     (tmp_path / "assets").mkdir()
     (tmp_path / "assets" / "index-abc123.js").write_text("console.log(1);", encoding="utf-8")
-    async with _client(pairing, state, gate, log_store, energy_meter, static_dir=tmp_path) as http:
+    async with _client(pairing, state, gate, log_store, energy_meter, home_assistant, static_dir=tmp_path) as http:
         page = await http.get("/")
         asset = await http.get("/assets/index-abc123.js")
 
@@ -154,7 +177,9 @@ async def test_pairing_through_a_foreign_bridge_is_refused(
     pairing = PairingService(bridge_client, settings_store, "test", bridge_serial_file=serial_file)
     state = StateService(bridge_client, pairing)
     gate = WriteGate(bridge_client, pairing, state, settings_store, log_store)
-    async with _client(pairing, state, gate, log_store, EnergyMeter(state, tmp_path)) as http:
+    energy = EnergyMeter(state, tmp_path)
+    home_assistant = HomeAssistant(settings_store, state, energy, log_store, None)
+    async with _client(pairing, state, gate, log_store, energy, home_assistant) as http:
         status = (await http.get("/api/pairing")).json()
         response = await http.post("/api/pairing/register", json={"ski": GATEWAY_SKI})
 
@@ -180,6 +205,7 @@ async def test_state_contains_connection_and_heat_pump(
         "pending": [],
         "heat_pump": None,
         "energy_today": None,
+        "home_assistant": {"available": False, "connected": False, "rooms": [], "zones": [], "heat_today": None},
     }
     assert after["connection"] == "connected"
     heat_pump = after["heat_pump"]
@@ -325,6 +351,7 @@ async def test_event_stream_survives_a_failing_bridge_call(state: StateService) 
             pending=[],
             heat_pump=heat_pump,
             energy_today=None,
+            home_assistant=HomeAssistantState(available=False, connected=False, rooms=[], zones=[], heat_today=None),
         )
 
     events = state_events(_OpenClient(), state, flaky_state, keepalive=5)

@@ -44,6 +44,8 @@ class LogCategory(StrEnum):
     CONNECTION = "connection"
     # Setpoints, operation modes and boost changed outside this app.
     DEVICE = "device"
+    # Rooms, Home Assistant sensors and the export choice.
+    SETTINGS = "settings"
 
 
 @dataclass(frozen=True, slots=True)

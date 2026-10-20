@@ -24,9 +24,12 @@ from pydantic import AwareDatetime, BaseModel, Field
 from starlette.types import Scope
 
 from vaillant_eebus.energy import EnergyMeter, EnergyToday
+from vaillant_eebus.ha_client import HomeAssistantUnavailable
+from vaillant_eebus.ha_import import HomeAssistantState
+from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
-from vaillant_eebus.settings import OperatingMode
+from vaillant_eebus.settings import ENTITY_ID, ROOM_NAME_MAX, ZONE_ID, ExportGroup, OperatingMode, Room
 from vaillant_eebus.state import HeatPumpState, StateService
 from vaillant_eebus.write_gate import (
     ControlCompressor,
@@ -112,7 +115,30 @@ class CompressorRequest(WriteRequest):
 
 
 # The bridge's zone ID: the SPINE address of the zone's room entity, e.g. "5.1.1".
-ZoneId = Annotated[str, PathParam(pattern=r"^[0-9]{1,5}(\.[0-9]{1,5}){0,7}$")]
+ZoneId = Annotated[str, PathParam(pattern=ZONE_ID.pattern)]
+
+
+class RoomModel(BaseModel):
+    entity_id: str = Field(pattern=ENTITY_ID.pattern)
+    name: str = Field(min_length=1, max_length=ROOM_NAME_MAX)
+    zone_id: str | None = Field(default=None, pattern=ZONE_ID.pattern)
+
+
+class SettingsRequest(BaseModel):
+    rooms: list[RoomModel] = Field(max_length=50)
+    heat_energy_entity: str | None = Field(default=None, pattern=ENTITY_ID.pattern)
+    export: list[ExportGroup]
+
+
+@dataclass(frozen=True, slots=True)
+class SettingsStatus:
+    rooms: list[Room]
+    heat_energy_entity: str | None
+    export: list[ExportGroup]
+    # Entity IDs the app currently reports to Home Assistant.
+    exported: list[str]
+    # False outside Home Assistant: nothing can be chosen or exported.
+    home_assistant_available: bool
 
 
 class UiFiles(StaticFiles):
@@ -142,6 +168,7 @@ class ApiState:
     heat_pump: HeatPumpState | None
     # Summed up by the app from the power; None before the first power reading of the day.
     energy_today: EnergyToday | None
+    home_assistant: HomeAssistantState
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +219,7 @@ def create_app(
     gate: WriteGate,
     log: LogStore,
     energy: EnergyMeter,
+    home_assistant: HomeAssistant,
     *,
     static_dir: Path | None,
     trusted_clients: frozenset[str],
@@ -205,6 +233,17 @@ def create_app(
             pending=gate.pending,
             heat_pump=heat_pump,
             energy_today=energy.today(),
+            home_assistant=home_assistant.snapshot(),
+        )
+
+    def settings_status() -> SettingsStatus:
+        current = home_assistant.settings
+        return SettingsStatus(
+            rooms=list(current.rooms),
+            heat_energy_entity=current.heat_energy_entity,
+            export=sorted(current.export),
+            exported=home_assistant.exported(),
+            home_assistant_available=home_assistant.available,
         )
 
     @app.middleware("http")
@@ -285,6 +324,30 @@ def create_app(
         command = ControlCompressor(action=request.action, start_time=request.start_time)
         return await gate.submit(command, expected_mode=request.operating_mode)
 
+    @app.get("/api/settings")
+    async def get_settings() -> SettingsStatus:
+        return settings_status()
+
+    @app.put("/api/settings")
+    async def put_settings(request: SettingsRequest) -> SettingsStatus:
+        entity_ids = [room.entity_id for room in request.rooms]
+        if len(set(entity_ids)) != len(entity_ids):
+            raise WriteRejected(422, "Jeder Sensor kann nur einem Raum zugeordnet werden.")
+        home_assistant.change(
+            rooms=tuple(
+                Room(entity_id=room.entity_id, name=room.name.strip(), zone_id=room.zone_id) for room in request.rooms
+            ),
+            heat_energy_entity=request.heat_energy_entity,
+            export=frozenset(request.export),
+        )
+        return settings_status()
+
+    @app.get("/api/ha/entities")
+    async def get_ha_entities(
+        kind: Literal["temperature", "energy"], q: Annotated[str, Query(max_length=100)] = ""
+    ) -> list[EntityChoice]:
+        return await home_assistant.entities(kind, q)
+
     @app.get("/api/log")
     async def get_log(
         category: LogCategory | None = None,
@@ -325,6 +388,14 @@ def create_app(
         assert isinstance(exc, WriteRejected)
         headers = {"Retry-After": str(math.ceil(exc.retry_after))} if exc.retry_after is not None else None
         return JSONResponse({"detail": exc.message}, status_code=exc.status, headers=headers)
+
+    @app.exception_handler(HomeAssistantUnavailable)
+    async def home_assistant_unavailable(_request: Request, exc: Exception) -> JSONResponse:
+        _LOGGER.warning("Home Assistant request failed: %s", exc)
+        return JSONResponse(
+            {"detail": "Home Assistant ist gerade nicht erreichbar. Bitte später noch einmal versuchen."},
+            status_code=503,
+        )
 
     @app.exception_handler(NotPairedError)
     async def not_paired(_request: Request, _exc: Exception) -> JSONResponse:

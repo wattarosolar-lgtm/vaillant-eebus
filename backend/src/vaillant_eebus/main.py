@@ -16,6 +16,8 @@ import uvicorn
 from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_client import DEFAULT_ADDRESS, BridgeClient
 from vaillant_eebus.energy import EnergyMeter, local_zone
+from vaillant_eebus.ha_client import SUPERVISOR_CORE_URL, HomeAssistantClient
+from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import PairingService
 from vaillant_eebus.settings import SettingsStore
@@ -51,6 +53,10 @@ class BackendConfig:
     ship_port: int | None = None
     # Home Assistant's time zone; the Supervisor passes it to every app as TZ.
     time_zone: str | None = None
+    # Home Assistant Core; the Supervisor passes the token as SUPERVISOR_TOKEN
+    # (config.yaml homeassistant_api). Without a token the app runs without HA.
+    ha_url: str = SUPERVISOR_CORE_URL
+    ha_token: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> BackendConfig:
@@ -74,6 +80,8 @@ class BackendConfig:
             bridge_serial_file=Path(serial_file) if serial_file else None,
             ship_port=_port(env, "SHIP_PORT"),
             time_zone=env.get("TZ") or None,
+            ha_url=env.get("HA_URL", defaults.ha_url),
+            ha_token=env.get("SUPERVISOR_TOKEN") or None,
         )
 
 
@@ -109,8 +117,19 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
     state = StateService(bridge, pairing)
     gate = WriteGate(bridge, pairing, state, settings, log)
     energy = EnergyMeter(state, config.data_dir, zone=local_zone(config.time_zone))
+    ha_client = HomeAssistantClient(config.ha_url, config.ha_token, log=log) if config.ha_token else None
+    if ha_client is None:
+        _LOGGER.info("No Supervisor token: running without Home Assistant")
+    home_assistant = HomeAssistant(settings, state, energy, log, ha_client)
     app = create_app(
-        pairing, state, gate, log, energy, static_dir=config.static_dir, trusted_clients=config.trusted_clients
+        pairing,
+        state,
+        gate,
+        log,
+        energy,
+        home_assistant,
+        static_dir=config.static_dir,
+        trusted_clients=config.trusted_clients,
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -125,12 +144,15 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
         )
     )
     try:
-        async with asyncio.TaskGroup() as tasks:
+        async with contextlib.AsyncExitStack() as stack, asyncio.TaskGroup() as tasks:
+            if ha_client is not None:
+                await stack.enter_async_context(ha_client)
             background = [
                 tasks.create_task(pairing.run()),
                 tasks.create_task(state.run()),
                 tasks.create_task(gate.run()),
                 tasks.create_task(energy.run()),
+                tasks.create_task(home_assistant.run()),
             ]
             # Returns when uvicorn handles SIGTERM; it re-raises the signal afterwards.
             await server.serve()

@@ -4,7 +4,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from vaillant_eebus.settings import OperatingMode, Settings, SettingsStore
+from vaillant_eebus.settings import ExportGroup, OperatingMode, Room, Settings, SettingsStore
 
 
 def test_load_without_file_returns_defaults(tmp_path: Path) -> None:
@@ -23,7 +23,56 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
     assert json.loads(store.path.read_text(encoding="utf-8")) == {
         "paired_ski": "6C2B9E41D7A0F3851E2C4B6D8F0A1C3E5B7D9F02",
         "operating_mode": "demo",
+        "rooms": [],
+        "heat_energy_entity": None,
+        "export": ["energy", "hot_water", "status", "temperatures", "zones"],
     }
+
+
+def test_home_assistant_choices_round_trip(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    settings = Settings(
+        paired_ski="A" * 40,
+        rooms=(
+            Room(entity_id="sensor.wohnzimmer_temperatur", name="Wohnzimmer", zone_id="5.1.1"),
+            Room(entity_id="sensor.keller_temperatur", name="Keller"),
+        ),
+        heat_energy_entity="sensor.waerme_heute",
+        export=frozenset({ExportGroup.STATUS, ExportGroup.POWER_LIMITS}),
+    )
+    store.save(settings)
+
+    assert SettingsStore(tmp_path).load() == settings
+
+
+def test_invalid_home_assistant_choices_keep_the_pairing(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    store.path.write_text(
+        json.dumps(
+            {
+                "paired_ski": "A" * 40,
+                "operating_mode": "live",
+                "rooms": [
+                    {"entity_id": "sensor.ok", "name": "Bad", "zone_id": "6.1.1"},
+                    {"entity_id": "Not An Entity", "name": "Flur"},
+                    {"entity_id": "sensor.ok", "name": "Doppelt"},
+                    {"entity_id": "sensor.leer", "name": " "},
+                    "kein Raum",
+                ],
+                "heat_energy_entity": 42,
+                "export": ["status", "unbekannt"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = store.load()
+
+    assert (settings.paired_ski, settings.operating_mode) == ("A" * 40, OperatingMode.LIVE)
+    assert settings.rooms == (Room(entity_id="sensor.ok", name="Bad", zone_id="6.1.1"),)
+    assert settings.heat_energy_entity is None
+    assert settings.export == frozenset({ExportGroup.STATUS})
+    assert not store.path.with_name("settings.json.corrupt").exists()
 
 
 def test_settings_of_an_older_version_load_in_demo_mode(tmp_path: Path) -> None:
