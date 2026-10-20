@@ -5,10 +5,11 @@ ohne eBUS-Adapter und ohne MQTT.
 
 ## Stand dieser Version
 
-Version 0.5.3 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
+Version 0.6.0 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
 Heizzone einzeln, und kann Solltemperaturen, Betriebsarten und die Einmalladung des Warmwassers ändern.
 Nach der Installation läuft die App im **Demo-Betrieb** und sendet nichts an die Wärmepumpe (siehe unten).
-Sensoren in Home Assistant und die Raumtemperatur aus Home Assistant folgen in den nächsten Versionen.
+Die Raumtemperatur jeder Zone kommt aus Temperatursensoren in Home Assistant, und die App meldet die Werte der
+Wärmepumpe als Sensoren an Home Assistant (siehe „Home Assistant“).
 
 ## Einrichtung
 
@@ -53,14 +54,20 @@ Solltemperatur, die Sie hier einstellen.
 
 Was die Wärmepumpe über EEBUS nicht liefert, steht als **nicht verfügbar** da.
 
-**Raumtemperatur:** Die Raumfühler der Zonen liefern über EEBUS keine verlässlichen Werte. Im Rundinstrument
-einer Zone steht deshalb vorerst „—“. Eine spätere Version berechnet die Raumtemperatur jeder Zone als Mittelwert
-der Temperatursensoren, die Sie in Home Assistant für die Räume dieser Zone auswählen.
+**Raumtemperatur:** Die Raumfühler der Zonen liefern über EEBUS keine verlässlichen Werte. Das Rundinstrument
+einer Zone zeigt deshalb den Mittelwert der Räume, die Sie ihr in den Einstellungen zuordnen („Mittelwert aus
+2 Räumen“). Ohne zugeordnete Räume steht dort „—“ mit einem Hinweis. Die Karte **Innentemperaturen** listet alle
+gewählten Räume und die Mittelwerte je Zone.
 
 **Energie heute (berechnet):** Die Wärmepumpe meldet über EEBUS keine Energiezähler, nur ihre aktuelle
 Leistungsaufnahme. Die App rechnet daraus den Stromverbrauch seit Mitternacht (Zeitzone von Home Assistant). Das
 ist eine Schätzung. Lief die App nicht oder war die Wärmepumpe nicht erreichbar, steht „(lückenhaft)“ dahinter;
 die fehlende Zeit wird nicht geschätzt. Das gilt auch für den ersten Tag nach der Installation.
+
+**Wärme heute und Arbeitszahl heute:** Haben Sie in den Einstellungen einen Sensor mit der heute erzeugten Wärme
+gewählt, zeigt die Karte „Leistung und Energie“ diesen Wert und die Arbeitszahl des Tages (Wärme ÷ Strom). Die
+Arbeitszahl erscheint nur, wenn der Wärmewert aktuell ist (höchstens 3 Stunden alt), der Stromverbrauch des Tages
+lückenlos ist und mindestens 0,5 kWh beträgt.
 
 ## Demo- und Live-Betrieb
 
@@ -88,6 +95,38 @@ der schon eingestellt ist, wird nicht noch einmal gesendet. Ohne Verbindung zum 
 Der gewählte Betrieb bleibt nach einem Neustart oder Update erhalten. Ist die Einstellungsdatei beschädigt,
 startet die App sicherheitshalber im Demo-Betrieb.
 
+## Home Assistant
+
+Die App liest Werte aus Home Assistant und meldet ihre eigenen Werte dorthin. Sie ruft keine Dienste auf und
+ändert keine anderen Geräte oder Entitäten. Ist Home Assistant kurz nicht erreichbar (etwa bei einem Neustart),
+laufen Übersicht und Steuerung der Wärmepumpe weiter; die Werte aus Home Assistant stehen solange als „nicht
+verfügbar“ da.
+
+Eingerichtet wird alles unter **Einstellungen**, gespeichert mit **Speichern**:
+
+- **Räume aus Home Assistant:** Unter „Raum hinzufügen“ suchen Sie einen Temperatursensor (°C oder °F), geben dem
+  Raum einen Namen und wählen Zone 1, Zone 2 oder keine Zone. Ein Wert zählt für den Mittelwert, solange er eine
+  Zahl ist und der Sensor sich in den letzten 30 Minuten gemeldet hat; sonst steht er als „veraltet“ oder „nicht
+  verfügbar“ in der Karte Innentemperaturen.
+- **Wärme heute:** ein Energiesensor (Wh, kWh oder MWh), der jeden Tag bei 0 beginnt. Die myVAILLANT-Integration
+  liefert solche Werte; aus einem Gesamtzähler macht der Helfer „Verbrauchszähler“ mit täglichem Zyklus einen
+  Tageswert.
+- **Export nach Home Assistant:** Welche Werte die App als Sensoren meldet, wählen Sie nach Gruppen. Voreingestellt
+  sind Status, Zonen, Warmwasser, Temperaturen sowie Leistung und Energie; Leistungsdeckel und
+  Verdichter-Flexibilität sind aus.
+
+Die Sensoren heißen `sensor.vaillant_eebus_…` bzw. `binary_sensor.vaillant_eebus_…`, zum Beispiel
+`sensor.vaillant_eebus_outdoor_temperature`, `sensor.vaillant_eebus_zone_1_room_temperature` (Mittelwert der
+Räume) oder `sensor.vaillant_eebus_energy_today`. Die vollständige Liste steht in den Einstellungen unter
+„Gemeldete Sensoren“. Die App meldet eine Änderung höchstens alle 10 Sekunden je Sensor, Energie höchstens jede
+Minute. „Energie heute (berechnet)“ lässt sich im Energie-Dashboard als Verbrauch der Wärmepumpe wählen; es bleibt
+eine Schätzung.
+
+**Bekannte Einschränkungen der Sensoren:** Sie haben in Home Assistant keine feste Identität. Man kann sie dort
+nicht umbenennen, keinem Bereich zuordnen und nicht in der Geräteübersicht finden. Nach einem Neustart von Home
+Assistant fehlen sie kurz, bis die App sie neu meldet (meist innerhalb weniger Sekunden). Werte, die Ihre Anlage
+nie liefert (etwa Vorlauftemperatur oder Energiezähler), bekommen keinen Sensor.
+
 ## Protokoll
 
 Die Seite **Protokoll** listet, neueste Einträge zuerst:
@@ -98,8 +137,9 @@ Die Seite **Protokoll** listet, neueste Einträge zuerst:
   Verbindungsunterbrechung „Nachträglich bestätigt“ oder „Nicht übernommen“,
 - **Gerät:** Sollwerte, Betriebsarten und Einmalladung, die außerhalb der App geändert wurden, etwa in der
   myVAILLANT-App,
-- **Verbindung:** Kopplung, Verbindungsaufbau und -abbrüche,
-- **Modus:** Start der App mit ihrem Betrieb und jeder Wechsel zwischen Demo und Live.
+- **Verbindung:** Kopplung, Verbindungsaufbau und -abbrüche, auch die Verbindung zu Home Assistant,
+- **Modus:** Start der App mit ihrem Betrieb und jeder Wechsel zwischen Demo und Live,
+- **Einstellungen:** geänderte Räume, Wärmesensor und Export.
 
 Messwerte stehen nicht im Protokoll. Es behält die letzten 10.000 Einträge.
 
@@ -119,8 +159,9 @@ Der Dump enthält Modell- und Seriennummern Ihrer Geräte; die SKI des Gateways 
 
 ## Daten und Sicherung
 
-Die App speichert ihre EEBUS-Identität in `/data/eebus` (Zertifikat und Seriennummer), das gekoppelte Gateway
-und den gewählten Betrieb in `/data/settings.json`, das Protokoll in `/data/app.db` und den berechneten
+Die App speichert ihre EEBUS-Identität in `/data/eebus` (Zertifikat und Seriennummer), das gekoppelte Gateway,
+den gewählten Betrieb, die Räume und die Export-Auswahl in `/data/settings.json`, das Protokoll in `/data/app.db`
+und den berechneten
 Energieverbrauch je Tag (400 Tage) in `/data/energy.json`.
 Diese Dateien sind Teil der Home-Assistant-Sicherung. Gehen die Daten in `/data/eebus` verloren, ändert sich die
 SKI der App und die Kopplung in der myVAILLANT-App muss neu gemacht werden.

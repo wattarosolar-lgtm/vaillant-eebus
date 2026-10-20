@@ -345,18 +345,20 @@ async def test_a_group_no_longer_exported_is_removed(
 ) -> None:
     home_assistant = HomeAssistant(settings_store, connected_state, energy_meter, log_store, ha_client)
 
-    async with running(home_assistant.run()):
-        await eventually(lambda: "sensor.vaillant_eebus_zone_1_setpoint" in fake_ha.own_states())
-        home_assistant.change(rooms=(), heat_energy_entity=None, export=frozenset({ExportGroup.STATUS}))
-        await eventually(lambda: "sensor.vaillant_eebus_zone_1_setpoint" not in fake_ha.own_states())
-
-    assert set(fake_ha.own_states()) == {
+    status = {
         "binary_sensor.vaillant_eebus_connected",
         "binary_sensor.vaillant_eebus_compressor_running",
         "binary_sensor.vaillant_eebus_heartbeat_ok",
         "sensor.vaillant_eebus_operating_state",
     }
-    assert home_assistant.exported() == sorted(fake_ha.own_states())
+    async with running(home_assistant.run()):
+        await eventually(lambda: "sensor.vaillant_eebus_zone_1_setpoint" in fake_ha.own_states())
+        home_assistant.change(rooms=(), heat_energy_entity=None, export=frozenset({ExportGroup.STATUS}))
+        # The other groups' sensors are removed one after another.
+        await eventually(lambda: fake_ha.own_states().keys() == status)
+
+    assert home_assistant.exported() == sorted(status)
+    assert ("DELETE", "sensor.vaillant_eebus_zone_1_setpoint", None) in fake_ha.writes
 
 
 async def test_a_changed_value_is_reported_at_most_every_ten_seconds(

@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v0.5.3)
+# Briefing: Vaillant EEBUS (Stand v0.6.0)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -9,10 +9,10 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 0.5.3, Phasen 1–5 von 7 umgesetzt (Abnahme von Phase 5 an der Anlage offen). 0.5.1 enthält
+- **Stand:** Version 0.6.0, Phasen 1–6 von 7 umgesetzt (Abnahme von Phase 5 und 6 an der Anlage offen). 0.5.1 enthält
   die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a), 0.5.2 die aus der ersten Abnahme an der
   Anlage (ziehbarer Regler, Sperre im Auto-Betrieb, ruhigere Bedienung, „Energie heute“), 0.5.3 zeigt im
-  Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt).
+  Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt). 0.6.0 bindet Home Assistant an (Abschnitt 5b).
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -24,7 +24,7 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | 3 | Lesen: Zustand, API, Übersicht, Live-Updates | erledigt (0.3.0) |
 | 4 | Mehrere Heizzonen in der Bridge, Eco nur wenn angeboten | erledigt (0.4.0), an der Anlage abgenommen |
 | 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1–0.5.3), Abnahme an der Anlage offen |
-| 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärmemenge z. B. aus der myVAILLANT-Integration), HA-Export als Sensoren | offen |
+| 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärme heute), HA-Export als Sensoren | umgesetzt (0.6.0), Abnahme an der Anlage offen |
 | 7 | Einstellungs-/Protokollseite fertig, Doku, Release | offen |
 
 ## 2. Repositories
@@ -97,6 +97,10 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `pairing.py` | Kopplung und Verbindungszustand (`ConnectionState`); prüft, ob die eigene Bridge antwortet; erkennt fremde Bridge und belegten SHIP-Port; meldet das gekoppelte Gateway nach jedem Bridge-Neustart wieder an; `ConnectionLog` fasst abgelehnte Verbindungsversuche beim Start zusammen und schreibt Verbindungsereignisse deutsch ins Protokoll; Diagnose-Dump |
 | `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a). |
 | `energy.py` | `EnergyMeter`: summiert die gemeldete Gesamtleistung (`power_consumption`) über die Zeit zu Wh je Tag (die Anlage liefert keine Energiezähler); > 3 min ohne Messwert wird nicht überbrückt, der Tag gilt dann als lückenhaft (auch der erste Tag); Tageswechsel um Mitternacht in `TZ` (Rückfall UTC mit Warnung); `/data/energy.json` atomar, höchstens einmal pro Minute und beim Beenden, 400 Tage; kurzer Neustart (< 3 min) wird überbrückt. `today()` zählt das laufende Intervall bis jetzt mit. |
+| `ha_client.py` | Zugriff auf HA Core über den Supervisor (`SUPERVISOR_TOKEN`, `http://supervisor/core`): REST (Zustände, eigene Sensoren setzen/entfernen) und eine WebSocket-Verbindung (Anmeldung, `subscribe_trigger` auf die gewählten Entitäten mit Rückfall auf `platform`, `homeassistant_started`), Wiederverbindung mit Backoff, alle 5 min erneutes Lesen (`last_reported`). Schreibt nur `sensor.vaillant_eebus_*`/`binary_sensor.vaillant_eebus_*` (`OWN_ENTITY`, sonst `ValueError`). Listener-Schnittstelle `HomeAssistantListener`. |
+| `ha_import.py` | Räume (Name, Zone), Mittelwert je Zone aus gültigen Werten (Zahl, °C/°F, ≤ 30 min alt), Wärme heute (Wh/kWh/MWh, ≤ 3 h alt); bei Verbindungsverlust werden Werte verworfen; meldet Änderungen gedrosselt (2 s) per `state.republish()`. |
+| `ha_export.py` | Sensoren nach Gruppen (`ExportGroup`): Status, Zonen (Raumtemperatur = HA-Mittelwert, Soll, Betriebsart), Warmwasser, Temperaturen, Leistung/Energie (inkl. `energy_today`, `total_increasing`), Leistungsdeckel, Verdichter. Nur Werte, die die Anlage je geliefert hat; fehlt einer später → `unavailable`. Je Sensor höchstens alle 10 s, Energie 60 s; nach Neuverbindung/`homeassistant_started` alles neu; abgewählte Gruppen per DELETE entfernt. |
+| `home_assistant.py` | Fassade für `main`/`api`: verbindet Client, Import und Export; `entities(kind, q)` für die Auswahl; `change()` speichert Räume/Wärmesensor/Export und protokolliert (`settings`); `performance_today()` (Wärme ÷ Strom, nur aktuell, lückenlos, ≥ 0,5 kWh). Ohne Token kein Client. |
 | `log_store.py` | Protokoll in SQLite (`/data/app.db`): `add()` kehrt sofort zurück, alle DB-Arbeit läuft geordnet in einem Worker-Thread; höchstens 10.000 Einträge; Kategorien `mode`, `write`, `connection`, `device`; beschädigte DB wird beiseitegelegt |
 | `state.py` | `StateService`: liest den Geräte-Snapshot nach jedem Zustandsereignis der Bridge (1 s gebündelt) und **spätestens jede Minute** – diese Leseanfrage braucht auch die Verbindungsüberwachung der Bridge (ohne Lesezugriff baut sie die Verbindung nach 2 min neu auf). Bildet `DeviceSnapshot` auf `HeatPumpState` ab (Messwerte, Zonen, Warmwasser, Status). Nicht gemeldete Werte bleiben `None`, nie Ersatzwerte. Verdichter gilt als aktiv ab 100 W. Liest auch `mode_writable`, Leistungsdeckel, Failsafe und Verdichter-Flexibilität. `refresh_now()` (nach einem Schreibvorgang) und `republish()` (Modus/offene Schreibvorgänge geändert). |
 | `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, Keep-alive alle 15 s; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
@@ -168,6 +172,21 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 - Moduswechsel: Live nur mit `confirm: true` (400 sonst); gespeichert in `settings.json`; Wechsel protokolliert.
 - Ein Strukturtest (AST) stellt sicher, dass nur `write_gate.py` die `WRITE_METHODS` des Bridge-Clients aufruft.
 
+## 5b. Home Assistant (Phase 6)
+
+- Die App liest nur und meldet eigene Sensoren; keine Dienste, keine fremden Entitäten (Test
+  `test_only_the_apps_own_sensors_can_be_written`). Nichts davon läuft über `write_gate`, weil nichts an die
+  Wärmepumpe geht.
+- Einstellungen (`settings.json`): `rooms` (`entity_id`, `name`, `zone_id`), `heat_energy_entity`, `export`
+  (Gruppen, Vorgabe ohne Leistungsdeckel/Verdichter). Ungültige Einträge werden einzeln verworfen, Kopplung und
+  Modus bleiben.
+- API: `GET/PUT api/settings`, `GET api/ha/entities?kind=temperature|energy&q=`; `api/state` mit `home_assistant`
+  und `performance_today`.
+- Oberfläche: Einstellungen „Räume aus Home Assistant“, „Wärme heute“, „Export nach Home Assistant“; Zonenkreis mit
+  Mittelwert, Karte „Innentemperaturen“, „Wärme heute“ und „Arbeitszahl heute“ in „Leistung und Energie“.
+- Tests gegen `tests/fake_home_assistant.py` (aiohttp: REST, WebSocket mit Anmeldung, Trigger, Neustart).
+- Nicht umgesetzt: aktiver Sollwert je Zone aus der myVAILLANT-Integration (Nutzer: „noch nicht“), Verlauf 24 h.
+
 ## 6. Die echte Anlage (Feldbefunde)
 
 - Wärmepumpe: Vaillant aroTHERM split plus, VWL 75/8.2 AS 230V S2, über Vaillant-Gateway.
@@ -196,8 +215,8 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 
 ## 7. Tests
 
-- Python: 113 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
-  Raumfühler). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
+- Python: 152 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+  Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
   Kein Test spricht mit echter Hardware.
 - Go (Fork): `go test -race ./...`; neue Tests u. a. `internal/grpc/hvac_zones_test.go`,
@@ -232,7 +251,7 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
 10. Der gRPC-Port der Bridge (127.0.0.1:50471) hat keine Anmeldung. Andere Prozesse im Host-Netzwerk (unter HAOS auch
     HA Core) könnten an der App und ihrem Demo-Betrieb vorbei schreiben. Absicherung (Token) ist für eine spätere
     Phase vorgesehen.
-4. Raumtemperatur und Wärmemenge aus Home Assistant sowie Export nach HA kommen in Phase 6.
+4. Raumtemperatur und Wärmemenge aus Home Assistant sowie Export nach HA sind umgesetzt (0.6.0), an der Anlage noch nicht geprüft.
 5. Im Fork gibt es einen Alt-Pfad in `hvac_service.go` für Quellen ohne Zonenliste (per Typ-Zusicherung). Er existiert
    für bestehende Test-Doubles; im Produktivbetrieb liefern alle Use Cases Zonenlisten.
 6. `recordCapabilitySupport()` in `internal/usecases/entity.go` (Original-Code) entfernt die Registry-Beobachtung

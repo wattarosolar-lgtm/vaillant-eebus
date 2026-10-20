@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0
+
+Anbindung an Home Assistant:
+
+- **Räume:** In den Einstellungen wählen Sie Temperatursensoren aus Home Assistant, geben ihnen einen Namen und
+  ordnen sie einer Zone zu. Das Rundinstrument jeder Zone zeigt den Mittelwert ihrer Räume; die neue Karte
+  „Innentemperaturen“ listet alle Räume. Fehlende oder veraltete Werte (älter als 30 Minuten) werden markiert und
+  zählen nicht mit.
+- **Wärme heute und Arbeitszahl:** Ein Sensor mit der heute erzeugten Wärme (etwa aus der myVAILLANT-Integration)
+  ergibt zusammen mit „Energie heute“ die Arbeitszahl des Tages.
+- **Export:** Die App meldet die Werte der Wärmepumpe als Sensoren `sensor.vaillant_eebus_…` an Home Assistant,
+  nach Gruppen wählbar, und nach einem Neustart von Home Assistant von selbst neu.
+- Die App ruft in Home Assistant keine Dienste auf und ändert keine anderen Entitäten. Ist Home Assistant nicht
+  erreichbar, läuft die Steuerung der Wärmepumpe normal weiter.
+- Neue Protokoll-Kategorie „Einstellungen“.
+
 ## 0.5.3
 
 - Zonen im Auto-Betrieb zeigen wieder die Solltemperatur und den orangen Bogen mit Knopf statt „Zeitprogramm“.

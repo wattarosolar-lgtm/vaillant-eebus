@@ -20,7 +20,7 @@ https://github.com/wattarosolar-lgtm/vaillant-eebus
 | `bridge/` | Git-Submodul: Fork der EEBUS-Bridge ([volschin/eebus-ha-bridge](https://github.com/volschin/eebus-ha-bridge)), fester Commit |
 | `backend/` | Python-Backend (`src/vaillant_eebus`), Lock-Dateien, Skript für die gRPC-Stubs |
 | `frontend/` | Oberfläche (Svelte, TypeScript, Vite), vom Backend per Ingress ausgeliefert |
-| `tests/` | Backend-Tests und Fake-Bridge |
+| `tests/` | Backend-Tests, Fake-Bridge und Fake-Home-Assistant |
 | `.github/workflows/` | CI und Image-Build |
 
 Im Container laufen zwei s6-Dienste: `eebus-bridge` (Go, SHIP/SPINE, Port 4712, gRPC auf `127.0.0.1:50471`)
@@ -40,6 +40,17 @@ Energiezähler liefert. Mehr als 3 Minuten ohne Messwert werden nicht überbrüc
 Der Tageswechsel folgt der Zeitzone von Home Assistant (`TZ`, vom Supervisor gesetzt); gespeichert wird in
 `/data/energy.json`.
 
+**Home Assistant** (`homeassistant_api: true`, Token aus `SUPERVISOR_TOKEN`, über `http://supervisor/core`):
+`ha_client.py` hält eine WebSocket-Verbindung, abonniert die Zustände der gewählten Entitäten (`subscribe_trigger`,
+bei Versionen vor 2024.10 mit `platform` statt `trigger`) und `homeassistant_started` und liest die Entitäten alle
+5 Minuten neu (`last_reported`). Schreiben darf der Client nur `sensor.vaillant_eebus_*` und
+`binary_sensor.vaillant_eebus_*`; Dienste ruft die App nicht auf. `ha_import.py` bildet daraus Räume, den
+Mittelwert je Zone (nur Zahlen in °C/°F, höchstens 30 Minuten alt) und die Wärme des Tages; `ha_export.py` meldet
+die Wärmepumpe als Sensoren (je Sensor höchstens alle 10 s, Energie jede Minute, alles neu nach einer
+Neuverbindung oder `homeassistant_started`, abgewählte Gruppen werden entfernt). Der Zustand enthält dazu
+`home_assistant` und `performance_today` (Wärme ÷ Strom des Tages, nur aus verlässlichen Werten). Ohne Token läuft
+die App ohne Home Assistant.
+
 Die Bridge liefert jede Heizzone einzeln (`room_heating_zones` im Snapshot, `ListRoomHeatingZones`). Eine Zone heißt
 nach der SPINE-Adresse ihres Raum-Eintrags, z. B. `5.1.1`. Schreibende Aufrufe brauchen bei mehreren Zonen diese
 Zonen-ID; ohne sie lehnt die Bridge ab, statt eine Zone zu raten.
@@ -57,6 +68,8 @@ Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
 | POST | `api/lpc`, `api/lpc/failsafe` | Leistungsdeckel und Failsafe-Grenze (nur API, im Demo-Betrieb gesperrt; die Bridge wartet hier nicht auf eine Quittung des Geräts, „Gesendet“ heißt nur abgeschickt) |
 | POST | `api/ohpcf` | Verdichter-Flexibilität (`schedule`, `pause`, `resume`, `abort`; nur API, im Demo gesperrt) |
 | GET | `api/log` | Protokoll, seitenweise (`before`, `limit`) und nach `category` gefiltert |
+| GET/PUT | `api/settings` | Räume (`entity_id`, `name`, `zone_id`), Wärmesensor (`heat_energy_entity`), Export-Gruppen (`export`); dazu `exported` und `home_assistant_available` |
+| GET | `api/ha/entities?kind=temperature\|energy&q=…` | Sensoren aus Home Assistant zur Auswahl (503, wenn Home Assistant nicht erreichbar ist) |
 
 Jeder Schreibbefehl nennt in `operating_mode` (`demo` oder `live`) den Betrieb, den der Nutzer beim Ändern sah;
 stimmt er nicht mehr, wird nichts gesendet (409). Antworten sagen immer, ob gesendet wurde: `{"sent": false,
@@ -98,6 +111,9 @@ PYTHONPATH=backend/gen .venv/bin/python -m tests.fake_bridge --port 50471 --conn
 export DATA_DIR=/tmp/vaillant-eebus HTTP_HOST=127.0.0.1 TRUSTED_CLIENTS=127.0.0.1 STATIC_DIR=frontend/dist
 PYTHONPATH=backend/src:backend/gen .venv/bin/python -m vaillant_eebus
 ```
+
+Ohne `SUPERVISOR_TOKEN` läuft das Backend ohne Home Assistant. Mit `HA_URL=http://<host>:8123` und einem
+langlebigen Zugriffstoken als `SUPERVISOR_TOKEN` spricht es stattdessen mit einer Test-Instanz von Home Assistant.
 
 Für die Arbeit an der Oberfläche mit Hot Reload stattdessen `npm run dev` im Ordner `frontend/`; Vite leitet
 `/api` an das Backend auf Port 8714 weiter. Unter Windows `PYTHONPATH` mit `;` statt `:` trennen.
