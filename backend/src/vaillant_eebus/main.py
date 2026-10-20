@@ -14,6 +14,7 @@ from pathlib import Path
 import uvicorn
 
 from vaillant_eebus.api import INGRESS_CLIENT, create_app
+from vaillant_eebus.bridge_auth import BridgeCredentials
 from vaillant_eebus.bridge_client import DEFAULT_ADDRESS, BridgeClient
 from vaillant_eebus.energy import EnergyMeter, local_zone
 from vaillant_eebus.ha_client import SUPERVISOR_CORE_URL, HomeAssistantClient
@@ -49,6 +50,9 @@ class BackendConfig:
     # EEBUS serial file written by the bridge's s6 service; None skips the
     # bridge identity check (development against the fake bridge).
     bridge_serial_file: Path | None = None
+    # TLS certificate and token of the bridge's gRPC API (bridge_auth.py); None
+    # talks plaintext (development against the fake bridge).
+    bridge_credentials_dir: Path | None = None
     # SHIP port of this app's bridge, probed for another listener while the bridge is down.
     ship_port: int | None = None
     # Home Assistant's time zone; the Supervisor passes it to every app as TZ.
@@ -64,6 +68,7 @@ class BackendConfig:
         static_dir = env.get("STATIC_DIR")
         trusted = env.get("TRUSTED_CLIENTS")
         serial_file = env.get("BRIDGE_SERIAL_FILE")
+        credentials_dir = env.get("BRIDGE_CREDENTIALS_DIR")
         return cls(
             bridge_address=env.get("BRIDGE_ADDRESS", defaults.bridge_address),
             data_dir=Path(env.get("DATA_DIR", str(defaults.data_dir))),
@@ -78,6 +83,7 @@ class BackendConfig:
             app_version=env.get("APP_VERSION", defaults.app_version),
             log_level=env.get("LOG_LEVEL", defaults.log_level),
             bridge_serial_file=Path(serial_file) if serial_file else None,
+            bridge_credentials_dir=Path(credentials_dir) if credentials_dir else None,
             ship_port=_port(env, "SHIP_PORT"),
             time_zone=env.get("TZ") or None,
             ha_url=env.get("HA_URL", defaults.ha_url),
@@ -172,8 +178,11 @@ async def _main(config: BackendConfig) -> None:
     # Windows dev machines, where Ctrl+C still stops the backend.
     with contextlib.suppress(NotImplementedError):
         asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, main_task.cancel)
+    credentials = (
+        BridgeCredentials.load(config.bridge_credentials_dir) if config.bridge_credentials_dir is not None else None
+    )
     try:
-        async with BridgeClient(config.bridge_address) as bridge:
+        async with BridgeClient(config.bridge_address, credentials=credentials) as bridge:
             await run_backend(config, bridge)
     except asyncio.CancelledError:
         pass

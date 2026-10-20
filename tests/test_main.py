@@ -28,6 +28,7 @@ def test_config_from_environment() -> None:
             "APP_VERSION": "0.2.0",
             "LOG_LEVEL": "debug",
             "BRIDGE_SERIAL_FILE": "/data/eebus/serial",
+            "BRIDGE_CREDENTIALS_DIR": "/data/eebus/grpc",
             "SHIP_PORT": "4712",
             "TZ": "Europe/Berlin",
         }
@@ -43,6 +44,7 @@ def test_config_from_environment() -> None:
         app_version="0.2.0",
         log_level="debug",
         bridge_serial_file=Path("/data/eebus/serial"),
+        bridge_credentials_dir=Path("/data/eebus/grpc"),
         ship_port=4712,
         time_zone="Europe/Berlin",
     )
@@ -55,6 +57,7 @@ def test_config_defaults_bind_ingress_only() -> None:
     assert config.trusted_clients == frozenset({"172.30.32.2"})
     assert config.static_dir is None
     assert config.bridge_serial_file is None
+    assert config.bridge_credentials_dir is None
     assert config.ship_port is None
     assert config.time_zone is None
 

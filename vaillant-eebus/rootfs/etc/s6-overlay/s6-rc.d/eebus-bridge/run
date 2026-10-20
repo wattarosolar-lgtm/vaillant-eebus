@@ -7,6 +7,8 @@
 readonly DATA_DIR="/data/eebus"
 readonly CERT_DIR="${DATA_DIR}/certs"
 readonly SERIAL_FILE="${DATA_DIR}/serial"
+# Must match BRIDGE_CREDENTIALS_DIR in ../backend/run and init-grpc-credentials.
+readonly GRPC_DIR="${DATA_DIR}/grpc"
 readonly CONFIG_FILE="/etc/eebus-bridge/config.yaml"
 
 mkdir -p "${CERT_DIR}" "$(dirname "${CONFIG_FILE}")"
@@ -26,16 +28,20 @@ if bashio::config.equals 'log_level' 'debug'; then
 fi
 
 # The serial is hex only, so it is safe inside the YAML quotes. gRPC stays on
-# loopback in plaintext: only the backend in this container talks to it. The
-# port is not the upstream default 50051, so another EEBUS bridge on the host
-# (all host-network apps share ports) does not collide with this one.
+# loopback, but every app with host networking shares it: TLS with this app's
+# own certificate and a bearer token (oneshot init-grpc-credentials) let only
+# the backend in this container in. The port is not the upstream default
+# 50051, so another EEBUS bridge on the host does not collide with this one.
 cat > "${CONFIG_FILE}" <<EOF
 grpc:
   port: 50471
   bind: "127.0.0.1"
   enable_reflection: false
   security:
-    mode: "loopback"
+    mode: "tls_token"
+    tls_cert_file: "${GRPC_DIR}/cert.pem"
+    tls_key_file: "${GRPC_DIR}/key.pem"
+    token_file: "${GRPC_DIR}/token"
 eebus:
   port: 4712
   vendor: "HomeAssistant"
@@ -53,5 +59,5 @@ experimental:
   mgcp_provider: false
 EOF
 
-bashio::log.info "Starting EEBUS bridge (gRPC 127.0.0.1:50471, SHIP port 4712)"
+bashio::log.info "Starting EEBUS bridge (gRPC 127.0.0.1:50471 with TLS and token, SHIP port 4712)"
 exec /usr/local/bin/eebus-bridge --config "${CONFIG_FILE}"

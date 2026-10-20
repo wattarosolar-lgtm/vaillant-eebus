@@ -10,6 +10,8 @@ export BRIDGE_ADDRESS="127.0.0.1:50471"
 # The bridge must report this serial, so the backend never talks to another
 # EEBUS app's bridge by mistake.
 export BRIDGE_SERIAL_FILE="/data/eebus/serial"
+# TLS certificate and token of the bridge's gRPC API (oneshot init-grpc-credentials).
+export BRIDGE_CREDENTIALS_DIR="/data/eebus/grpc"
 export SHIP_PORT="4712"
 export DATA_DIR="/data"
 # Ingress: the Supervisor connects to the host's address in the hassio network

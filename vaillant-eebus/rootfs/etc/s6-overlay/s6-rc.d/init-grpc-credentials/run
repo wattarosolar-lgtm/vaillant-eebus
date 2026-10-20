@@ -1,0 +1,9 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# Creates the TLS certificate and bearer token of the bridge's gRPC API once
+# (backend/src/vaillant_eebus/bridge_auth.py). A oneshot, so both the bridge
+# and the backend find them complete when they start. Without them, any app
+# with host networking could send write commands to the bridge past this
+# app's demo mode.
+
+exec /opt/venv/bin/python -m vaillant_eebus.bridge_auth /data/eebus/grpc

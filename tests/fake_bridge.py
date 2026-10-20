@@ -7,6 +7,9 @@ and OHPCF services. Writes are checked like the real bridge does, recorded in
 FakeDeviceService.write_calls and applied to the served device state. Every
 other RPC answers UNIMPLEMENTED (behaviour of the generated base class).
 
+With a credentials directory (bridge_auth.py) it serves TLS with that
+certificate and requires the bearer token, like the real bridge in the app.
+
 Standalone, e.g. to click through the setup wizard without hardware (the fake
 gateway "accepts" the pairing a few seconds after it was registered):
     PYTHONPATH=backend/gen python -m tests.fake_bridge --port 50471
@@ -19,6 +22,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import grpc
@@ -606,6 +610,36 @@ class FakeOHPCFService(OHPCFServiceServicer):
         return await self._device.answer(context)
 
 
+class _RequireToken(grpc.aio.ServerInterceptor):
+    """Refuses every call without the bearer token, as the bridge does in mode tls_token."""
+
+    def __init__(self, token: str) -> None:
+        self._expected = f"Bearer {token}"
+
+    async def intercept_service(
+        self,
+        continuation: Callable[[grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler[Any, Any] | None]],
+        handler_call_details: grpc.HandlerCallDetails,
+    ) -> grpc.RpcMethodHandler[Any, Any] | None:
+        handler = await continuation(handler_call_details)
+        metadata = dict(handler_call_details.invocation_metadata or ())
+        if metadata.get("authorization") == self._expected or handler is None:
+            return handler
+
+        async def deny(_request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> Any:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "valid bearer token required")
+
+        async def deny_stream(request: Any, context: grpc.aio.ServicerContext[Any, Any]) -> AsyncIterator[Any]:
+            await deny(request, context)
+            yield None
+
+        if handler.unary_stream is not None:
+            return grpc.unary_stream_rpc_method_handler(
+                deny_stream, handler.request_deserializer, handler.response_serializer
+            )
+        return grpc.unary_unary_rpc_method_handler(deny, handler.request_deserializer, handler.response_serializer)
+
+
 @dataclass
 class FakeBridge:
     server: grpc.aio.Server
@@ -616,16 +650,31 @@ class FakeBridge:
         await self.server.stop(grace=None)
 
 
-async def start_fake_bridge(port: int = 0, auto_connect_after: float | None = None) -> FakeBridge:
-    """Start the fake bridge on 127.0.0.1; port 0 picks a free port."""
-    server = grpc.aio.server()
+async def start_fake_bridge(
+    port: int = 0, auto_connect_after: float | None = None, *, credentials_dir: Path | None = None
+) -> FakeBridge:
+    """Start the fake bridge on 127.0.0.1; port 0 picks a free port.
+
+    credentials_dir holds cert.pem, key.pem and token as bridge_auth.ensure()
+    writes them; without it the fake bridge serves plaintext.
+    """
+    interceptors = []
+    if credentials_dir is not None:
+        interceptors.append(_RequireToken((credentials_dir / "token").read_text(encoding="ascii").strip()))
+    server = grpc.aio.server(interceptors=interceptors)
     device = FakeDeviceService(auto_connect_after)  # type: ignore[abstract]  # unimplemented RPCs answer UNIMPLEMENTED
     add_DeviceServiceServicer_to_server(device, server)
     add_HVACServiceServicer_to_server(FakeHVACService(device), server)  # type: ignore[abstract]
     add_DHWServiceServicer_to_server(FakeDHWService(device), server)  # type: ignore[abstract]
     add_LPCServiceServicer_to_server(FakeLPCService(device), server)  # type: ignore[abstract]
     add_OHPCFServiceServicer_to_server(FakeOHPCFService(device), server)  # type: ignore[abstract]
-    bound_port = server.add_insecure_port(f"127.0.0.1:{port}")
+    if credentials_dir is None:
+        bound_port = server.add_insecure_port(f"127.0.0.1:{port}")
+    else:
+        tls = grpc.ssl_server_credentials(
+            [((credentials_dir / "key.pem").read_bytes(), (credentials_dir / "cert.pem").read_bytes())]
+        )
+        bound_port = server.add_secure_port(f"127.0.0.1:{port}", tls)
     await server.start()
     return FakeBridge(server=server, address=f"127.0.0.1:{bound_port}", device=device)
 

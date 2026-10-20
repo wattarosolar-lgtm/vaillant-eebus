@@ -36,7 +36,7 @@ from eebus.v1.device_service_pb2 import (
     ServerInfo,
 )
 
-from vaillant_eebus.bridge_client import RETRYABLE_CODES, BridgeClient
+from vaillant_eebus.bridge_client import RETRYABLE_CODES, BridgeClient, refused_tls
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.settings import SettingsStore
 
@@ -191,6 +191,15 @@ class PairingService:
         except grpc.aio.AioRpcError as err:
             if err.code() not in RETRYABLE_CODES:
                 raise
+            if refused_tls(err):
+                # Something answers on this app's gRPC address without this app's certificate.
+                return PairingStatus(
+                    bridge=BridgeInfo(reachable=True),
+                    state=ConnectionState.FOREIGN_BRIDGE,
+                    paired=Gateway(ski=ski) if ski else None,
+                    discovered=[],
+                    app_version=self._app_version,
+                )
             in_use = self._ship_port is not None and await _port_accepts_connections(self._ship_port)
             return PairingStatus(
                 bridge=BridgeInfo(reachable=False),

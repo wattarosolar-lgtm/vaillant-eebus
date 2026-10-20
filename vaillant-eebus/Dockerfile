@@ -69,9 +69,12 @@ ENV PYTHONPATH=/opt/backend \
 
 # Smoke test: import the whole backend in the target image, for every
 # architecture. Fails the build if a compiled dependency does not load on
-# Alpine (musl) or the generated stubs do not match the backend, or if the
-# time zone database is missing (energy days start at local midnight).
-RUN /opt/venv/bin/python -c "import vaillant_eebus.main, zoneinfo; zoneinfo.ZoneInfo('Europe/Berlin')"
+# Alpine (musl) or the generated stubs do not match the backend, if the time
+# zone database is missing (energy days start at local midnight), or if the
+# bridge's gRPC certificate cannot be created.
+RUN /opt/venv/bin/python -c "import vaillant_eebus.main, zoneinfo; zoneinfo.ZoneInfo('Europe/Berlin')" \
+ && /opt/venv/bin/python -m vaillant_eebus.bridge_auth /tmp/grpc-smoke-test \
+ && rm -rf /tmp/grpc-smoke-test
 
 LABEL io.hass.type="addon" \
       io.hass.version="${BUILD_VERSION}" \

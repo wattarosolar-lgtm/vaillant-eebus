@@ -45,6 +45,8 @@ from eebus.v1.ohpcf_service_pb2 import (
 from eebus.v1.ohpcf_service_pb2_grpc import OHPCFServiceStub
 from google.protobuf.timestamp_pb2 import Timestamp
 
+from vaillant_eebus.bridge_auth import SERVER_NAME, BridgeCredentials
+
 _LOGGER = logging.getLogger(__name__)
 
 # Not the upstream default 50051, so another EEBUS bridge on the same host does not collide.
@@ -98,21 +100,47 @@ class Backoff:
             delay = min(delay * 2, self.maximum)
 
 
-class BridgeClient:
-    """Async client for the bridge's gRPC API on the loopback interface."""
+def refused_tls(err: grpc.aio.AioRpcError) -> bool:
+    """True if the connection failed in the TLS handshake: whatever answers on the
+    bridge's address does not hold this app's certificate, e.g. another EEBUS app's
+    bridge without TLS or with a certificate of its own."""
+    return err.code() is grpc.StatusCode.UNAVAILABLE and "handshake" in (err.details() or "").lower()
 
-    def __init__(self, address: str = DEFAULT_ADDRESS, backoff: Backoff | None = None) -> None:
+
+class BridgeClient:
+    """Async client for the bridge's gRPC API on the loopback interface.
+
+    With credentials (in the app) the channel uses TLS with the bridge's own
+    certificate and sends the bearer token; without them (development against
+    the fake bridge) it is plaintext.
+    """
+
+    def __init__(
+        self,
+        address: str = DEFAULT_ADDRESS,
+        backoff: Backoff | None = None,
+        *,
+        credentials: BridgeCredentials | None = None,
+    ) -> None:
         self._address = address
         self._backoff = backoff or Backoff()
-        self._channel = grpc.aio.insecure_channel(
-            address,
-            options=[
-                # Let the channel reconnect on the same schedule as our retries.
-                ("grpc.initial_reconnect_backoff_ms", int(self._backoff.initial * 1000)),
-                ("grpc.max_reconnect_backoff_ms", int(self._backoff.maximum * 1000)),
-                ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
-            ],
-        )
+        options: list[tuple[str, str | int]] = [
+            # Let the channel reconnect on the same schedule as our retries.
+            ("grpc.initial_reconnect_backoff_ms", int(self._backoff.initial * 1000)),
+            ("grpc.max_reconnect_backoff_ms", int(self._backoff.maximum * 1000)),
+            ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+        ]
+        if credentials is None:
+            self._channel = grpc.aio.insecure_channel(address, options=options)
+        else:
+            self._channel = grpc.aio.secure_channel(
+                address,
+                grpc.composite_channel_credentials(
+                    grpc.ssl_channel_credentials(root_certificates=credentials.certificate),
+                    grpc.access_token_call_credentials(credentials.token),
+                ),
+                options=[*options, ("grpc.ssl_target_name_override", SERVER_NAME)],
+            )
         self._device = DeviceServiceStub(self._channel)
         self._hvac = HVACServiceStub(self._channel)
         self._dhw = DHWServiceStub(self._channel)
@@ -156,9 +184,16 @@ class BridgeClient:
             except grpc.aio.AioRpcError as err:
                 if err.code() not in RETRYABLE_CODES:
                     raise
-                _LOGGER.info(
-                    "Bridge at %s not reachable (%s), retrying in %.1f s", self._address, err.code().name, delay
-                )
+                if refused_tls(err):
+                    _LOGGER.error(
+                        "The service at %s does not hold this app's TLS certificate. Another EEBUS app is "
+                        "probably running; stop it and restart this app.",
+                        self._address,
+                    )
+                else:
+                    _LOGGER.info(
+                        "Bridge at %s not reachable (%s), retrying in %.1f s", self._address, err.code().name, delay
+                    )
             await asyncio.sleep(delay)
         raise AssertionError("unreachable: Backoff.delays() never ends")
 
