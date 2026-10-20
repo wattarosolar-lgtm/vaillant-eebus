@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1
+
+Korrekturen aus der Abnahme von 0.6.0:
+
+- Einstellungen: Die Liste der Räume schiebt die anderen Karten nicht mehr nach unten. Kopplung und Diagnose
+  stehen oben, darunter die Räume über die ganze Breite (mehrere nebeneinander), darunter „Wärme heute“ und
+  „Export“.
+- „Wärme heute“ nimmt bis zu vier Sensoren und addiert sie, etwa Heizung und Warmwasser der
+  myVAILLANT-Integration. Mit nur dem Heizungs-Sensor fiel die Arbeitszahl zu niedrig aus. Ein in 0.6.0 gewählter
+  Sensor bleibt erhalten.
+
 ## 0.6.0
 
 Anbindung an Home Assistant:

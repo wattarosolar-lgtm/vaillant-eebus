@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v0.6.0)
+# Briefing: Vaillant EEBUS (Stand v0.6.1)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -9,10 +9,11 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 0.6.0, Phasen 1–6 von 7 umgesetzt (Abnahme von Phase 5 und 6 an der Anlage offen). 0.5.1 enthält
+- **Stand:** Version 0.6.1, Phasen 1–6 von 7 umgesetzt (Abnahme von Phase 5 und 6 an der Anlage offen). 0.5.1 enthält
   die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a), 0.5.2 die aus der ersten Abnahme an der
   Anlage (ziehbarer Regler, Sperre im Auto-Betrieb, ruhigere Bedienung, „Energie heute“), 0.5.3 zeigt im
-  Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt). 0.6.0 bindet Home Assistant an (Abschnitt 5b).
+  Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt). 0.6.0 bindet Home Assistant an (Abschnitt 5b), 0.6.1
+  ordnet die Einstellungsseite neu und addiert mehrere Wärmesensoren.
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -98,7 +99,7 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a). |
 | `energy.py` | `EnergyMeter`: summiert die gemeldete Gesamtleistung (`power_consumption`) über die Zeit zu Wh je Tag (die Anlage liefert keine Energiezähler); > 3 min ohne Messwert wird nicht überbrückt, der Tag gilt dann als lückenhaft (auch der erste Tag); Tageswechsel um Mitternacht in `TZ` (Rückfall UTC mit Warnung); `/data/energy.json` atomar, höchstens einmal pro Minute und beim Beenden, 400 Tage; kurzer Neustart (< 3 min) wird überbrückt. `today()` zählt das laufende Intervall bis jetzt mit. |
 | `ha_client.py` | Zugriff auf HA Core über den Supervisor (`SUPERVISOR_TOKEN`, `http://supervisor/core`): REST (Zustände, eigene Sensoren setzen/entfernen) und eine WebSocket-Verbindung (Anmeldung, `subscribe_trigger` auf die gewählten Entitäten mit Rückfall auf `platform`, `homeassistant_started`), Wiederverbindung mit Backoff, alle 5 min erneutes Lesen (`last_reported`). Schreibt nur `sensor.vaillant_eebus_*`/`binary_sensor.vaillant_eebus_*` (`OWN_ENTITY`, sonst `ValueError`). Listener-Schnittstelle `HomeAssistantListener`. |
-| `ha_import.py` | Räume (Name, Zone), Mittelwert je Zone aus gültigen Werten (Zahl, °C/°F, ≤ 30 min alt), Wärme heute (Wh/kWh/MWh, ≤ 3 h alt); bei Verbindungsverlust werden Werte verworfen; meldet Änderungen gedrosselt (2 s) per `state.republish()`. |
+| `ha_import.py` | Räume (Name, Zone), Mittelwert je Zone aus gültigen Werten (Zahl, °C/°F, ≤ 30 min alt), Wärme heute als Summe von bis zu 4 Sensoren (Wh/kWh/MWh, ≤ 3 h alt; Summe nur, wenn jeder einen Wert hat, Status = schlechtester); bei Verbindungsverlust werden Werte verworfen; meldet Änderungen gedrosselt (2 s) per `state.republish()`. |
 | `ha_export.py` | Sensoren nach Gruppen (`ExportGroup`): Status, Zonen (Raumtemperatur = HA-Mittelwert, Soll, Betriebsart), Warmwasser, Temperaturen, Leistung/Energie (inkl. `energy_today`, `total_increasing`), Leistungsdeckel, Verdichter. Nur Werte, die die Anlage je geliefert hat; fehlt einer später → `unavailable`. Je Sensor höchstens alle 10 s, Energie 60 s; nach Neuverbindung/`homeassistant_started` alles neu; abgewählte Gruppen per DELETE entfernt. |
 | `home_assistant.py` | Fassade für `main`/`api`: verbindet Client, Import und Export; `entities(kind, q)` für die Auswahl; `change()` speichert Räume/Wärmesensor/Export und protokolliert (`settings`); `performance_today()` (Wärme ÷ Strom, nur aktuell, lückenlos, ≥ 0,5 kWh). Ohne Token kein Client. |
 | `log_store.py` | Protokoll in SQLite (`/data/app.db`): `add()` kehrt sofort zurück, alle DB-Arbeit läuft geordnet in einem Worker-Thread; höchstens 10.000 Einträge; Kategorien `mode`, `write`, `connection`, `device`; beschädigte DB wird beiseitegelegt |
@@ -177,7 +178,8 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 - Die App liest nur und meldet eigene Sensoren; keine Dienste, keine fremden Entitäten (Test
   `test_only_the_apps_own_sensors_can_be_written`). Nichts davon läuft über `write_gate`, weil nichts an die
   Wärmepumpe geht.
-- Einstellungen (`settings.json`): `rooms` (`entity_id`, `name`, `zone_id`), `heat_energy_entity`, `export`
+- Einstellungen (`settings.json`): `rooms` (`entity_id`, `name`, `zone_id`), `heat_energy_entities` (0.6.0:
+  einzelnes `heat_energy_entity`, wird übernommen), `export`
   (Gruppen, Vorgabe ohne Leistungsdeckel/Verdichter). Ungültige Einträge werden einzeln verworfen, Kopplung und
   Modus bleiben.
 - API: `GET/PUT api/settings`, `GET api/ha/entities?kind=temperature|energy&q=`; `api/state` mit `home_assistant`

@@ -5,7 +5,7 @@ ohne eBUS-Adapter und ohne MQTT.
 
 ## Stand dieser Version
 
-Version 0.6.0 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
+Version 0.6.1 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
 Heizzone einzeln, und kann Solltemperaturen, Betriebsarten und die Einmalladung des Warmwassers ändern.
 Nach der Installation läuft die App im **Demo-Betrieb** und sendet nichts an die Wärmepumpe (siehe unten).
 Die Raumtemperatur jeder Zone kommt aus Temperatursensoren in Home Assistant, und die App meldet die Werte der
@@ -64,10 +64,10 @@ Leistungsaufnahme. Die App rechnet daraus den Stromverbrauch seit Mitternacht (Z
 ist eine Schätzung. Lief die App nicht oder war die Wärmepumpe nicht erreichbar, steht „(lückenhaft)“ dahinter;
 die fehlende Zeit wird nicht geschätzt. Das gilt auch für den ersten Tag nach der Installation.
 
-**Wärme heute und Arbeitszahl heute:** Haben Sie in den Einstellungen einen Sensor mit der heute erzeugten Wärme
-gewählt, zeigt die Karte „Leistung und Energie“ diesen Wert und die Arbeitszahl des Tages (Wärme ÷ Strom). Die
-Arbeitszahl erscheint nur, wenn der Wärmewert aktuell ist (höchstens 3 Stunden alt), der Stromverbrauch des Tages
-lückenlos ist und mindestens 0,5 kWh beträgt.
+**Wärme heute und Arbeitszahl heute:** Haben Sie in den Einstellungen Sensoren mit der heute erzeugten Wärme
+gewählt, zeigt die Karte „Leistung und Energie“ deren Summe und die Arbeitszahl des Tages (Wärme ÷ Strom). Die Summe
+erscheint nur, wenn jeder gewählte Sensor einen Wert hat. Die Arbeitszahl erscheint nur, wenn die Wärmewerte aktuell
+sind (höchstens 3 Stunden alt), der Stromverbrauch des Tages lückenlos ist und mindestens 0,5 kWh beträgt.
 
 ## Demo- und Live-Betrieb
 
@@ -108,9 +108,11 @@ Eingerichtet wird alles unter **Einstellungen**, gespeichert mit **Speichern**:
   Raum einen Namen und wählen Zone 1, Zone 2 oder keine Zone. Ein Wert zählt für den Mittelwert, solange er eine
   Zahl ist und der Sensor sich in den letzten 30 Minuten gemeldet hat; sonst steht er als „veraltet“ oder „nicht
   verfügbar“ in der Karte Innentemperaturen.
-- **Wärme heute:** ein Energiesensor (Wh, kWh oder MWh), der jeden Tag bei 0 beginnt. Die myVAILLANT-Integration
-  liefert solche Werte; aus einem Gesamtzähler macht der Helfer „Verbrauchszähler“ mit täglichem Zyklus einen
-  Tageswert.
+- **Wärme heute:** bis zu vier Energiesensoren (Wh, kWh oder MWh), die jeden Tag bei 0 beginnen; die App
+  addiert sie. Die myVAILLANT-Integration liefert die Wärme für Heizung und Warmwasser getrennt – wählen Sie beide,
+  sonst fällt die Arbeitszahl zu niedrig aus. Aus einem Gesamtzähler macht der Helfer „Verbrauchszähler“ mit
+  täglichem Zyklus einen Tageswert. Zeigt Home Assistant einen gewählten Sensor als „nicht verfügbar“, liegt das an
+  dessen Integration; die App zeigt dann keine Summe.
 - **Export nach Home Assistant:** Welche Werte die App als Sensoren meldet, wählen Sie nach Gruppen. Voreingestellt
   sind Status, Zonen, Warmwasser, Temperaturen sowie Leistung und Energie; Leistungsdeckel und
   Verdichter-Flexibilität sind aus.
@@ -139,7 +141,7 @@ Die Seite **Protokoll** listet, neueste Einträge zuerst:
   myVAILLANT-App,
 - **Verbindung:** Kopplung, Verbindungsaufbau und -abbrüche, auch die Verbindung zu Home Assistant,
 - **Modus:** Start der App mit ihrem Betrieb und jeder Wechsel zwischen Demo und Live,
-- **Einstellungen:** geänderte Räume, Wärmesensor und Export.
+- **Einstellungen:** geänderte Räume, Wärmesensoren und Export.
 
 Messwerte stehen nicht im Protokoll. Es behält die letzten 10.000 Einträge.
 

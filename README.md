@@ -68,7 +68,7 @@ Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
 | POST | `api/lpc`, `api/lpc/failsafe` | Leistungsdeckel und Failsafe-Grenze (nur API, im Demo-Betrieb gesperrt; die Bridge wartet hier nicht auf eine Quittung des Geräts, „Gesendet“ heißt nur abgeschickt) |
 | POST | `api/ohpcf` | Verdichter-Flexibilität (`schedule`, `pause`, `resume`, `abort`; nur API, im Demo gesperrt) |
 | GET | `api/log` | Protokoll, seitenweise (`before`, `limit`) und nach `category` gefiltert |
-| GET/PUT | `api/settings` | Räume (`entity_id`, `name`, `zone_id`), Wärmesensor (`heat_energy_entity`), Export-Gruppen (`export`); dazu `exported` und `home_assistant_available` |
+| GET/PUT | `api/settings` | Räume (`entity_id`, `name`, `zone_id`), Wärmesensoren (`heat_energy_entities`, bis zu 4, addiert), Export-Gruppen (`export`); dazu `exported` und `home_assistant_available` |
 | GET | `api/ha/entities?kind=temperature\|energy&q=…` | Sensoren aus Home Assistant zur Auswahl (503, wenn Home Assistant nicht erreichbar ist) |
 
 Jeder Schreibbefehl nennt in `operating_mode` (`demo` oder `live`) den Betrieb, den der Nutzer beim Ändern sah;
