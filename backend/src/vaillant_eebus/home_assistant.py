@@ -9,13 +9,16 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 
-from vaillant_eebus.energy import EnergyMeter
+from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.ha_client import HomeAssistantClient, HomeAssistantUnavailable
 from vaillant_eebus.ha_export import PREFIX, HomeAssistantExport
-from vaillant_eebus.ha_import import HomeAssistantImport, HomeAssistantState
+from vaillant_eebus.ha_import import HeatToday, HomeAssistantImport, HomeAssistantState, ValueStatus
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.settings import ExportGroup, Room, Settings, SettingsStore
 from vaillant_eebus.state import StateService
+
+# Below this much electrical energy a day's ratio says nothing yet (early morning).
+PERFORMANCE_MIN_KWH = 0.5
 
 # Units that make an entity a candidate for a room or for the heat of the day.
 _KIND_UNITS = {"temperature": frozenset({"°C", "°F"}), "energy": frozenset({"Wh", "kWh", "MWh"})}
@@ -38,6 +41,19 @@ class EntityChoice:
     name: str
     state: str
     unit: str | None
+
+
+def performance_today(heat: HeatToday | None, electricity: EnergyToday | None) -> float | None:
+    """Heat divided by electrical energy of the day (Arbeitszahl).
+
+    Only from a current heat value and a complete day of electrical energy;
+    otherwise the ratio would mislead.
+    """
+    if heat is None or heat.status is not ValueStatus.OK or heat.kwh is None:
+        return None
+    if electricity is None or electricity.incomplete or electricity.kwh < PERFORMANCE_MIN_KWH:
+        return None
+    return round(heat.kwh / electricity.kwh, 2)
 
 
 class HomeAssistant:

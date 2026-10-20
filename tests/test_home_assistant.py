@@ -15,11 +15,11 @@ from tests.fake_home_assistant import TOKEN, FakeHomeAssistant
 from tests.support import eventually
 from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_client import Backoff
-from vaillant_eebus.energy import EnergyMeter
+from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.ha_client import EntityState, HomeAssistantClient
 from vaillant_eebus.ha_export import HomeAssistantExport
-from vaillant_eebus.ha_import import HomeAssistantImport, ValueStatus, ZoneAverage
-from vaillant_eebus.home_assistant import HomeAssistant
+from vaillant_eebus.ha_import import HeatToday, HomeAssistantImport, ValueStatus, ZoneAverage
+from vaillant_eebus.home_assistant import HomeAssistant, performance_today
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.pairing import PairingService
 from vaillant_eebus.settings import ExportGroup, Room, SettingsStore
@@ -129,6 +129,24 @@ async def test_losing_home_assistant_drops_its_values(settings_store: SettingsSt
     snapshot = importer.snapshot()
     assert not snapshot.connected
     assert snapshot.rooms[0].status is ValueStatus.UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("heat", "electricity", "expected"),
+    [
+        (HeatToday("sensor.w", 12.0, ValueStatus.OK, NOW), EnergyToday(kwh=3.0, incomplete=False), 4.0),
+        # A day with gaps or an outdated heat value would give a wrong ratio.
+        (HeatToday("sensor.w", 12.0, ValueStatus.OK, NOW), EnergyToday(kwh=3.0, incomplete=True), None),
+        (HeatToday("sensor.w", 12.0, ValueStatus.STALE, NOW), EnergyToday(kwh=3.0, incomplete=False), None),
+        # Too little electrical energy yet, e.g. early in the morning.
+        (HeatToday("sensor.w", 1.0, ValueStatus.OK, NOW), EnergyToday(kwh=0.2, incomplete=False), None),
+        (None, EnergyToday(kwh=3.0, incomplete=False), None),
+    ],
+)
+def test_the_performance_of_the_day_needs_reliable_values(
+    heat: HeatToday | None, electricity: EnergyToday, expected: float | None
+) -> None:
+    assert performance_today(heat, electricity) == expected
 
 
 # --- client ------------------------------------------------------------------------

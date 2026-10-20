@@ -206,6 +206,7 @@ async def test_state_contains_connection_and_heat_pump(
         "heat_pump": None,
         "energy_today": None,
         "home_assistant": {"available": False, "connected": False, "rooms": [], "zones": [], "heat_today": None},
+        "performance_today": None,
     }
     assert after["connection"] == "connected"
     heat_pump = after["heat_pump"]
@@ -352,6 +353,7 @@ async def test_event_stream_survives_a_failing_bridge_call(state: StateService) 
             heat_pump=heat_pump,
             energy_today=None,
             home_assistant=HomeAssistantState(available=False, connected=False, rooms=[], zones=[], heat_today=None),
+            performance_today=None,
         )
 
     events = state_events(_OpenClient(), state, flaky_state, keepalive=5)

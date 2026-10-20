@@ -26,7 +26,7 @@ from starlette.types import Scope
 from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.ha_client import HomeAssistantUnavailable
 from vaillant_eebus.ha_import import HomeAssistantState
-from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant
+from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
 from vaillant_eebus.settings import ENTITY_ID, ROOM_NAME_MAX, ZONE_ID, ExportGroup, OperatingMode, Room
@@ -169,6 +169,8 @@ class ApiState:
     # Summed up by the app from the power; None before the first power reading of the day.
     energy_today: EnergyToday | None
     home_assistant: HomeAssistantState
+    # Heat from Home Assistant divided by energy_today; None unless both are reliable.
+    performance_today: float | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,13 +229,16 @@ def create_app(
     app = FastAPI(title="Vaillant EEBUS", docs_url=None, redoc_url=None, openapi_url=None)
 
     async def api_state(heat_pump: HeatPumpState | None) -> ApiState:
+        electricity = energy.today()
+        values = home_assistant.snapshot()
         return ApiState(
             connection=(await pairing.status()).state,
             mode=gate.mode,
             pending=gate.pending,
             heat_pump=heat_pump,
-            energy_today=energy.today(),
-            home_assistant=home_assistant.snapshot(),
+            energy_today=electricity,
+            home_assistant=values,
+            performance_today=performance_today(values.heat_today, electricity),
         )
 
     def settings_status() -> SettingsStatus:
