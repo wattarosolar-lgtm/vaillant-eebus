@@ -8,6 +8,7 @@ import pytest
 from tests.fake_bridge import FakeBridge, start_fake_bridge
 from tests.support import FAST_BACKOFF
 from vaillant_eebus.bridge_client import BridgeClient
+from vaillant_eebus.energy import EnergyMeter
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import PairingService
 from vaillant_eebus.settings import SettingsStore
@@ -48,6 +49,11 @@ def pairing(bridge_client: BridgeClient, settings_store: SettingsStore, log_stor
 @pytest.fixture
 def state(bridge_client: BridgeClient, pairing: PairingService) -> StateService:
     return StateService(bridge_client, pairing, refresh_interval=60.0, debounce=0.05)
+
+
+@pytest.fixture
+def energy_meter(state: StateService, tmp_path: Path) -> EnergyMeter:
+    return EnergyMeter(state, tmp_path)
 
 
 @pytest.fixture

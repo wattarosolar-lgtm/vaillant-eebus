@@ -69,8 +69,9 @@ ENV PYTHONPATH=/opt/backend \
 
 # Smoke test: import the whole backend in the target image, for every
 # architecture. Fails the build if a compiled dependency does not load on
-# Alpine (musl) or the generated stubs do not match the backend.
-RUN /opt/venv/bin/python -c "import vaillant_eebus.main"
+# Alpine (musl) or the generated stubs do not match the backend, or if the
+# time zone database is missing (energy days start at local midnight).
+RUN /opt/venv/bin/python -c "import vaillant_eebus.main, zoneinfo; zoneinfo.ZoneInfo('Europe/Berlin')"
 
 LABEL io.hass.type="addon" \
       io.hass.version="${BUILD_VERSION}" \

@@ -15,6 +15,7 @@ import uvicorn
 
 from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_client import DEFAULT_ADDRESS, BridgeClient
+from vaillant_eebus.energy import EnergyMeter, local_zone
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import PairingService
 from vaillant_eebus.settings import SettingsStore
@@ -48,6 +49,8 @@ class BackendConfig:
     bridge_serial_file: Path | None = None
     # SHIP port of this app's bridge, probed for another listener while the bridge is down.
     ship_port: int | None = None
+    # Home Assistant's time zone; the Supervisor passes it to every app as TZ.
+    time_zone: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> BackendConfig:
@@ -70,6 +73,7 @@ class BackendConfig:
             log_level=env.get("LOG_LEVEL", defaults.log_level),
             bridge_serial_file=Path(serial_file) if serial_file else None,
             ship_port=_port(env, "SHIP_PORT"),
+            time_zone=env.get("TZ") or None,
         )
 
 
@@ -104,7 +108,10 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
     )
     state = StateService(bridge, pairing)
     gate = WriteGate(bridge, pairing, state, settings, log)
-    app = create_app(pairing, state, gate, log, static_dir=config.static_dir, trusted_clients=config.trusted_clients)
+    energy = EnergyMeter(state, config.data_dir, zone=local_zone(config.time_zone))
+    app = create_app(
+        pairing, state, gate, log, energy, static_dir=config.static_dir, trusted_clients=config.trusted_clients
+    )
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -123,12 +130,14 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
                 tasks.create_task(pairing.run()),
                 tasks.create_task(state.run()),
                 tasks.create_task(gate.run()),
+                tasks.create_task(energy.run()),
             ]
             # Returns when uvicorn handles SIGTERM; it re-raises the signal afterwards.
             await server.serve()
             for task in background:
                 task.cancel()
     finally:
+        energy.close()
         log.close()
 
 

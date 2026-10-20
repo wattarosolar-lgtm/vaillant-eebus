@@ -12,6 +12,7 @@ import pytest
 from tests.fake_bridge import GATEWAY_SKI, FakeBridge
 from vaillant_eebus.api import INGRESS_CLIENT, ApiState, create_app, state_events
 from vaillant_eebus.bridge_client import BridgeClient
+from vaillant_eebus.energy import EnergyMeter
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import ConnectionState, PairingService
 from vaillant_eebus.settings import OperatingMode, SettingsStore
@@ -24,27 +25,30 @@ def _client(
     state: StateService,
     gate: WriteGate,
     log: LogStore,
+    energy: EnergyMeter,
     *,
     client_ip: str = INGRESS_CLIENT,
     static_dir: Path | None = None,
 ) -> httpx.AsyncClient:
-    app = create_app(pairing, state, gate, log, static_dir=static_dir, trusted_clients=frozenset({INGRESS_CLIENT}))
+    app = create_app(
+        pairing, state, gate, log, energy, static_dir=static_dir, trusted_clients=frozenset({INGRESS_CLIENT})
+    )
     transport = httpx.ASGITransport(app=app, client=(client_ip, 51234))
     return httpx.AsyncClient(transport=transport, base_url="http://ingress")
 
 
 @pytest.fixture
 async def client(
-    pairing: PairingService, state: StateService, gate: WriteGate, log_store: LogStore
+    pairing: PairingService, state: StateService, gate: WriteGate, log_store: LogStore, energy_meter: EnergyMeter
 ) -> AsyncIterator[httpx.AsyncClient]:
-    async with _client(pairing, state, gate, log_store) as http:
+    async with _client(pairing, state, gate, log_store, energy_meter) as http:
         yield http
 
 
 async def test_requests_from_outside_ingress_are_rejected(
-    pairing: PairingService, state: StateService, gate: WriteGate, log_store: LogStore
+    pairing: PairingService, state: StateService, gate: WriteGate, log_store: LogStore, energy_meter: EnergyMeter
 ) -> None:
-    async with _client(pairing, state, gate, log_store, client_ip="192.168.178.23") as http:
+    async with _client(pairing, state, gate, log_store, energy_meter, client_ip="192.168.178.23") as http:
         response = await http.get("/api/pairing")
 
     assert response.status_code == 403
@@ -108,12 +112,17 @@ async def test_dump_of_a_disconnected_gateway_is_unavailable(client: httpx.Async
 
 
 async def test_ui_is_served_from_the_static_directory(
-    pairing: PairingService, state: StateService, gate: WriteGate, log_store: LogStore, tmp_path: Path
+    pairing: PairingService,
+    state: StateService,
+    gate: WriteGate,
+    log_store: LogStore,
+    energy_meter: EnergyMeter,
+    tmp_path: Path,
 ) -> None:
     (tmp_path / "index.html").write_text("<!doctype html><title>Wärmepumpe</title>", encoding="utf-8")
     (tmp_path / "assets").mkdir()
     (tmp_path / "assets" / "index-abc123.js").write_text("console.log(1);", encoding="utf-8")
-    async with _client(pairing, state, gate, log_store, static_dir=tmp_path) as http:
+    async with _client(pairing, state, gate, log_store, energy_meter, static_dir=tmp_path) as http:
         page = await http.get("/")
         asset = await http.get("/assets/index-abc123.js")
 
@@ -145,7 +154,7 @@ async def test_pairing_through_a_foreign_bridge_is_refused(
     pairing = PairingService(bridge_client, settings_store, "test", bridge_serial_file=serial_file)
     state = StateService(bridge_client, pairing)
     gate = WriteGate(bridge_client, pairing, state, settings_store, log_store)
-    async with _client(pairing, state, gate, log_store) as http:
+    async with _client(pairing, state, gate, log_store, EnergyMeter(state, tmp_path)) as http:
         status = (await http.get("/api/pairing")).json()
         response = await http.post("/api/pairing/register", json={"ski": GATEWAY_SKI})
 
@@ -165,7 +174,13 @@ async def test_state_contains_connection_and_heat_pump(
 
     after = (await client.get("/api/state")).json()
 
-    assert before == {"connection": "not_paired", "mode": "demo", "pending": [], "heat_pump": None}
+    assert before == {
+        "connection": "not_paired",
+        "mode": "demo",
+        "pending": [],
+        "heat_pump": None,
+        "energy_today": None,
+    }
     assert after["connection"] == "connected"
     heat_pump = after["heat_pump"]
     assert heat_pump["measurements"]["power_consumption"]["value"] == 532
@@ -304,7 +319,13 @@ async def test_event_stream_survives_a_failing_bridge_call(state: StateService) 
         calls += 1
         if calls == 1:
             raise grpc.aio.AioRpcError(grpc.StatusCode.INTERNAL, grpc.aio.Metadata(), grpc.aio.Metadata(), "broken")
-        return ApiState(connection=ConnectionState.CONNECTED, mode=OperatingMode.DEMO, pending=[], heat_pump=heat_pump)
+        return ApiState(
+            connection=ConnectionState.CONNECTED,
+            mode=OperatingMode.DEMO,
+            pending=[],
+            heat_pump=heat_pump,
+            energy_today=None,
+        )
 
     events = state_events(_OpenClient(), state, flaky_state, keepalive=5)
     try:

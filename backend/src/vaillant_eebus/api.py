@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import AwareDatetime, BaseModel, Field
 from starlette.types import Scope
 
+from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
 from vaillant_eebus.settings import OperatingMode
@@ -139,6 +140,8 @@ class ApiState:
     pending: list[PendingWrite]
     # None until a gateway is paired and this app's own bridge answers.
     heat_pump: HeatPumpState | None
+    # Summed up by the app from the power; None before the first power reading of the day.
+    energy_today: EnergyToday | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +191,7 @@ def create_app(
     state: StateService,
     gate: WriteGate,
     log: LogStore,
+    energy: EnergyMeter,
     *,
     static_dir: Path | None,
     trusted_clients: frozenset[str],
@@ -196,7 +200,11 @@ def create_app(
 
     async def api_state(heat_pump: HeatPumpState | None) -> ApiState:
         return ApiState(
-            connection=(await pairing.status()).state, mode=gate.mode, pending=gate.pending, heat_pump=heat_pump
+            connection=(await pairing.status()).state,
+            mode=gate.mode,
+            pending=gate.pending,
+            heat_pump=heat_pump,
+            energy_today=energy.today(),
         )
 
     @app.middleware("http")

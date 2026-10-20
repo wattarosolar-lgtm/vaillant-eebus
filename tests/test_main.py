@@ -29,6 +29,7 @@ def test_config_from_environment() -> None:
             "LOG_LEVEL": "debug",
             "BRIDGE_SERIAL_FILE": "/data/eebus/serial",
             "SHIP_PORT": "4712",
+            "TZ": "Europe/Berlin",
         }
     )
 
@@ -43,6 +44,7 @@ def test_config_from_environment() -> None:
         log_level="debug",
         bridge_serial_file=Path("/data/eebus/serial"),
         ship_port=4712,
+        time_zone="Europe/Berlin",
     )
 
 
@@ -54,6 +56,7 @@ def test_config_defaults_bind_ingress_only() -> None:
     assert config.static_dir is None
     assert config.bridge_serial_file is None
     assert config.ship_port is None
+    assert config.time_zone is None
 
 
 @pytest.mark.parametrize("value", ["eighty", "0", "70000", "-1"])
@@ -109,11 +112,13 @@ async def test_event_stream_delivers_the_heat_pump_state(fake_bridge: FakeBridge
                     async for line in response.aiter_lines():
                         if line.startswith("data: "):
                             payload = json.loads(line.removeprefix("data: "))
-                            if payload["heat_pump"] is not None:
+                            if payload["heat_pump"] is not None and payload["energy_today"] is not None:
                                 break
             assert payload is not None
             assert payload["connection"] == "connected"
             assert payload["heat_pump"]["measurements"]["outdoor_temperature"]["value"] == 13.5
+            # The first power reading of a day starts the count; the time before it is missing.
+            assert payload["energy_today"] == {"kwh": 0.0, "incomplete": True}
         finally:
             backend.cancel()
             with contextlib.suppress(asyncio.CancelledError):
