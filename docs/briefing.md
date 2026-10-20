@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v0.5.2)
+# Briefing: Vaillant EEBUS (Stand v0.5.3)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -9,9 +9,10 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 0.5.2, Phasen 1–5 von 7 umgesetzt (Abnahme von Phase 5 an der Anlage offen). 0.5.1 enthält
+- **Stand:** Version 0.5.3, Phasen 1–5 von 7 umgesetzt (Abnahme von Phase 5 an der Anlage offen). 0.5.1 enthält
   die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a), 0.5.2 die aus der ersten Abnahme an der
-  Anlage (ziehbarer Regler, Sperre im Auto-Betrieb, ruhigere Bedienung, „Energie heute“).
+  Anlage (ziehbarer Regler, Sperre im Auto-Betrieb, ruhigere Bedienung, „Energie heute“), 0.5.3 zeigt im
+  Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt).
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -22,7 +23,7 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | 2 | Kopplung, Diagnose-Dump, Einrichtungsassistent | erledigt (0.2.0/0.2.1) |
 | 3 | Lesen: Zustand, API, Übersicht, Live-Updates | erledigt (0.3.0) |
 | 4 | Mehrere Heizzonen in der Bridge, Eco nur wenn angeboten | erledigt (0.4.0), an der Anlage abgenommen |
-| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1 und 0.5.2), Abnahme an der Anlage offen |
+| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1–0.5.3), Abnahme an der Anlage offen |
 | 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärmemenge z. B. aus der myVAILLANT-Integration), HA-Export als Sensoren | offen |
 | 7 | Einstellungs-/Protokollseite fertig, Doku, Release | offen |
 
@@ -30,7 +31,7 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 
 | Repo | Rolle |
 |---|---|
-| https://github.com/wattarosolar-lgtm/vaillant-eebus | **Die App** (dieses Repo). Phase 5 auf `main` (0.5.1); Korrekturen 0.5.2 auf Branch `fix/abnahme-0.5.1`. |
+| https://github.com/wattarosolar-lgtm/vaillant-eebus | **Die App** (dieses Repo). Phase 5 auf `main`; Korrekturen aus den Abnahmen auf Branches `fix/abnahme-…`. |
 | https://github.com/wattarosolar-lgtm/HEMS-EEBUS | **Fork der EEBUS-Bridge** (Go), eingebunden als Git-Submodul `bridge/`, fest auf Commit `78a1a5a` (Branch `feat/multi-zone`). Muss öffentlich bleiben, sonst kann die CI ihn nicht laden. |
 | https://github.com/volschin/eebus-ha-bridge | Original der Bridge (MIT-Lizenz). Der Fork-`main` (`25e061f`) entspricht dem Original. |
 
@@ -109,7 +110,7 @@ Warmwasser mit Bedienelementen, Karten für Leistung/Energie und Temperaturen), 
 „Ältere laden“), `Setup.svelte` (Einrichtungsassistent), `Settings.svelte` (Kopplung, Diagnose-Dump).
 Komponenten: `Dial.svelte` (Rundinstrument; besitzt den Entwurf der Solltemperatur: Bogen ziehbar per Pointer,
 Pfeiltasten als `role="slider"`, −/+; gesendet 1,2 s nach dem Loslassen bzw. letzten Klick, im Live-Betrieb nicht
-vor Ablauf der 5 s seit dem letzten Senden; Zone im Auto-Betrieb gesperrt mit „Zeitprogramm“),
+vor Ablauf der 5 s seit dem letzten Senden; Zone im Auto-Betrieb zeigt den gemeldeten Sollwert, gesperrt),
 `SetpointControl.svelte` (Anzeige und −/+), `ModeSegments.svelte`, `BoostSwitch.svelte`, `ModeSwitch.svelte`
 (Demo | Live), `ModeBanner.svelte` (Band nur im Demo-Betrieb, Bestätigung für Live), `HeaderStatus.svelte`,
 `StatusPill.svelte`, `DumpButton.svelte`. `lib/feedback.svelte.ts` hält Vorschau (nur Demo, 5 s, blau), den gerade
@@ -187,7 +188,9 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
   dabei eine zeitweise Übersteuerung (3 h, Dauer änderbar, späteres Ändern der Temperatur verlängert sie nicht).
   Diese Übersteuerung und Änderungen in myVAILLANT im Auto-Betrieb sind über EEBUS nicht sichtbar, die Zonen bieten
   keinen Overrun an (nur Warmwasser `oneTimeDhw`). Entscheidung: kein Nachbau, App sperrt die Solltemperatur im
-  Auto-Betrieb, Boost über myVAILLANT/HA. Ob die Zone in „Ein“ auf den EEBUS-Sollwert heizt, ist noch zu prüfen.
+  Auto-Betrieb (0.5.3: Wert und Bogen sichtbar, nicht verstellbar), Boost über myVAILLANT/HA. Ob die Zone in „Ein“
+  auf den EEBUS-Sollwert heizt, ist noch zu prüfen. Den aktiven Sollwert des Zeitprogramms könnte Phase 6 aus der
+  myVAILLANT-Integration in HA übernehmen.
 - Vom Gerät gemeldet: Zonen 5–30 °C in 0,5er-Schritten, Warmwasser 35–70 °C in 1er-Schritten, Betriebsarten
   änderbar, Einmalladung schreibbar, Leistungsdeckel 0 W inaktiv, Failsafe 1.000.000 W für 2 h.
 

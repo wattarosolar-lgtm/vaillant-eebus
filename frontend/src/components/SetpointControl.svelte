@@ -25,7 +25,7 @@
     unconfirmed: boolean;
     /** Demo preview: chosen, but not sent. */
     preview: boolean;
-    /** Why the setpoint cannot be changed right now, e.g. in auto mode; hides the value. */
+    /** Why the setpoint cannot be changed right now, e.g. in auto mode. */
     locked: string | null;
     error: string | null;
     /** For screen readers only: what happens with the change. */
@@ -49,19 +49,15 @@
         disabled={!enabled || shown <= setpoint.min}
         onclick={() => onStep(-1)}>−</button
       >
-      {#if locked}
-        <output class="value program" aria-label={`Solltemperatur ${title}`}>Zeitprogramm</output>
-      {:else}
-        <output
-          class="value"
-          class:unconfirmed
-          style:color={preview ? 'var(--info-text)' : textColor}
-          aria-live="polite"
-          aria-label={`Solltemperatur ${title}`}
-        >
-          {format(shown, setpoint.step)}<span class="unit"> °C</span>
-        </output>
-      {/if}
+      <output
+        class="value"
+        class:unconfirmed
+        style:color={preview ? 'var(--info-text)' : textColor}
+        aria-live="polite"
+        aria-label={`Solltemperatur ${title}`}
+      >
+        {format(shown, setpoint.step)}<span class="unit"> °C</span>
+      </output>
       <button
         type="button"
         class="round"
@@ -136,12 +132,6 @@
   /* Chosen or sent, not yet reported by the device. */
   .value.unconfirmed {
     opacity: 0.55;
-  }
-
-  .value.program {
-    font-size: 20px;
-    font-weight: 500;
-    color: var(--text-secondary);
   }
 
   .value.muted {

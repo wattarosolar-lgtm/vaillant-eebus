@@ -54,11 +54,12 @@ export function operatingStateName(state: string): string {
 
 /**
  * In auto mode the controller follows its time program, which the gateway does
- * not report; a setpoint written over EEBUS has no effect there (field test of
- * 0.5.1). myVAILLANT starts a boost instead, so the app points there.
+ * not report; the setpoint it reports is the one for "on", and writing it has
+ * no effect in auto (field test of 0.5.1). myVAILLANT starts a boost instead,
+ * so the app shows the value but points there for changes.
  */
 export const AUTO_MODE_SETPOINT_LOCKED =
-  'Im Auto-Betrieb gilt das Zeitprogramm. Die Solltemperatur wirkt nur in „Ein“; für einen Boost myVAILLANT oder Home Assistant nutzen.';
+  'Im Auto-Betrieb gilt das Zeitprogramm. Der angezeigte Wert gilt nur in „Ein“; für einen Boost myVAILLANT oder Home Assistant nutzen.';
 
 /** Shown in demo mode only; live mode shows the orange switch, no banner. */
 export const DEMO_BANNER =

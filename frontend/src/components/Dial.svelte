@@ -119,11 +119,8 @@
   }
 
   const track = arc(1).d;
-  // No target in auto mode: the reported setpoint is not what the time program heats to.
   const target = $derived(
-    setpoint && shown !== null && setpointLocked === null
-      ? arc((shown - setpoint.min) / (setpoint.max - setpoint.min || 1))
-      : null,
+    setpoint && shown !== null ? arc((shown - setpoint.min) / (setpoint.max - setpoint.min || 1)) : null,
   );
   const shownText = $derived(
     setpoint && shown !== null ? `${formatNumber(shown, digitsForStep(setpoint.step))} °C` : null,
@@ -294,7 +291,7 @@
       aria-valuemin={setpoint?.min ?? 0}
       aria-valuemax={setpoint?.max ?? 0}
       aria-valuenow={shown ?? 0}
-      aria-valuetext={setpointLocked ? 'nach Zeitprogramm' : (shownText ?? 'nicht verfügbar')}
+      aria-valuetext={shownText ?? 'nicht verfügbar'}
       aria-disabled={!enabled}
       onpointerdown={onPointerDown}
       onpointermove={onPointerMove}

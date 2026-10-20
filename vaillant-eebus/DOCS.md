@@ -5,7 +5,7 @@ ohne eBUS-Adapter und ohne MQTT.
 
 ## Stand dieser Version
 
-Version 0.5.2 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
+Version 0.5.3 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
 Heizzone einzeln, und kann Solltemperaturen, Betriebsarten und die Einmalladung des Warmwassers ändern.
 Nach der Installation läuft die App im **Demo-Betrieb** und sendet nichts an die Wärmepumpe (siehe unten).
 Sensoren in Home Assistant und die Raumtemperatur aus Home Assistant folgen in den nächsten Versionen.
@@ -44,7 +44,9 @@ Speicher einmal auf. Bereich, Schrittweite und Betriebsarten kommen immer von de
 
 **Zonen im Auto-Betrieb:** Im Auto-Betrieb heizt die Zone nach dem Zeitprogramm des Reglers. Dessen Temperatur
 meldet das Gateway über EEBUS nicht, und eine über EEBUS gesendete Solltemperatur wirkt dort nicht. Das
-Rundinstrument zeigt deshalb „Zeitprogramm“, und die Solltemperatur ist gesperrt. Für eine zeitweise höhere oder
+Rundinstrument zeigt die Solltemperatur, die das Gateway meldet; sie gilt nur in der Betriebsart **Ein** und kann
+von dem Wert abweichen, den myVAILLANT für das laufende Zeitfenster zeigt. Im Auto-Betrieb ist sie gesperrt
+(Regler und −/+). Für eine zeitweise höhere oder
 niedrigere Temperatur (Boost) nutzen Sie die myVAILLANT-App oder deren Integration in Home Assistant. Auch was Sie
 dort im Auto-Betrieb ändern, sieht diese App nicht. In der Betriebsart **Ein** heizt die Zone auf die
 Solltemperatur, die Sie hier einstellen.

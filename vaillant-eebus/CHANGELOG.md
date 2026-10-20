@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3
+
+- Zonen im Auto-Betrieb zeigen wieder die Solltemperatur und den orangen Bogen mit Knopf statt „Zeitprogramm“.
+  Verstellen bleibt dort gesperrt; der Hinweis sagt, dass der Wert nur in „Ein“ gilt.
+
 ## 0.5.2
 
 Korrekturen aus der ersten Abnahme an der Anlage:
