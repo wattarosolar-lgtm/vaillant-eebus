@@ -526,6 +526,14 @@ def _validate(command: Command, heat_pump: HeatPumpState) -> None:
     match command:
         case SetZoneSetpoint(zone_id=zone_id, celsius=celsius):
             zone = _zone(heat_pump, zone_id)
+            # In auto the zone follows its time program, which is not exposed
+            # over EEBUS; the setpoint only takes effect in "on" (field test 0.5.1).
+            if zone.mode == "auto":
+                raise WriteRejected(
+                    409,
+                    f"Im Auto-Modus folgt {zone.label} dem Zeitprogramm; die Solltemperatur wirkt nur in der "
+                    "Betriebsart Ein. Für einen Boost myVAILLANT oder Home Assistant nutzen.",
+                )
             _check_setpoint(zone.setpoint, celsius, zone.label)
         case SetZoneMode(zone_id=zone_id, mode=mode):
             zone = _zone(heat_pump, zone_id)

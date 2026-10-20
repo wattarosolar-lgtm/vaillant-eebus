@@ -242,8 +242,9 @@ class FakeDeviceService(DeviceServiceServicer):
         # Device state served by GetDeviceSnapshot; tests may change it.
         self.measurements: dict[str, tuple[float, str]] = dict(FAKE_MEASUREMENTS)
         self.room_temperature: float | None = None
-        # Writable values, as the real installation reports them.
-        self.zones: dict[str, FakeZone] = {"5.1.1": FakeZone("Zone 1", 21), "6.1.1": FakeZone("Zone 2", 23)}
+        # Writable values, as the real installation reports them; only Zone 2 is
+        # in "on" (the field runs both in auto), so its setpoint takes effect.
+        self.zones: dict[str, FakeZone] = {"5.1.1": FakeZone("Zone 1", 21), "6.1.1": FakeZone("Zone 2", 23, mode="on")}
         self.dhw_setpoint = 55.0
         self.dhw_mode = "auto"
         self.dhw_boost: DHWBoostStatus.ValueType = DHW_BOOST_STATUS_INACTIVE

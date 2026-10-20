@@ -284,6 +284,23 @@ async def test_settings_the_device_does_not_allow_are_rejected(
     assert "nicht änderbar" in setpoint.value.message
 
 
+@pytest.mark.usefixtures("connected")
+@pytest.mark.parametrize("operating_mode", [OperatingMode.DEMO, OperatingMode.LIVE])
+async def test_a_zone_setpoint_is_rejected_while_the_zone_runs_its_time_program(
+    gate: WriteGate, fake_bridge: FakeBridge, log_store: LogStore, operating_mode: OperatingMode
+) -> None:
+    # Zone 1 is in auto; there the setpoint has no effect on the real gateway.
+    gate.set_mode(operating_mode, confirm=True)
+
+    with pytest.raises(WriteRejected) as rejected:
+        await gate.submit(SetZoneSetpoint(zone_id="5.1.1", celsius=22))
+
+    assert rejected.value.status == 409
+    assert "Im Auto-Modus folgt Zone 1 dem Zeitprogramm" in rejected.value.message
+    assert fake_bridge.device.write_calls == []
+    assert (await messages(log_store, LogCategory.WRITE))[-1].startswith("Abgelehnt: Zone 1: Solltemperatur 22,0 °C.")
+
+
 async def test_nothing_is_sent_while_the_gateway_is_disconnected(
     live_gate: WriteGate, connected: StateService, fake_bridge: FakeBridge
 ) -> None:
@@ -303,8 +320,10 @@ async def test_nothing_is_sent_without_a_paired_gateway(gate: WriteGate) -> None
 
 
 async def test_one_write_per_control_within_five_seconds(
-    live_gate: WriteGate, fake_bridge: FakeBridge, clock: FakeClock
+    live_gate: WriteGate, connected: StateService, fake_bridge: FakeBridge, clock: FakeClock
 ) -> None:
+    fake_bridge.device.zones["5.1.1"].mode = "on"
+    await connected.refresh(GATEWAY_SKI)
     await live_gate.submit(SetZoneSetpoint(zone_id="6.1.1", celsius=22.5))
 
     with pytest.raises(WriteRejected) as rejected:
