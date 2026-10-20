@@ -5,7 +5,7 @@
   import { LOG_CATEGORY_LABELS } from '../lib/texts';
   import type { LogCategory, LogEntry } from '../lib/types';
 
-  const FILTERS: (LogCategory | null)[] = [null, 'write', 'device', 'connection', 'mode'];
+  const FILTERS: (LogCategory | null)[] = [null, 'write', 'device', 'connection', 'mode', 'settings'];
 
   let category = $state<LogCategory | null>(null);
   let entries = $state<LogEntry[]>([]);

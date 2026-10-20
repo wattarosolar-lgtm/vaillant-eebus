@@ -1,7 +1,18 @@
 // HTTP access to the backend. All paths are relative because Home Assistant
 // ingress serves the app below a token path.
 
-import type { ApiState, LogCategory, LogPage, OperatingMode, PairingStatus, WriteResult } from './types';
+import type {
+  ApiState,
+  AppSettings,
+  EntityChoice,
+  ExportGroup,
+  LogCategory,
+  LogPage,
+  OperatingMode,
+  PairingStatus,
+  Room,
+  WriteResult,
+} from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -86,6 +97,29 @@ export async function setHotWaterMode(mode: string, shown: OperatingMode): Promi
 
 export async function setHotWaterBoost(active: boolean, shown: OperatingMode): Promise<WriteResult> {
   return post<WriteResult>('api/dhw/boost', { active, operating_mode: shown });
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  return (await send('api/settings')).json() as Promise<AppSettings>;
+}
+
+export async function saveSettings(change: {
+  rooms: Room[];
+  heat_energy_entity: string | null;
+  export: ExportGroup[];
+}): Promise<AppSettings> {
+  const response = await send('api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(change),
+  });
+  return response.json() as Promise<AppSettings>;
+}
+
+/** Home Assistant sensors to choose from: temperatures for rooms, energy for the heat of the day. */
+export async function getEntities(kind: 'temperature' | 'energy', query: string): Promise<EntityChoice[]> {
+  const params = new URLSearchParams({ kind, q: query });
+  return (await send(`api/ha/entities?${params.toString()}`)).json() as Promise<EntityChoice[]>;
 }
 
 /** Protocol entries, newest first; before continues after the last entry of a page. */

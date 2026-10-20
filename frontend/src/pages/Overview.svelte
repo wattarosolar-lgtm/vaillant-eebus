@@ -8,9 +8,17 @@
     setZoneMode,
     setZoneSetpoint,
   } from '../lib/api';
-  import { energyToday, kilowattHours, kilowatts, temperature, timeOfDay, watts } from '../lib/format';
-  import { AUTO_MODE_SETPOINT_LOCKED, BRIDGE_PROBLEMS } from '../lib/texts';
-  import type { ApiState, Control, Reading } from '../lib/types';
+  import {
+    energyToday,
+    formatNumber,
+    kilowattHours,
+    kilowatts,
+    temperature,
+    timeOfDay,
+    watts,
+  } from '../lib/format';
+  import { AUTO_MODE_SETPOINT_LOCKED, BRIDGE_PROBLEMS, VALUE_STATUS_LABELS } from '../lib/texts';
+  import type { ApiState, Control, Reading, RoomReading } from '../lib/types';
 
   let { live, streamOpen }: { live: ApiState | null; streamOpen: boolean } = $props();
 
@@ -31,8 +39,65 @@
     return value === null ? null : `${value} °C`;
   }
 
+  const homeAssistant = $derived(live?.home_assistant ?? null);
+
+  function rooms(count: number): string {
+    return count === 1 ? '1 Raum' : `${count} Räumen`;
+  }
+
+  /** The zone's room temperature: the average of its rooms in Home Assistant. */
+  function zoneRoom(zoneId: string): { current: string | null; subline: string } {
+    if (!homeAssistant?.available) {
+      return { current: null, subline: 'Kommt aus Home Assistant' };
+    }
+    const average = homeAssistant.zones.find((zone) => zone.zone_id === zoneId);
+    if (!average) {
+      return { current: null, subline: 'Räume in den Einstellungen wählen' };
+    }
+    if (!homeAssistant.connected) {
+      return { current: null, subline: 'Home Assistant nicht erreichbar' };
+    }
+    if (average.celsius === null) {
+      return { current: null, subline: `Keine aktuellen Werte (${rooms(average.of)})` };
+    }
+    const used = average.rooms === average.of ? rooms(average.of) : `${average.rooms} von ${rooms(average.of)}`;
+    return { current: formatNumber(average.celsius, 1), subline: `Mittelwert aus ${used}` };
+  }
+
+  function zoneName(zoneId: string | null): string {
+    if (zoneId === null) {
+      return 'keine Zone';
+    }
+    return values?.zones.find((zone) => zone.id === zoneId)?.label ?? `Zone ${zoneId}`;
+  }
+
+  function roomValue(room: RoomReading): string {
+    if (room.celsius === null || room.status === 'unavailable') {
+      return NOT_AVAILABLE;
+    }
+    const value = `${formatNumber(room.celsius, 1)} °C`;
+    return room.status === 'stale' ? `${value} (${VALUE_STATUS_LABELS.stale})` : value;
+  }
+
+  const heatRows = $derived.by(() => {
+    const heat = homeAssistant?.heat_today;
+    if (!heat) {
+      return [];
+    }
+    const kwh =
+      heat.kwh === null || heat.status === 'unavailable'
+        ? null
+        : `${formatNumber(heat.kwh, 2)} kWh${heat.status === 'stale' ? ` (${VALUE_STATUS_LABELS.stale})` : ''}`;
+    const performance = live?.performance_today ?? null;
+    return [
+      ['Wärme heute (aus Home Assistant)', kwh],
+      ['Arbeitszahl heute', performance === null ? null : formatNumber(performance, 2)],
+    ] as const;
+  });
+
   const energyRows = $derived([
     ['Energie heute (berechnet)', energyToday(live?.energy_today)],
+    ...heatRows,
     ['Verdichterleistung', watts(measurements['compressor_power'])],
     ['Energie gesamt', kilowattHours(measurements['energy_consumed'])],
     ['Erzeugte Energie', kilowattHours(measurements['energy_produced'])],
@@ -77,13 +142,14 @@
     {#if values}
       <section class="grid" aria-label="Heizzonen und Warmwasser">
         {#each values.zones as zone (zone.id)}
-          <!-- The room temperature will be the average of chosen Home Assistant
-               sensors; the gateway's own value is unreliable (field finding). -->
+          <!-- The room temperature is the average of the zone's rooms in Home
+               Assistant; the gateway's own value is unreliable (field finding). -->
+          {@const room = zoneRoom(zone.id)}
           <Dial
             title={zone.label}
             label="Raumtemperatur"
-            current={null}
-            subline="Kommt später aus Home Assistant"
+            current={room.current}
+            subline={room.subline}
             setpoint={zone.setpoint}
             operationMode={zone.mode}
             availableModes={zone.available_modes}
@@ -151,6 +217,34 @@
             {/each}
           </dl>
         </article>
+
+        {#if homeAssistant && homeAssistant.rooms.length > 0}
+          <article class="card">
+            <div class="card-head">
+              <h2>Innentemperaturen</h2>
+              <span class="hint">aus Home Assistant</span>
+            </div>
+            {#if !homeAssistant.connected}
+              <p class="hint" role="status">Home Assistant ist gerade nicht erreichbar.</p>
+            {/if}
+            <dl class="facts">
+              {#each homeAssistant.rooms as room (room.entity_id)}
+                <div>
+                  <dt>{room.name} <span class="hint">· {zoneName(room.zone_id)}</span></dt>
+                  <dd class:na={room.status !== 'ok'}>{roomValue(room)}</dd>
+                </div>
+              {/each}
+              {#each homeAssistant.zones as zone (zone.zone_id)}
+                <div class="average">
+                  <dt>Mittelwert {zoneName(zone.zone_id)}</dt>
+                  <dd class:na={zone.celsius === null}>
+                    {zone.celsius === null ? NOT_AVAILABLE : `${formatNumber(zone.celsius, 1)} °C`}
+                  </dd>
+                </div>
+              {/each}
+            </dl>
+          </article>
+        {/if}
       </section>
 
       {#if values.captured_at}
@@ -219,6 +313,24 @@
     color: var(--text-hint);
     font-size: 15px;
     font-weight: 400;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  /* Room names may be long; they wrap instead of pushing the value out. */
+  dl.facts dt {
+    flex-shrink: 1;
+  }
+
+  .average dt,
+  .average dd:not(.na) {
+    color: var(--text);
+    font-weight: 600;
   }
 
   .link-button {

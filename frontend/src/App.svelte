@@ -162,7 +162,7 @@
     {:else if route === 'einrichtung'}
       <Setup status={pairing} onChange={(next) => (pairing = next)} onFinish={() => navigate('uebersicht')} />
     {:else if route === 'einstellungen'}
-      <Settings status={pairing} onRepair={() => navigate('einrichtung')} />
+      <Settings status={pairing} zones={live?.heat_pump?.zones ?? []} onRepair={() => navigate('einrichtung')} />
     {:else if route === 'protokoll'}
       <Log />
     {:else}

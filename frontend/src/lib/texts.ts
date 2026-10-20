@@ -1,4 +1,4 @@
-import type { ConnectionState, Gateway, LogCategory } from './types';
+import type { ConnectionState, ExportGroup, Gateway, LogCategory, ValueStatus } from './types';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'neutral';
 
@@ -73,6 +73,24 @@ export const LOG_CATEGORY_LABELS: Record<LogCategory, string> = {
   device: 'Gerät',
   connection: 'Verbindung',
   mode: 'Modus',
+  settings: 'Einstellungen',
+};
+
+/** Groups of values reported to Home Assistant, in the order of the settings page. */
+export const EXPORT_GROUPS: { group: ExportGroup; label: string; hint: string }[] = [
+  { group: 'status', label: 'Status', hint: 'Verbunden, Heartbeat, Betriebszustand, Verdichter läuft' },
+  { group: 'zones', label: 'Zonen', hint: 'Raumtemperatur (Mittelwert), Solltemperatur und Betriebsart je Zone' },
+  { group: 'hot_water', label: 'Warmwasser', hint: 'Speichertemperatur, Solltemperatur, Betriebsart, Einmalladung' },
+  { group: 'temperatures', label: 'Temperaturen', hint: 'Außentemperatur und weitere, soweit die Anlage sie meldet' },
+  { group: 'energy', label: 'Leistung und Energie', hint: 'Leistung, Verdichterleistung, Energie heute (berechnet)' },
+  { group: 'power_limits', label: 'Leistungsdeckel', hint: 'Grenze, aktiv, Failsafe-Grenze und -Dauer' },
+  { group: 'compressor', label: 'Verdichter-Flexibilität', hint: 'Zustand eines angebotenen Verdichterlaufs' },
+];
+
+export const VALUE_STATUS_LABELS: Record<ValueStatus, string> = {
+  ok: '',
+  stale: 'veraltet',
+  unavailable: 'nicht verfügbar',
 };
 
 export const BOOST_LABELS: Record<string, string> = {

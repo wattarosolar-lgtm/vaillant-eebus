@@ -1,10 +1,20 @@
 <script lang="ts">
   import DumpButton from '../components/DumpButton.svelte';
+  import HomeAssistantSettings from '../components/HomeAssistantSettings.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { gatewayName, groupedSki, skiEnding } from '../lib/texts';
   import type { PairingStatus } from '../lib/types';
 
-  let { status, onRepair }: { status: PairingStatus; onRepair: () => void } = $props();
+  let {
+    status,
+    zones,
+    onRepair,
+  }: {
+    status: PairingStatus;
+    /** Zones the heat pump reports, for assigning rooms. */
+    zones: { id: string; label: string }[];
+    onRepair: () => void;
+  } = $props();
 
   const gateway = $derived(status.paired);
   const bridgeText = $derived(
@@ -52,6 +62,8 @@
     {/if}
     <DumpButton enabled={status.state === 'connected'} />
   </section>
+
+  <HomeAssistantSettings {zones} />
 </div>
 
 <style>
