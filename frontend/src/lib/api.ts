@@ -10,6 +10,7 @@ import type {
   LogPage,
   OperatingMode,
   PairingStatus,
+  PowerHistory,
   Room,
   WriteResult,
 } from './types';
@@ -179,6 +180,10 @@ export async function downloadDump(): Promise<void> {
 export async function downloadLog(filter: LogFilter): Promise<void> {
   const query = logParams(filter).toString();
   await download(query ? `api/log/export?${query}` : 'api/log/export', 'vaillant-eebus-protokoll.csv');
+}
+
+export async function getPowerHistory(): Promise<PowerHistory> {
+  return (await send('api/history/power')).json() as Promise<PowerHistory>;
 }
 
 export async function getState(): Promise<ApiState> {

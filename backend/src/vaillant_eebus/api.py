@@ -27,6 +27,7 @@ from starlette.types import Scope
 from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.ha_client import HomeAssistantUnavailable
 from vaillant_eebus.ha_import import HomeAssistantState
+from vaillant_eebus.history import PowerHistory
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore, csv_document
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
@@ -367,6 +368,10 @@ def create_app(
         kind: Literal["temperature", "energy"], q: Annotated[str, Query(max_length=100)] = ""
     ) -> list[EntityChoice]:
         return await home_assistant.entities(kind, q)
+
+    @app.get("/api/history/power")
+    async def get_power_history() -> PowerHistory:
+        return await home_assistant.power_history()
 
     @app.get("/api/log")
     async def get_log(

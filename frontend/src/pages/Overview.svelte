@@ -1,6 +1,7 @@
 <script lang="ts">
   import BoostSwitch from '../components/BoostSwitch.svelte';
   import Dial from '../components/Dial.svelte';
+  import PowerChart from '../components/PowerChart.svelte';
   import {
     setHotWaterBoost,
     setHotWaterMode,
@@ -202,6 +203,7 @@
             <span class="big-value">{kilowatts(measurements['power_consumption']) ?? '—'}</span>
             <span class="big-unit">kW aktuell</span>
           </div>
+          <PowerChart />
           <dl class="pairs">
             {#each energyRows as [label, value] (label)}
               <div><dt>{label}</dt><dd class:na={value === null}>{value ?? NOT_AVAILABLE}</dd></div>
@@ -245,6 +247,19 @@
             </dl>
           </article>
         {/if}
+      </section>
+
+      <section class="grid planned-row" aria-label="Energiemanagement">
+        <article class="card planned">
+          <div class="card-head">
+            <h2>PV-Überschuss-Steuerung</h2>
+            <span class="hint">folgt mit dem HEMS</span>
+          </div>
+          <p class="secondary">
+            Später soll die App Solarstrom-Überschuss in Warmwasser und Heizung lenken. Das Gateway erwartet dafür
+            Netz- und PV-Daten von einem Energiemanager; diese meldet die App noch nicht.
+          </p>
+        </article>
       </section>
 
       {#if values.captured_at}
@@ -331,6 +346,16 @@
   .average dd:not(.na) {
     color: var(--text);
     font-weight: 600;
+  }
+
+  /* One column wide, like a card of the rows above. */
+  .planned-row {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  }
+
+  .planned {
+    background: transparent;
+    border: 2px dashed var(--control-border);
   }
 
   .link-button {

@@ -5,8 +5,8 @@ sensors. It never calls services and never changes other entities:
 set_state() and remove_state() refuse every entity outside this app's prefix.
 
 One WebSocket connection carries the state changes of the watched entities
-and the "homeassistant_started" event; the REST API serves single states and
-the app's own sensors. Watched entities are also read again every few
+and the "homeassistant_started" event; the REST API serves single states, the
+history of an entity and the app's own sensors. Watched entities are also read again every few
 minutes, because a value reported unchanged moves only last_reported, which
 triggers no event.
 """
@@ -20,7 +20,7 @@ import logging
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
@@ -152,12 +152,47 @@ class HomeAssistantClient:
         _check_own(entity_id)
         await self._rest("DELETE", f"/api/states/{entity_id}", missing_ok=True)
 
-    async def _rest(self, method: str, path: str, *, body: Any = None, missing_ok: bool = False) -> Any:
+    async def history(self, entity_id: str, start: datetime, end: datetime) -> list[tuple[datetime, str]]:
+        """The entity's state at start and every change until end, oldest first (spec 6.3)."""
+        data = await self._rest(
+            "GET",
+            f"/api/history/period/{_api_time(start)}",
+            params={
+                "filter_entity_id": entity_id,
+                "end_time": _api_time(end),
+                # Flags: Home Assistant only checks that they are present.
+                "minimal_response": "",
+                "no_attributes": "",
+                "significant_changes_only": "0",
+            },
+        )
+        if not isinstance(data, list):
+            raise HomeAssistantUnavailable("unexpected answer to /api/history/period")
+        changes = []
+        for item in data[0] if data and isinstance(data[0], list) else []:
+            moment = _time(item.get("last_changed")) if isinstance(item, dict) else None
+            if moment is not None:
+                changes.append((moment, str(item.get("state", ""))))
+        return changes
+
+    async def _rest(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: Any = None,
+        params: Mapping[str, str] | None = None,
+        missing_ok: bool = False,
+    ) -> Any:
         if self._session is None:
             raise HomeAssistantUnavailable("client not started")
         try:
             async with self._session.request(
-                method, self._url + path, json=body, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+                method,
+                self._url + path,
+                json=body,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
             ) as response:
                 if response.status == 404 and missing_ok:
                     return None
@@ -323,6 +358,11 @@ class HomeAssistantClient:
 def _check_own(entity_id: str) -> None:
     if not OWN_ENTITY.match(entity_id):
         raise ValueError(f"{entity_id!r} is not one of this app's sensors")
+
+
+def _api_time(moment: datetime) -> str:
+    # UTC with "Z": a "+" would turn into a space in the query string.
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _time(value: Any) -> datetime | None:

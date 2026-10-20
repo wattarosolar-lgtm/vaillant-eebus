@@ -1,5 +1,5 @@
 // Mirrors the backend's dataclasses (pairing.py, state.py, write_gate.py, log_store.py, api.py,
-// ha_import.py, home_assistant.py, settings.py).
+// ha_import.py, home_assistant.py, history.py, settings.py).
 
 export type ConnectionState =
   | 'not_paired'
@@ -167,6 +167,20 @@ export interface ApiState {
   home_assistant: HomeAssistantState;
   /** Heat of the day divided by energy_today; null unless both are reliable. */
   performance_today: number | null;
+}
+
+/** Why there is no power history: outside Home Assistant, not exported, or Home Assistant down. */
+export type HistoryGap = 'no_home_assistant' | 'not_exported' | 'unreachable';
+
+/** Mean power per bucket over the last 24 hours, from Home Assistant's history (history.py). */
+export interface PowerHistory {
+  start: string | null;
+  step_seconds: number;
+  /** Oldest first; null where nothing was recorded. */
+  watts: (number | null)[];
+  mean_watts: number | null;
+  peak_watts: number | null;
+  gap: HistoryGap | null;
 }
 
 export type ExportGroup =

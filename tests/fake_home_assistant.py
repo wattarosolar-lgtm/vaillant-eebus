@@ -1,9 +1,10 @@
 """A small Home Assistant Core for tests and the local UI preview.
 
 Serves the parts of the REST and WebSocket API the app uses: states, the
-app's own sensors, authentication, subscribe_trigger for state changes,
-subscribe_events for homeassistant_started, and a restart that drops every
-connection and every state the app set.
+app's own sensors, the history of an entity, authentication,
+subscribe_trigger for state changes, subscribe_events for
+homeassistant_started, and a restart that drops every connection and every
+state the app set (the history stays, as in the recorder).
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import asyncio
 import contextlib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aiohttp import WSMsgType, web
@@ -34,6 +35,10 @@ class FakeHomeAssistant:
         self.states: dict[str, dict[str, Any]] = {}
         # Every request that changed a state: (method, entity ID, body).
         self.writes: list[tuple[str, str, Any]] = []
+        # Recorded states per entity: (last_changed, state); set() adds to it.
+        self.history: dict[str, list[tuple[datetime, str]]] = {}
+        # Path start and query of every history request.
+        self.history_requests: list[dict[str, str]] = []
         self.connections = 0
         self.refuse_auth = False
         self._sockets: list[_Socket] = []
@@ -46,6 +51,7 @@ class FakeHomeAssistant:
         app.router.add_get("/api/states/{entity_id}", self._get_state)
         app.router.add_post("/api/states/{entity_id}", self._post_state)
         app.router.add_delete("/api/states/{entity_id}", self._delete_state)
+        app.router.add_get("/api/history/period/{start}", self._get_history)
         app.router.add_get("/websocket", self._websocket)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -76,7 +82,8 @@ class FakeHomeAssistant:
             attributes["unit_of_measurement"] = unit
         if name is not None:
             attributes["friendly_name"] = name
-        moment = (reported or datetime.now(UTC)).isoformat()
+        at = reported or datetime.now(UTC)
+        moment = at.isoformat()
         new = {
             "entity_id": entity_id,
             "state": state,
@@ -88,6 +95,8 @@ class FakeHomeAssistant:
         self.states[entity_id] = new
         if old is None or (old["state"], old["attributes"]) != (state, attributes):
             self._notify(entity_id, old, new)
+        if old is None or old["state"] != state:
+            self.history.setdefault(entity_id, []).append((at, state))
 
     def remove(self, entity_id: str) -> None:
         old = self.states.pop(entity_id, None)
@@ -149,6 +158,26 @@ class FakeHomeAssistant:
         if self.states.pop(entity_id, None) is None:
             return web.json_response({"message": "Entity not found."}, status=404)
         return web.json_response({"message": "Entity removed."})
+
+    async def _get_history(self, request: web.Request) -> web.Response:
+        """The state at start and every change until end_time, as with minimal_response."""
+        if not self._authorized(request):
+            return web.json_response({"message": "Unauthorized"}, status=401)
+        self.history_requests.append({"start": request.match_info["start"], **request.query})
+        start = datetime.fromisoformat(request.match_info["start"])
+        end = datetime.fromisoformat(request.query["end_time"]) if "end_time" in request.query else start + timedelta(1)
+        entity_id = request.query.get("filter_entity_id", "")
+        changes = sorted(self.history.get(entity_id, []))
+        earlier = [state for moment, state in changes if moment <= start]
+        items = ([(start, earlier[-1])] if earlier else []) + [change for change in changes if start < change[0] <= end]
+        if not items:
+            return web.json_response([])
+        first_moment, first_state = items[0]
+        rows: list[dict[str, Any]] = [
+            {"entity_id": entity_id, "state": first_state, "last_changed": first_moment.isoformat()}
+        ]
+        rows += [{"state": state, "last_changed": moment.isoformat()} for moment, state in items[1:]]
+        return web.json_response([rows])
 
     # --- WebSocket ---------------------------------------------------------------
 

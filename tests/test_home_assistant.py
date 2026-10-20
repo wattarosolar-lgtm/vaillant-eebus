@@ -545,3 +545,72 @@ async def test_choosing_entities_outside_home_assistant_explains_why(
 
     assert response.status_code == 503
     assert "Home Assistant ist gerade nicht erreichbar" in response.json()["detail"]
+
+
+# --- power history -------------------------------------------------------------------
+
+
+async def test_the_power_history_comes_from_home_assistant(
+    pairing: PairingService,
+    state: StateService,
+    gate: WriteGate,
+    log_store: LogStore,
+    energy_meter: EnergyMeter,
+    settings_store: SettingsStore,
+    fake_ha: FakeHomeAssistant,
+    ha_client: HomeAssistantClient,
+) -> None:
+    now = NOW
+    fake_ha.history["sensor.vaillant_eebus_power"] = [
+        (NOW - timedelta(days=2), "400"),
+        (NOW - timedelta(minutes=10), "2000"),
+    ]
+    home_assistant = HomeAssistant(settings_store, state, energy_meter, log_store, ha_client, clock=lambda: now)
+
+    async with _api(pairing, state, gate, log_store, energy_meter, home_assistant) as http:
+        history = (await http.get("/api/history/power")).json()
+        now = NOW + timedelta(seconds=59)
+        await http.get("/api/history/power")
+
+    assert history["start"] == "2026-10-19T12:05:00Z"
+    assert history["step_seconds"] == 300
+    assert history["gap"] is None
+    assert len(history["watts"]) == 288
+    # Two buckets of 2000 W before the running one, which has no elapsed time yet.
+    assert history["watts"][0] == 400.0
+    assert history["watts"][-4:] == [400.0, 2000.0, 2000.0, None]
+    # Within a minute the answer comes from the cache.
+    assert fake_ha.history_requests == [
+        {
+            "start": "2026-10-19T12:05:00Z",
+            "filter_entity_id": "sensor.vaillant_eebus_power",
+            "end_time": "2026-10-20T12:00:00Z",
+            "minimal_response": "",
+            "no_attributes": "",
+            "significant_changes_only": "0",
+        }
+    ]
+
+
+async def test_the_power_history_explains_why_it_is_missing(
+    pairing: PairingService,
+    state: StateService,
+    gate: WriteGate,
+    log_store: LogStore,
+    energy_meter: EnergyMeter,
+    settings_store: SettingsStore,
+    home_assistant: HomeAssistant,
+    fake_ha: FakeHomeAssistant,
+    ha_client: HomeAssistantClient,
+) -> None:
+    connected = HomeAssistant(settings_store, state, energy_meter, log_store, ha_client)
+
+    outside = await home_assistant.power_history()
+    settings_store.update(lambda settings: replace(settings, export=frozenset({ExportGroup.STATUS})))
+    not_exported = await connected.power_history()
+    settings_store.update(lambda settings: replace(settings, export=frozenset({ExportGroup.ENERGY})))
+    await fake_ha.stop()
+    unreachable = await connected.power_history()
+
+    assert (outside.gap, not_exported.gap, unreachable.gap) == ("no_home_assistant", "not_exported", "unreachable")
+    assert unreachable.watts == []

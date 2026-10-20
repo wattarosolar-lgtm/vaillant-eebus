@@ -1,4 +1,4 @@
-import type { ConnectionState, ExportGroup, Gateway, LogCategory, ValueStatus } from './types';
+import type { ConnectionState, ExportGroup, Gateway, HistoryGap, LogCategory, ValueStatus } from './types';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'neutral';
 
@@ -86,6 +86,14 @@ export const EXPORT_GROUPS: { group: ExportGroup; label: string; hint: string }[
   { group: 'power_limits', label: 'Leistungsdeckel', hint: 'Grenze, aktiv, Failsafe-Grenze und -Dauer' },
   { group: 'compressor', label: 'Verdichter-Flexibilität', hint: 'Zustand eines angebotenen Verdichterlaufs' },
 ];
+
+/** Shown instead of the power chart. */
+export const HISTORY_GAPS: Record<HistoryGap, string> = {
+  no_home_assistant: 'Den Verlauf liefert Home Assistant; außerhalb davon gibt es ihn nicht.',
+  not_exported:
+    'Für den Verlauf unter Einstellungen → Export nach Home Assistant die Gruppe „Leistung und Energie“ einschalten.',
+  unreachable: 'Home Assistant ist gerade nicht erreichbar; der Verlauf fehlt deshalb.',
+};
 
 export const VALUE_STATUS_LABELS: Record<ValueStatus, string> = {
   ok: '',

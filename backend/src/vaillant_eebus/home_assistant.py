@@ -7,18 +7,28 @@ reports itself unavailable and nothing is exported.
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 
 from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.ha_client import HomeAssistantClient, HomeAssistantUnavailable
 from vaillant_eebus.ha_export import PREFIX, HomeAssistantExport
 from vaillant_eebus.ha_import import HeatToday, HomeAssistantImport, HomeAssistantState, ValueStatus
+from vaillant_eebus.history import HistoryGap, PowerHistory, bucket_means, first_bucket
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.settings import ExportGroup, Room, Settings, SettingsStore
 from vaillant_eebus.state import StateService
 
+_LOGGER = logging.getLogger(__name__)
+
 # Below this much electrical energy a day's ratio says nothing yet (early morning).
 PERFORMANCE_MIN_KWH = 0.5
+# The exported power sensor whose history feeds the chart (group "Leistung und Energie").
+POWER_SENSOR = f"sensor.{PREFIX}power"
+# The history is read from Home Assistant at most this often; several open pages share it.
+HISTORY_CACHE = timedelta(seconds=60)
 
 # Units that make an entity a candidate for a room or for the heat of the day.
 _KIND_UNITS = {"temperature": frozenset({"°C", "°F"}), "energy": frozenset({"Wh", "kWh", "MWh"})}
@@ -64,11 +74,15 @@ class HomeAssistant:
         energy: EnergyMeter,
         log: LogStore,
         client: HomeAssistantClient | None,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._settings = settings
         self._state = state
         self._log = log
         self._client = client
+        self._clock = clock
+        self._history: tuple[datetime, PowerHistory] | None = None
         self.importer = HomeAssistantImport(settings, available=client is not None, on_change=state.republish)
         self.exporter = (
             HomeAssistantExport(client, state, energy, self.importer, settings) if client is not None else None
@@ -119,6 +133,24 @@ class HomeAssistant:
             choices.append(EntityChoice(entity_id=entity.entity_id, name=name, state=entity.state, unit=str(unit)))
         choices.sort(key=lambda choice: (choice.name.lower(), choice.entity_id))
         return choices[:MAX_CHOICES]
+
+    async def power_history(self) -> PowerHistory:
+        """The last 24 hours of power as five-minute means, from Home Assistant's history."""
+        if self._client is None:
+            return PowerHistory.missing(HistoryGap.NO_HOME_ASSISTANT)
+        if ExportGroup.ENERGY not in self._settings.current.export:
+            return PowerHistory.missing(HistoryGap.NOT_EXPORTED)
+        now = self._clock()
+        if self._history is not None and now - self._history[0] < HISTORY_CACHE:
+            return self._history[1]
+        try:
+            changes = await self._client.history(POWER_SENSOR, first_bucket(now), now)
+        except HomeAssistantUnavailable as err:
+            _LOGGER.warning("Reading the power history failed: %s", err)
+            return PowerHistory.missing(HistoryGap.UNREACHABLE)
+        history = bucket_means(changes, now)
+        self._history = (now, history)
+        return history
 
     def change(
         self, rooms: tuple[Room, ...], heat_energy_entities: tuple[str, ...], export: frozenset[ExportGroup]
