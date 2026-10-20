@@ -105,7 +105,7 @@ export async function getSettings(): Promise<AppSettings> {
 
 export async function saveSettings(change: {
   rooms: Room[];
-  heat_energy_entity: string | null;
+  heat_energy_entities: string[];
   export: ExportGroup[];
 }): Promise<AppSettings> {
   const response = await send('api/settings', {

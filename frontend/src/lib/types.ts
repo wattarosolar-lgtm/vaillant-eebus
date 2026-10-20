@@ -139,8 +139,10 @@ export interface ZoneAverage {
   of: number;
 }
 
+/** The heat of the day: the sum of the chosen sensors, e.g. heating and hot water. */
 export interface HeatToday {
-  entity_id: string;
+  entity_ids: string[];
+  /** Null unless every sensor has a value. */
   kwh: number | null;
   status: ValueStatus;
   reported_at: string | null;
@@ -183,7 +185,7 @@ export interface Room {
 
 export interface AppSettings {
   rooms: Room[];
-  heat_energy_entity: string | null;
+  heat_energy_entities: string[];
   export: ExportGroup[];
   /** Entity IDs the app currently reports to Home Assistant. */
   exported: string[];

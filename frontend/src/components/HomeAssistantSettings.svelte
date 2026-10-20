@@ -8,10 +8,14 @@
 
   let { zones }: { zones: { id: string; label: string }[] } = $props();
 
+  /** Heat sensors that are added up, e.g. heating and hot water (backend limit). */
+  const HEAT_SENSORS_MAX = 4;
+
   let saved = $state<AppSettings | null>(null);
   let rooms = $state<Room[]>([]);
-  let heatEntity = $state<string | null>(null);
-  let heatName = $state<string | null>(null);
+  let heatEntities = $state<string[]>([]);
+  // Friendly names of heat sensors picked in this visit; saved settings only know the IDs.
+  let heatNames = $state<Record<string, string>>({});
   let exportGroups = $state<ExportGroup[]>([]);
   let loadError = $state<string | null>(null);
   let saveError = $state<string | null>(null);
@@ -20,8 +24,8 @@
 
   const changed = $derived(
     saved !== null &&
-      JSON.stringify([rooms, heatEntity, [...exportGroups].sort()]) !==
-        JSON.stringify([saved.rooms, saved.heat_energy_entity, [...saved.export].sort()]),
+      JSON.stringify([rooms, heatEntities, [...exportGroups].sort()]) !==
+        JSON.stringify([saved.rooms, saved.heat_energy_entities, [...saved.export].sort()]),
   );
   const available = $derived(saved?.home_assistant_available ?? false);
   const roomsValid = $derived(rooms.every((room) => room.name.trim().length > 0));
@@ -29,7 +33,7 @@
   function adopt(settings: AppSettings): void {
     saved = settings;
     rooms = settings.rooms.map((room) => ({ ...room }));
-    heatEntity = settings.heat_energy_entity;
+    heatEntities = [...settings.heat_energy_entities];
     exportGroups = [...settings.export];
   }
 
@@ -65,9 +69,14 @@
     justSaved = false;
   }
 
-  function chooseHeat(choice: EntityChoice): void {
-    heatEntity = choice.entity_id;
-    heatName = choice.name;
+  function addHeat(choice: EntityChoice): void {
+    heatEntities = [...heatEntities, choice.entity_id];
+    heatNames = { ...heatNames, [choice.entity_id]: choice.name };
+    justSaved = false;
+  }
+
+  function removeHeat(entityId: string): void {
+    heatEntities = heatEntities.filter((item) => item !== entityId);
     justSaved = false;
   }
 
@@ -83,7 +92,7 @@
       adopt(
         await saveSettings({
           rooms: rooms.map((room) => ({ ...room, name: room.name.trim() })),
-          heat_energy_entity: heatEntity,
+          heat_energy_entities: heatEntities,
           export: exportGroups,
         }),
       );
@@ -96,163 +105,181 @@
   }
 </script>
 
-{#if loadError}
-  <section class="card"><p class="banner error" role="alert">{loadError}</p></section>
-{:else if saved === null}
-  <section class="card"><p class="secondary" role="status">Einstellungen werden geladen …</p></section>
-{:else}
-  {#if !available}
-    <p class="banner info wide" role="status">
-      Home Assistant ist für diese App nicht erreichbar. Räume und Export lassen sich nur einrichten, wenn die App in
-      Home Assistant läuft.
-    </p>
-  {/if}
-
-  <section class="card" aria-labelledby="rooms-title">
-    <h2 id="rooms-title">Räume aus Home Assistant</h2>
-    <p class="secondary">
-      Wählen Sie Temperatursensoren Ihrer Räume und ordnen Sie sie einer Heizzone zu. Das Rundinstrument jeder Zone
-      zeigt den Mittelwert ihrer Räume. Werte, die fehlen oder älter als 30 Minuten sind, zählen nicht mit.
-    </p>
-    {#if rooms.length > 0}
-      <ul class="rooms">
-        {#each rooms as room (room.entity_id)}
-          <li class="room">
-            <div class="fields">
-              <label>
-                <span>Name</span>
-                <input type="text" maxlength="60" bind:value={room.name} oninput={() => (justSaved = false)} />
-              </label>
-              <label>
-                <span>Zone</span>
-                <select bind:value={room.zone_id} onchange={() => (justSaved = false)}>
-                  <option value={null}>keine Zone</option>
-                  {#each zoneOptions as zone (zone.id)}
-                    <option value={zone.id}>{zone.label}</option>
-                  {/each}
-                </select>
-              </label>
-            </div>
-            <div class="row-end">
-              <span class="entity">{room.entity_id}</span>
-              <button
-                type="button"
-                class="button small"
-                aria-label={`Raum ${room.name || room.entity_id} entfernen`}
-                onclick={() => removeRoom(room.entity_id)}>Entfernen</button
-              >
-            </div>
-          </li>
-        {/each}
-      </ul>
-    {:else}
-      <p class="hint">Noch keine Räume gewählt.</p>
+<div class="home-assistant">
+  {#if loadError}
+    <p class="banner error" role="alert">{loadError}</p>
+  {:else if saved === null}
+    <p class="secondary" role="status">Einstellungen werden geladen …</p>
+  {:else}
+    {#if !available}
+      <p class="banner info" role="status">
+        Home Assistant ist für diese App nicht erreichbar. Räume und Export lassen sich nur einrichten, wenn die App in
+        Home Assistant läuft.
+      </p>
     {/if}
-    {#if available}
-      <EntityPicker
-        kind="temperature"
-        label="Raum hinzufügen"
-        exclude={rooms.map((room) => room.entity_id)}
-        onPick={addRoom}
-      />
-    {/if}
-  </section>
 
-  <section class="card" aria-labelledby="heat-title">
-    <h2 id="heat-title">Wärme heute</h2>
-    <p class="secondary">
-      Ein Sensor mit der heute erzeugten Wärme, der jeden Tag bei 0 beginnt – etwa aus der myVAILLANT-Integration oder
-      ein Verbrauchszähler-Helfer mit täglichem Zyklus. Zusammen mit „Energie heute“ ergibt sich die Arbeitszahl des
-      Tages.
-    </p>
-    {#if heatEntity}
-      <div class="row-end">
-        <span>{heatName ?? heatEntity}{heatName ? ` (${heatEntity})` : ''}</span>
-        <button
-          type="button"
-          class="button small"
-          onclick={() => {
-            heatEntity = null;
-            heatName = null;
-            justSaved = false;
-          }}>Entfernen</button
-        >
-      </div>
-    {:else if available}
-      <EntityPicker kind="energy" label="Sensor wählen" onPick={chooseHeat} />
-    {:else}
-      <p class="hint">Kein Sensor gewählt.</p>
-    {/if}
-  </section>
-
-  <section class="card" aria-labelledby="export-title">
-    <h2 id="export-title">Export nach Home Assistant</h2>
-    <p class="secondary">
-      Die App meldet diese Werte als Sensoren <code>sensor.vaillant_eebus_…</code> an Home Assistant, etwa für
-      Automationen und das Energie-Dashboard. Nach einem Neustart von Home Assistant meldet sie sie neu.
-    </p>
-    <fieldset>
-      <legend class="sr-only">Gruppen</legend>
-      {#each EXPORT_GROUPS as item (item.group)}
-        <label class="check">
-          <input
-            type="checkbox"
-            checked={exportGroups.includes(item.group)}
-            onchange={(event) => toggleGroup(item.group, event.currentTarget.checked)}
-          />
-          <span>
-            <span class="check-label">{item.label}</span>
-            <span class="hint">{item.hint}</span>
-          </span>
-        </label>
-      {/each}
-    </fieldset>
-    {#if saved.exported.length > 0}
-      <details>
-        <summary>Gemeldete Sensoren ({saved.exported.length})</summary>
-        <ul class="exported">
-          {#each saved.exported as entityId (entityId)}
-            <li><code>{entityId}</code></li>
+    <!-- Full width: the room list can grow long and must not stretch a row of other cards. -->
+    <section class="card" aria-labelledby="rooms-title">
+      <h2 id="rooms-title">Räume aus Home Assistant</h2>
+      <p class="secondary">
+        Wählen Sie Temperatursensoren Ihrer Räume und ordnen Sie sie einer Heizzone zu. Das Rundinstrument jeder Zone
+        zeigt den Mittelwert ihrer Räume. Werte, die fehlen oder älter als 30 Minuten sind, zählen nicht mit.
+      </p>
+      {#if rooms.length > 0}
+        <ul class="rooms">
+          {#each rooms as room (room.entity_id)}
+            <li class="room">
+              <div class="fields">
+                <label>
+                  <span>Name</span>
+                  <input type="text" maxlength="60" bind:value={room.name} oninput={() => (justSaved = false)} />
+                </label>
+                <label>
+                  <span>Zone</span>
+                  <select bind:value={room.zone_id} onchange={() => (justSaved = false)}>
+                    <option value={null}>keine Zone</option>
+                    {#each zoneOptions as zone (zone.id)}
+                      <option value={zone.id}>{zone.label}</option>
+                    {/each}
+                  </select>
+                </label>
+              </div>
+              <div class="row-end">
+                <span class="entity">{room.entity_id}</span>
+                <button
+                  type="button"
+                  class="button small"
+                  aria-label={`Raum ${room.name || room.entity_id} entfernen`}
+                  onclick={() => removeRoom(room.entity_id)}>Entfernen</button
+                >
+              </div>
+            </li>
           {/each}
         </ul>
-      </details>
-    {/if}
-  </section>
+      {:else}
+        <p class="hint">Noch keine Räume gewählt.</p>
+      {/if}
+      {#if available}
+        <div class="picker-width">
+          <EntityPicker
+            kind="temperature"
+            label="Raum hinzufügen"
+            exclude={rooms.map((room) => room.entity_id)}
+            onPick={addRoom}
+          />
+        </div>
+      {/if}
+    </section>
 
-  <div class="actions wide">
-    <button type="button" class="button primary" disabled={!changed || !roomsValid || saving} onclick={save}>
-      Speichern
-    </button>
-    {#if saveError}
-      <p class="error" role="alert">{saveError}</p>
-    {:else if !roomsValid}
-      <p class="hint">Jeder Raum braucht einen Namen.</p>
-    {:else if justSaved && !changed}
-      <p class="hint" role="status">Gespeichert.</p>
-    {/if}
-  </div>
-{/if}
+    <div class="pair">
+      <section class="card" aria-labelledby="heat-title">
+        <h2 id="heat-title">Wärme heute</h2>
+        <p class="secondary">
+          Sensoren mit der heute erzeugten Wärme, die jeden Tag bei 0 beginnen – etwa „Heizung“ und „Warmwasser“ der
+          myVAILLANT-Integration oder ein Verbrauchszähler-Helfer mit täglichem Zyklus. Die App addiert sie; zusammen
+          mit „Energie heute“ ergibt sich die Arbeitszahl des Tages.
+        </p>
+        {#if heatEntities.length > 0}
+          <ul class="heat">
+            {#each heatEntities as entityId (entityId)}
+              <li class="row-end">
+                <span>
+                  {#if heatNames[entityId]}
+                    {heatNames[entityId]} <span class="entity">({entityId})</span>
+                  {:else}
+                    <span class="entity">{entityId}</span>
+                  {/if}
+                </span>
+                <button
+                  type="button"
+                  class="button small"
+                  aria-label={`Wärmesensor ${heatNames[entityId] ?? entityId} entfernen`}
+                  onclick={() => removeHeat(entityId)}>Entfernen</button
+                >
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <p class="hint">Kein Sensor gewählt.</p>
+        {/if}
+        {#if available && heatEntities.length < HEAT_SENSORS_MAX}
+          <EntityPicker kind="energy" label="Sensor hinzufügen" exclude={heatEntities} onPick={addHeat} />
+        {/if}
+      </section>
+
+      <section class="card" aria-labelledby="export-title">
+        <h2 id="export-title">Export nach Home Assistant</h2>
+        <p class="secondary">
+          Die App meldet diese Werte als Sensoren <code>sensor.vaillant_eebus_…</code> an Home Assistant, etwa für
+          Automationen und das Energie-Dashboard. Nach einem Neustart von Home Assistant meldet sie sie neu.
+        </p>
+        <fieldset>
+          <legend class="sr-only">Gruppen</legend>
+          {#each EXPORT_GROUPS as item (item.group)}
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={exportGroups.includes(item.group)}
+                onchange={(event) => toggleGroup(item.group, event.currentTarget.checked)}
+              />
+              <span>
+                <span class="check-label">{item.label}</span>
+                <span class="hint">{item.hint}</span>
+              </span>
+            </label>
+          {/each}
+        </fieldset>
+        {#if saved.exported.length > 0}
+          <details>
+            <summary>Gemeldete Sensoren ({saved.exported.length})</summary>
+            <ul class="exported">
+              {#each saved.exported as entityId (entityId)}
+                <li><code>{entityId}</code></li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+      </section>
+    </div>
+
+    <div class="actions">
+      <button type="button" class="button primary" disabled={!changed || !roomsValid || saving} onclick={save}>
+        Speichern
+      </button>
+      {#if saveError}
+        <p class="error" role="alert">{saveError}</p>
+      {:else if !roomsValid}
+        <p class="hint">Jeder Raum braucht einen Namen.</p>
+      {:else if justSaved && !changed}
+        <p class="hint" role="status">Gespeichert.</p>
+      {/if}
+    </div>
+  {/if}
+</div>
 
 <style>
-  .wide {
-    grid-column: 1 / -1;
+  .home-assistant {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
   }
 
   .rooms {
     margin: 0;
     padding: 0;
     list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 16px;
   }
 
   .room {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--divider);
+    padding: 12px;
+    border: 1px solid var(--divider);
+    border-radius: 12px;
   }
 
   .fields {
@@ -285,6 +312,26 @@
   select:focus-visible {
     outline: 3px solid var(--info-text);
     outline-offset: 1px;
+  }
+
+  .picker-width {
+    max-width: 560px;
+  }
+
+  .pair {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 24px;
+    align-items: start;
+  }
+
+  .heat {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .row-end {
@@ -371,7 +418,9 @@
   }
 
   @media (max-width: 420px) {
-    .fields {
+    .fields,
+    .pair,
+    .rooms {
       grid-template-columns: 1fr;
     }
   }

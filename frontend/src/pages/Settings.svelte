@@ -22,51 +22,59 @@
   );
 </script>
 
-<div class="grid">
-  <section class="card" aria-labelledby="pairing-title">
-    <div class="head">
-      <h2 id="pairing-title">Kopplung</h2>
-      <StatusPill connection={status.state} />
-    </div>
-    {#if status.state === 'trust_removed'}
-      <p class="banner error" role="alert">
-        Das Gateway hat das Vertrauen entzogen. Setzen Sie die App in der myVAILLANT-App unter Einstellungen → Netzwerk →
-        EEBUS wieder auf „Vertrauenswürdig“.
-      </p>
-    {/if}
-    <dl class="facts">
-      {#if gateway}
-        <div><dt>Gateway</dt><dd>{gatewayName(gateway)}</dd></div>
-        <div><dt>Seriennummer</dt><dd>{gateway.serial || '—'}</dd></div>
-        <div><dt>Software</dt><dd>{gateway.software_revision || '—'}</dd></div>
-        <div><dt>Adresse im Netzwerk</dt><dd>{gateway.host || '—'}</dd></div>
-        <div><dt>SKI des Gateways</dt><dd>endet auf {skiEnding(gateway.ski)}</dd></div>
+<div class="page">
+  <div class="grid">
+    <section class="card" aria-labelledby="pairing-title">
+      <div class="head">
+        <h2 id="pairing-title">Kopplung</h2>
+        <StatusPill connection={status.state} />
+      </div>
+      {#if status.state === 'trust_removed'}
+        <p class="banner error" role="alert">
+          Das Gateway hat das Vertrauen entzogen. Setzen Sie die App in der myVAILLANT-App unter Einstellungen → Netzwerk →
+          EEBUS wieder auf „Vertrauenswürdig“.
+        </p>
       {/if}
-      <div><dt>SKI dieser App</dt><dd><code>{status.bridge.ski ? groupedSki(status.bridge.ski) : '—'}</code></dd></div>
-      <div><dt>EEBUS-Bridge</dt><dd>{bridgeText}</dd></div>
-    </dl>
-    <div>
-      <button type="button" class="button" onclick={onRepair}>Anderes Gateway koppeln</button>
-    </div>
-  </section>
+      <dl class="facts">
+        {#if gateway}
+          <div><dt>Gateway</dt><dd>{gatewayName(gateway)}</dd></div>
+          <div><dt>Seriennummer</dt><dd>{gateway.serial || '—'}</dd></div>
+          <div><dt>Software</dt><dd>{gateway.software_revision || '—'}</dd></div>
+          <div><dt>Adresse im Netzwerk</dt><dd>{gateway.host || '—'}</dd></div>
+          <div><dt>SKI des Gateways</dt><dd>endet auf {skiEnding(gateway.ski)}</dd></div>
+        {/if}
+        <div><dt>SKI dieser App</dt><dd><code>{status.bridge.ski ? groupedSki(status.bridge.ski) : '—'}</code></dd></div>
+        <div><dt>EEBUS-Bridge</dt><dd>{bridgeText}</dd></div>
+      </dl>
+      <div>
+        <button type="button" class="button" onclick={onRepair}>Anderes Gateway koppeln</button>
+      </div>
+    </section>
 
-  <section class="card" aria-labelledby="diagnostics-title">
-    <h2 id="diagnostics-title">Diagnose</h2>
-    <p class="secondary">
-      Der Diagnose-Dump beschreibt die vollständige EEBUS-Struktur Ihrer Anlage: Zonen, Messwerte, Sollwerte mit Grenzen
-      und angebotene Betriebsarten. Die App liest dafür nur, sie ändert nichts an der Wärmepumpe. Der Dump enthält
-      Modell- und Seriennummern Ihrer Geräte.
-    </p>
-    {#if status.state !== 'connected'}
-      <p class="hint">Verfügbar, sobald das Gateway verbunden ist.</p>
-    {/if}
-    <DumpButton enabled={status.state === 'connected'} />
-  </section>
+    <section class="card" aria-labelledby="diagnostics-title">
+      <h2 id="diagnostics-title">Diagnose</h2>
+      <p class="secondary">
+        Der Diagnose-Dump beschreibt die vollständige EEBUS-Struktur Ihrer Anlage: Zonen, Messwerte, Sollwerte mit Grenzen
+        und angebotene Betriebsarten. Die App liest dafür nur, sie ändert nichts an der Wärmepumpe. Der Dump enthält
+        Modell- und Seriennummern Ihrer Geräte.
+      </p>
+      {#if status.state !== 'connected'}
+        <p class="hint">Verfügbar, sobald das Gateway verbunden ist.</p>
+      {/if}
+      <DumpButton enabled={status.state === 'connected'} />
+    </section>
+  </div>
 
   <HomeAssistantSettings {zones} />
 </div>
 
 <style>
+  .page {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
