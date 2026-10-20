@@ -11,6 +11,7 @@ import logging
 import math
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from pathlib import Path, PurePath
 from typing import Annotated, Literal, Protocol
 
@@ -27,7 +28,7 @@ from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.ha_client import HomeAssistantUnavailable
 from vaillant_eebus.ha_import import HomeAssistantState
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
-from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore
+from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore, csv_document
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
 from vaillant_eebus.settings import (
     ENTITY_ID,
@@ -235,7 +236,9 @@ def create_app(
     *,
     static_dir: Path | None,
     trusted_clients: frozenset[str],
+    zone: tzinfo = UTC,
 ) -> FastAPI:
+    """zone is Home Assistant's time zone: protocol days and downloaded times are local."""
     app = FastAPI(title="Vaillant EEBUS", docs_url=None, redoc_url=None, openapi_url=None)
 
     async def api_state(heat_pump: HeatPumpState | None) -> ApiState:
@@ -368,10 +371,27 @@ def create_app(
     @app.get("/api/log")
     async def get_log(
         category: LogCategory | None = None,
+        problems: bool = False,
         before: Annotated[int | None, Query(ge=1)] = None,
+        after: Annotated[int | None, Query(ge=0)] = None,
+        until: date | None = None,
         limit: Annotated[int, Query(ge=1, le=200)] = PAGE_SIZE,
     ) -> LogPage:
-        return await log.page(category=category, before=before, limit=limit)
+        """before/after page by entry ID; until is the last local day to show (jump to a date)."""
+        end = datetime.combine(until + timedelta(days=1), time(0), tzinfo=zone) if until is not None else None
+        return await log.page(
+            category=category, problems=problems, before=before, after=after, before_time=end, limit=limit
+        )
+
+    @app.get("/api/log/export")
+    async def download_log(category: LogCategory | None = None, problems: bool = False) -> Response:
+        entries = await log.entries(category=category, problems=problems)
+        filename = f"vaillant-eebus-protokoll-{datetime.now(zone):%Y%m%d-%H%M%S}.csv"
+        return Response(
+            content=csv_document(entries, zone),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     @app.get("/api/diagnostics/dump")
     async def download_dump() -> Response:

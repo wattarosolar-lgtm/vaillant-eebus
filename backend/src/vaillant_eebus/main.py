@@ -116,7 +116,8 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
     )
     state = StateService(bridge, pairing)
     gate = WriteGate(bridge, pairing, state, settings, log)
-    energy = EnergyMeter(state, config.data_dir, zone=local_zone(config.time_zone))
+    zone = local_zone(config.time_zone)
+    energy = EnergyMeter(state, config.data_dir, zone=zone)
     ha_client = HomeAssistantClient(config.ha_url, config.ha_token, log=log) if config.ha_token else None
     if ha_client is None:
         _LOGGER.info("No Supervisor token: running without Home Assistant")
@@ -130,6 +131,7 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
         home_assistant,
         static_dir=config.static_dir,
         trusted_clients=config.trusted_clients,
+        zone=zone,
     )
     server = uvicorn.Server(
         uvicorn.Config(

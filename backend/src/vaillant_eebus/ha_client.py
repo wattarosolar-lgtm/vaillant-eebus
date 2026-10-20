@@ -182,7 +182,7 @@ class HomeAssistantClient:
             if self._connected:
                 self._connected = False
                 _LOGGER.warning("Connection to Home Assistant lost")
-                self._record("Verbindung zu Home Assistant verloren; die App versucht es weiter.")
+                self._record("Verbindung zu Home Assistant verloren; die App versucht es weiter.", problem=True)
                 for listener in self._listeners:
                     listener.ha_disconnected()
                 delays = self._backoff.delays()
@@ -315,9 +315,9 @@ class HomeAssistantClient:
 
         await asyncio.gather(*(one(entity_id) for entity_id in sorted(entity_ids)))
 
-    def _record(self, message: str) -> None:
+    def _record(self, message: str, *, problem: bool = False) -> None:
         if self._log is not None:
-            self._log.add(LogCategory.CONNECTION, message)
+            self._log.add(LogCategory.CONNECTION, message, problem=problem)
 
 
 def _check_own(entity_id: str) -> None:

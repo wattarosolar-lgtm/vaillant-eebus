@@ -284,7 +284,7 @@ class WriteGate:
                     raise WriteRejected(409, "Die Wärmepumpe ist gerade nicht verbunden.")
                 _validate(command, heat_pump)
             except WriteRejected as rejected:
-                self._log.add(LogCategory.WRITE, f"Abgelehnt: {description}. {rejected.message}")
+                self._log.add(LogCategory.WRITE, f"Abgelehnt: {description}. {rejected.message}", problem=True)
                 raise
             if self.mode is OperatingMode.DEMO:
                 return self._demo(command, description)
@@ -336,7 +336,7 @@ class WriteGate:
                 f"Bitte noch {math.ceil(wait)} s warten; je Einstellung wird höchstens alle "
                 f"{self._rate_limit_s:.0f} s gesendet."
             )
-            self._log.add(LogCategory.WRITE, f"Abgelehnt: {description}. Zu schnell nacheinander.")
+            self._log.add(LogCategory.WRITE, f"Abgelehnt: {description}. Zu schnell nacheinander.", problem=True)
             raise WriteRejected(429, message, retry_after=wait)
         self._last_sent[key] = now
 
@@ -349,13 +349,16 @@ class WriteGate:
             code = err.code()
             if code in _NOT_EXECUTED:
                 _LOGGER.warning("Write not executed (%s): %s", code.name, description)
-                self._log.add(LogCategory.WRITE, f"Nicht ausgeführt: {description} (Fehlercode {code.name})")
+                self._log.add(
+                    LogCategory.WRITE, f"Nicht ausgeführt: {description} (Fehlercode {code.name})", problem=True
+                )
                 raise
             _LOGGER.warning("Write outcome unknown (%s): %s", code.name, description)
             self._log.add(
                 LogCategory.WRITE,
                 f"Ergebnis unbekannt: {description} (Fehlercode {code.name}); die App prüft, ob das Gerät den "
                 "Wert meldet.",
+                problem=True,
             )
             self._follow(command, key, target, description, now)
             raise WriteOutcomeUnknown(code) from err
@@ -403,6 +406,7 @@ class WriteGate:
                     self._log.add(
                         LogCategory.WRITE,
                         f"Nicht übernommen: {unresolved.write.message}; das Gerät meldet {_value_part(observed)}",
+                        problem=True,
                     )
             elif previous is not None and previous.value != observed.value:
                 self._log.add(
@@ -430,11 +434,12 @@ class WriteGate:
                 self._log.add(
                     LogCategory.WRITE,
                     f"{timed_out}; die Verbindung zum Gerät ist unterbrochen, das Ergebnis ist unbekannt.",
+                    problem=True,
                 )
                 continue
             reported = self._last_values.get(key)
             still = f"; das Gerät meldet weiterhin {_value_part(reported)}" if reported else ""
-            self._log.add(LogCategory.WRITE, f"{timed_out}{still}")
+            self._log.add(LogCategory.WRITE, f"{timed_out}{still}", problem=True)
         if expired:
             self._state.republish()
 

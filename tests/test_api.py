@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -331,6 +332,51 @@ async def test_protocol_is_paged_and_filtered(connected_client: httpx.AsyncClien
     assert writes["more"] is True
     assert [entry["message"] for entry in older["entries"]] == ["Würde senden: Zone 2: Solltemperatur 22,5 °C"]
     assert [entry["message"] for entry in connection["entries"]] == ["Gateway …7D9F02 gekoppelt."]
+
+
+async def test_protocol_problems_newer_entries_and_dates(connected_client: httpx.AsyncClient) -> None:
+    newest = (await connected_client.get("/api/log", params={"limit": 1})).json()["entries"][0]
+    await connected_client.post("/api/zones/6.1.1/setpoint", json={"value": 35, **DEMO})
+    await connected_client.post("/api/dhw/mode", json={"mode": "off", **DEMO})
+
+    problems = (await connected_client.get("/api/log", params={"problems": "true"})).json()
+    newer = (await connected_client.get("/api/log", params={"after": newest["id"]})).json()
+    yesterday = (await connected_client.get("/api/log", params={"until": "2026-01-01"})).json()
+    malformed = await connected_client.get("/api/log", params={"until": "gestern"})
+
+    assert [(entry["message"], entry["problem"]) for entry in problems["entries"]] == [
+        (
+            "Abgelehnt: Zone 2: Solltemperatur 35,0 °C. "
+            "Zone 2: Die Solltemperatur muss zwischen 5,0 °C und 30,0 °C liegen.",
+            True,
+        )
+    ]
+    assert [entry["message"] for entry in newer["entries"]] == [
+        "Würde senden: Warmwasser: Betriebsart Aus",
+        problems["entries"][0]["message"],
+    ]
+    assert yesterday == {"entries": [], "more": False}
+    assert malformed.status_code == 422
+
+
+async def test_protocol_is_downloaded_as_csv(connected_client: httpx.AsyncClient) -> None:
+    await connected_client.post("/api/dhw/mode", json={"mode": "off", **DEMO})
+
+    response = await connected_client.get("/api/log/export")
+    writes = await connected_client.get("/api/log/export", params={"category": "write"})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/csv; charset=utf-8"
+    assert re.fullmatch(
+        r'attachment; filename="vaillant-eebus-protokoll-\d{8}-\d{6}\.csv"', response.headers["content-disposition"]
+    )
+    rows = response.content.decode("utf-8-sig").splitlines()
+    assert rows[0] == "Zeit;Kategorie;Problem;Meldung"
+    assert [row.split(";")[1:] for row in rows[1:]] == [
+        ["Verbindung", "", "Gateway …7D9F02 gekoppelt."],
+        ["Schreiben", "", "Würde senden: Warmwasser: Betriebsart Aus"],
+    ]
+    assert writes.content.decode("utf-8-sig").splitlines()[1:] == rows[2:]
 
 
 class _OpenClient:

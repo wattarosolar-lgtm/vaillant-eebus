@@ -438,14 +438,16 @@ class ConnectionLog:
             self._record_disconnect(ski, now)
         elif event.event_type == DEVICE_EVENT_TRUST_REMOVED:
             _LOGGER.warning("Gateway %s withdrew its trust (check the myVAILLANT app)", ski)
-            self._protocol(f"Gateway {ski} hat das Vertrauen entzogen (bitte in der myVAILLANT-App prüfen).")
+            self._protocol(
+                f"Gateway {ski} hat das Vertrauen entzogen (bitte in der myVAILLANT-App prüfen).", problem=True
+            )
         else:
             _LOGGER.debug("Device event %d for %s", event.event_type, ski)
 
     def _record_disconnect(self, ski: str, now: float) -> None:
         if self._connected:
             _LOGGER.warning("Gateway %s disconnected, reconnecting", ski)
-            self._protocol(f"Verbindung zu Gateway {ski} getrennt; die App verbindet neu.")
+            self._protocol(f"Verbindung zu Gateway {ski} getrennt; die App verbindet neu.", problem=True)
             self._connected = False
             self._waiting_since = now
             self._last_summary = now
@@ -455,7 +457,7 @@ class ConnectionLog:
             _LOGGER.info(
                 "Gateway %s refused the connection attempt; retrying (each attempt is logged at level debug)", ski
             )
-            self._protocol(f"Gateway {ski} lehnt die Verbindung ab; die App versucht es weiter.")
+            self._protocol(f"Gateway {ski} lehnt die Verbindung ab; die App versucht es weiter.", problem=True)
             return
         _LOGGER.debug("Connection attempt %d to gateway %s failed", self._failed_attempts, ski)
         if now - self._last_summary >= self._summary_interval:
@@ -467,13 +469,14 @@ class ConnectionLog:
             )
             self._protocol(
                 f"Gateway {ski} noch nicht verbunden nach {_german_attempts(self._failed_attempts)} "
-                f"in {_german_duration(now - self._waiting_since)}; die App versucht es weiter."
+                f"in {_german_duration(now - self._waiting_since)}; die App versucht es weiter.",
+                problem=True,
             )
             self._last_summary = now
 
-    def _protocol(self, message: str) -> None:
+    def _protocol(self, message: str, *, problem: bool = False) -> None:
         if self._log is not None:
-            self._log.add(LogCategory.CONNECTION, message)
+            self._log.add(LogCategory.CONNECTION, message, problem=problem)
 
 
 def _failed_attempts(count: int) -> str:
