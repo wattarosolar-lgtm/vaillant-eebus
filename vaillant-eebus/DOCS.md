@@ -5,7 +5,7 @@ ohne eBUS-Adapter und ohne MQTT.
 
 ## Stand dieser Version
 
-Version 0.5.1 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
+Version 0.5.2 koppelt die App mit dem Gateway Ihrer Wärmepumpe, zeigt deren Werte live in einer Übersicht, jede
 Heizzone einzeln, und kann Solltemperaturen, Betriebsarten und die Einmalladung des Warmwassers ändern.
 Nach der Installation läuft die App im **Demo-Betrieb** und sendet nichts an die Wärmepumpe (siehe unten).
 Sensoren in Home Assistant und die Raumtemperatur aus Home Assistant folgen in den nächsten Versionen.
@@ -28,41 +28,49 @@ Verbindung steht.
 
 ## Übersicht
 
-Die Seite **Übersicht** zeigt für jede Heizzone und für das Warmwasser ein Rundinstrument: den gemessenen Wert,
-die Solltemperatur auf dem Bogen mit ihrem erlaubten Bereich und die aktive Betriebsart. Jede Zone trägt den Namen,
+Die Seite **Übersicht** zeigt für jede Heizzone und für das Warmwasser ein Rundinstrument: die Solltemperatur auf
+dem Bogen mit ihrem erlaubten Bereich, die aktive Betriebsart und beim Warmwasser die Speichertemperatur. Jede Zone trägt den Namen,
 den sie in der Anlage hat (z. B. „Zone 1“ und „Zone 2“). Darunter stehen Leistung,
 Energie und Temperaturen. Oben sieht man, ob das Gateway verbunden ist, ob die Wärmepumpe ihren Heartbeat sendet,
 ihren Betriebszustand, die Außentemperatur und ob der Verdichter läuft (ab 100 W Leistungsaufnahme).
 
 Die Werte aktualisieren sich von selbst, sobald die Wärmepumpe etwas meldet, spätestens nach einer Minute.
 
-**Bedienen:** Unter jedem Rundinstrument stellen Sie die Solltemperatur mit **−** und **+** ein und wählen die
-Betriebsart (**Aus**, **Auto**, **Ein**; **Eco** nur, wenn die Anlage es anbietet). Mehrere Klicks auf − oder +
-sammelt die App und sendet den Wert einmal, kurz nachdem Sie aufgehört haben. Beim Warmwasser schaltet
-**Einmalladung** den Speicher einmal auf. Bereich, Schrittweite und Betriebsarten kommen immer von der Anlage.
+**Bedienen:** Die Solltemperatur stellen Sie ein, indem Sie den Knopf auf dem Bogen ziehen (mit Maus oder
+Finger), mit **−** und **+** darunter oder mit den Pfeiltasten, wenn der Bogen ausgewählt ist. Darunter wählen Sie
+die Betriebsart (**Aus**, **Auto**, **Ein**; **Eco** nur, wenn die Anlage es anbietet). Die App sendet den Wert
+einmal, kurz nachdem Sie losgelassen oder aufgehört haben zu klicken. Beim Warmwasser schaltet **Einmalladung** den
+Speicher einmal auf. Bereich, Schrittweite und Betriebsarten kommen immer von der Anlage.
 
-**Solltemperatur im Auto-Betrieb:** Im Auto-Betrieb regelt der Regler nach seinem Zeitprogramm. Die Temperatur
-des aktuellen Zeitfensters meldet das Gateway über EEBUS nicht; die App zeigt den Sollwert, den das Gateway meldet.
-Er kann deshalb von dem Wert abweichen, den die myVAILLANT-App für das laufende Zeitfenster zeigt.
+**Zonen im Auto-Betrieb:** Im Auto-Betrieb heizt die Zone nach dem Zeitprogramm des Reglers. Dessen Temperatur
+meldet das Gateway über EEBUS nicht, und eine über EEBUS gesendete Solltemperatur wirkt dort nicht. Das
+Rundinstrument zeigt deshalb „Zeitprogramm“, und die Solltemperatur ist gesperrt. Für eine zeitweise höhere oder
+niedrigere Temperatur (Boost) nutzen Sie die myVAILLANT-App oder deren Integration in Home Assistant. Auch was Sie
+dort im Auto-Betrieb ändern, sieht diese App nicht. In der Betriebsart **Ein** heizt die Zone auf die
+Solltemperatur, die Sie hier einstellen.
 
 Was die Wärmepumpe über EEBUS nicht liefert, steht als **nicht verfügbar** da.
 
-**Raumtemperatur:** Meldet eine Zone über EEBUS einen gültigen Wert, zeigt ihr Rundinstrument ihn mit dem Hinweis
-„Raumfühler (EEBUS)“. Nicht jede Zone meldet einen; dann steht dort „—“. Eine spätere Version berechnet die
-Raumtemperatur jeder Zone als Mittelwert der Temperatursensoren, die Sie in Home Assistant für die Räume dieser
-Zone auswählen.
+**Raumtemperatur:** Die Raumfühler der Zonen liefern über EEBUS keine verlässlichen Werte. Im Rundinstrument
+einer Zone steht deshalb vorerst „—“. Eine spätere Version berechnet die Raumtemperatur jeder Zone als Mittelwert
+der Temperatursensoren, die Sie in Home Assistant für die Räume dieser Zone auswählen.
+
+**Energie heute (berechnet):** Die Wärmepumpe meldet über EEBUS keine Energiezähler, nur ihre aktuelle
+Leistungsaufnahme. Die App rechnet daraus den Stromverbrauch seit Mitternacht (Zeitzone von Home Assistant). Das
+ist eine Schätzung. Lief die App nicht oder war die Wärmepumpe nicht erreichbar, steht „(lückenhaft)“ dahinter;
+die fehlende Zeit wird nicht geschätzt. Das gilt auch für den ersten Tag nach der Installation.
 
 ## Demo- und Live-Betrieb
 
-Oben rechts schalten Sie zwischen **Demo** und **Live** um. Ein farbiges Band unter der Kopfzeile zeigt, welcher
-Betrieb gerade gilt.
+In der Kopfzeile schalten Sie zwischen **Demo** und **Live** um; der gewählte Betrieb ist dort hervorgehoben.
 
-- **Demo** (blau, Voreinstellung nach der Installation): Die App liest nur. Eine Änderung erscheint einige
-  Sekunden lang als Vorschau mit dem Hinweis „Demo: wird nicht gesendet“, danach zeigt die Kachel wieder den
-  echten Wert der Anlage. Das Protokoll vermerkt „Würde senden: …“.
-- **Live** (orange): Die App sendet Änderungen an die Wärmepumpe. Das Umschalten muss bestätigt werden. Bis die
-  Anlage den neuen Wert meldet, zeigt die Kachel „Wird gesendet …“ und weiter den bisherigen Wert; danach den
-  neuen. Meldet die Anlage den Wert nicht innerhalb von 30 Sekunden, steht das im Protokoll.
+- **Demo** (Voreinstellung nach der Installation): Ein blaues Band unter der Kopfzeile sagt, dass die App nur
+  liest. Eine Änderung erscheint einige Sekunden lang blau als Vorschau, danach zeigt die Kachel wieder den echten
+  Wert der Anlage. Das Protokoll vermerkt „Würde senden: …“.
+- **Live** (Umschalter orange): Die App sendet Änderungen an die Wärmepumpe. Das Umschalten muss bestätigt werden.
+  Bis die Anlage den neuen Wert meldet, zeigt die Kachel ihn blass; danach normal. Sobald die Wärmepumpe den
+  Befehl quittiert hat, können Sie weiter einstellen. Meldet die Anlage den Wert nicht innerhalb von 30 Sekunden,
+  steht das im Protokoll.
 
 Eine Änderung gilt immer für den Betrieb, in dem Sie sie gemacht haben: Wechseln Sie den Betrieb, während die App
 Klicks auf − und + noch sammelt, verwirft sie diese, statt sie im neuen Betrieb zu senden.
@@ -72,8 +80,8 @@ angekommen ist. Die App meldet dann „Ergebnis unbekannt“, sendet nicht von s
 die Wärmepumpe den Wert meldet. Kommt die Verbindung erst später zurück, trägt sie das Ergebnis nach.
 
 Schutzregeln im Live-Betrieb: Jeder Wert muss im Bereich und auf der Schrittweite der Anlage liegen. Je
-Einstellung sendet die App höchstens alle 5 Sekunden; ein Wert, der schon eingestellt ist, wird nicht noch einmal
-gesendet. Ohne Verbindung zum Gateway sendet die App nichts.
+Einstellung sendet die App höchstens alle 5 Sekunden; stellen Sie schneller nach, wartet sie so lange. Ein Wert,
+der schon eingestellt ist, wird nicht noch einmal gesendet. Ohne Verbindung zum Gateway sendet die App nichts.
 
 Der gewählte Betrieb bleibt nach einem Neustart oder Update erhalten. Ist die Einstellungsdatei beschädigt,
 startet die App sicherheitshalber im Demo-Betrieb.
@@ -110,7 +118,8 @@ Der Dump enthält Modell- und Seriennummern Ihrer Geräte; die SKI des Gateways 
 ## Daten und Sicherung
 
 Die App speichert ihre EEBUS-Identität in `/data/eebus` (Zertifikat und Seriennummer), das gekoppelte Gateway
-und den gewählten Betrieb in `/data/settings.json` und das Protokoll in `/data/app.db`.
+und den gewählten Betrieb in `/data/settings.json`, das Protokoll in `/data/app.db` und den berechneten
+Energieverbrauch je Tag (400 Tage) in `/data/energy.json`.
 Diese Dateien sind Teil der Home-Assistant-Sicherung. Gehen die Daten in `/data/eebus` verloren, ändert sich die
 SKI der App und die Kopplung in der myVAILLANT-App muss neu gemacht werden.
 

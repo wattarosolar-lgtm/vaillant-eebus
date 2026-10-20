@@ -34,6 +34,12 @@ Die Oberfläche holt den Zustand der Wärmepumpe über `api/state` und bekommt j
 Minute. Diese regelmäßige Leseanfrage braucht auch die Verbindungsüberwachung der Bridge: Bleibt sie aus, baut die
 Bridge die Verbindung zum Gateway nach zwei Minuten neu auf.
 
+Der Zustand enthält außerdem `energy_today` (`{"kwh": …, "incomplete": …}`): den Stromverbrauch seit Mitternacht,
+den `backend/src/vaillant_eebus/energy.py` aus der gemeldeten Leistung aufsummiert, weil die Anlage keine
+Energiezähler liefert. Mehr als 3 Minuten ohne Messwert werden nicht überbrückt; der Tag gilt dann als lückenhaft.
+Der Tageswechsel folgt der Zeitzone von Home Assistant (`TZ`, vom Supervisor gesetzt); gespeichert wird in
+`/data/energy.json`.
+
 Die Bridge liefert jede Heizzone einzeln (`room_heating_zones` im Snapshot, `ListRoomHeatingZones`). Eine Zone heißt
 nach der SPINE-Adresse ihres Raum-Eintrags, z. B. `5.1.1`. Schreibende Aufrufe brauchen bei mehreren Zonen diese
 Zonen-ID; ohne sie lehnt die Bridge ab, statt eine Zone zu raten.
@@ -46,7 +52,7 @@ Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
 | Methode | Pfad | Zweck |
 |---|---|---|
 | GET/POST | `api/mode` | Demo/Live lesen und setzen (Live nur mit `"confirm": true`) |
-| POST | `api/zones/{zone_id}/setpoint`, `api/zones/{zone_id}/mode` | Solltemperatur (`value`), Betriebsart (`mode`) einer Zone |
+| POST | `api/zones/{zone_id}/setpoint`, `api/zones/{zone_id}/mode` | Solltemperatur (`value`), Betriebsart (`mode`) einer Zone; die Solltemperatur nicht im Auto-Betrieb der Zone (409, wirkt dort nicht) |
 | POST | `api/dhw/setpoint`, `api/dhw/mode`, `api/dhw/boost` | Warmwasser: `value`, `mode`, `active` |
 | POST | `api/lpc`, `api/lpc/failsafe` | Leistungsdeckel und Failsafe-Grenze (nur API, im Demo-Betrieb gesperrt; die Bridge wartet hier nicht auf eine Quittung des Geräts, „Gesendet“ heißt nur abgeschickt) |
 | POST | `api/ohpcf` | Verdichter-Flexibilität (`schedule`, `pause`, `resume`, `abort`; nur API, im Demo gesperrt) |

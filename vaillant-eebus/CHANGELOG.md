@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.2
+
+Korrekturen aus der ersten Abnahme an der Anlage:
+
+- Den Knopf auf dem Bogen kann man jetzt ziehen (Maus oder Finger), um die Solltemperatur einzustellen; der Bogen
+  folgt dem gewählten Wert. Mit der Tastatur gehen die Pfeiltasten.
+- Zonen im Auto-Betrieb: Eine über EEBUS gesendete Solltemperatur wirkt dort nicht. Die App zeigt „Zeitprogramm“,
+  sperrt die Solltemperatur und verweist für einen Boost auf myVAILLANT bzw. Home Assistant. In „Ein“ bleibt sie
+  einstellbar.
+- Ruhigere Bedienung: keine kurzen Meldungen mehr nach jeder Eingabe („Wird gleich übernommen“, „Wird gesendet“,
+  „Demo: wird nicht gesendet“). Ein noch nicht bestätigter Wert erscheint blass, eine Demo-Vorschau blau. Fehler
+  werden weiter angezeigt.
+- Schnellere Eingaben: Nach der Quittung der Wärmepumpe kann man sofort weiter einstellen. Wer innerhalb von
+  5 Sekunden nachstellt, wird nicht mehr abgewiesen; die App sendet dann, sobald es wieder erlaubt ist.
+- Kein Band mehr im Live-Betrieb; der orange Umschalter zeigt ihn an.
+- Die Rundinstrumente der Zonen zeigen nicht mehr die unzuverlässige Raumtemperatur des Gateways. Der Mittelwert
+  aus Home-Assistant-Sensoren folgt in einer späteren Version.
+- Neu: **Energie heute (berechnet)** – der Stromverbrauch seit Mitternacht, aus der gemeldeten Leistung
+  aufsummiert, mit dem Hinweis „lückenhaft“, wenn Zeit fehlt.
+
 ## 0.5.1
 
 Korrekturen aus dem Fehlertest vor dem ersten Live-Test:

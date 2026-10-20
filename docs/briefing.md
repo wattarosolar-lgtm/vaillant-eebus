@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v0.5.1)
+# Briefing: Vaillant EEBUS (Stand v0.5.2)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -9,8 +9,9 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 0.5.1, Phasen 1–5 von 7 umgesetzt (Abnahme von Phase 5 an der Anlage offen). 0.5.1 enthält
-  die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a).
+- **Stand:** Version 0.5.2, Phasen 1–5 von 7 umgesetzt (Abnahme von Phase 5 an der Anlage offen). 0.5.1 enthält
+  die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a), 0.5.2 die aus der ersten Abnahme an der
+  Anlage (ziehbarer Regler, Sperre im Auto-Betrieb, ruhigere Bedienung, „Energie heute“).
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -21,15 +22,15 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | 2 | Kopplung, Diagnose-Dump, Einrichtungsassistent | erledigt (0.2.0/0.2.1) |
 | 3 | Lesen: Zustand, API, Übersicht, Live-Updates | erledigt (0.3.0) |
 | 4 | Mehrere Heizzonen in der Bridge, Eco nur wenn angeboten | erledigt (0.4.0), an der Anlage abgenommen |
-| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1), Abnahme an der Anlage offen |
-| 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren), HA-Export als Sensoren | offen |
+| 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1 und 0.5.2), Abnahme an der Anlage offen |
+| 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärmemenge z. B. aus der myVAILLANT-Integration), HA-Export als Sensoren | offen |
 | 7 | Einstellungs-/Protokollseite fertig, Doku, Release | offen |
 
 ## 2. Repositories
 
 | Repo | Rolle |
 |---|---|
-| https://github.com/wattarosolar-lgtm/vaillant-eebus | **Die App** (dieses Repo). Phase 5 auf Branch `phase-5/schreiben`. |
+| https://github.com/wattarosolar-lgtm/vaillant-eebus | **Die App** (dieses Repo). Phase 5 auf `main` (0.5.1); Korrekturen 0.5.2 auf Branch `fix/abnahme-0.5.1`. |
 | https://github.com/wattarosolar-lgtm/HEMS-EEBUS | **Fork der EEBUS-Bridge** (Go), eingebunden als Git-Submodul `bridge/`, fest auf Commit `78a1a5a` (Branch `feat/multi-zone`). Muss öffentlich bleiben, sonst kann die CI ihn nicht laden. |
 | https://github.com/volschin/eebus-ha-bridge | Original der Bridge (MIT-Lizenz). Der Fork-`main` (`25e061f`) entspricht dem Original. |
 
@@ -90,10 +91,11 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 
 | Modul | Aufgabe |
 |---|---|
-| `main.py` | Konfiguration aus Umgebungsvariablen (`BRIDGE_ADDRESS`, `DATA_DIR`, `HTTP_HOST`, `HTTP_PORT`, `TRUSTED_CLIENTS`, `STATIC_DIR`, `BRIDGE_SERIAL_FILE`, `SHIP_PORT`, …; ungültige Ports → klare Fehlermeldung); startet uvicorn, `PairingService.run()`, `StateService.run()` und `WriteGate.run()` in einer `asyncio.TaskGroup`, schließt danach das Protokoll |
+| `main.py` | Konfiguration aus Umgebungsvariablen (`BRIDGE_ADDRESS`, `DATA_DIR`, `HTTP_HOST`, `HTTP_PORT`, `TRUSTED_CLIENTS`, `STATIC_DIR`, `BRIDGE_SERIAL_FILE`, `SHIP_PORT`, `TZ`, …; ungültige Ports → klare Fehlermeldung); startet uvicorn, `PairingService.run()`, `StateService.run()`, `WriteGate.run()` und `EnergyMeter.run()` in einer `asyncio.TaskGroup`, speichert danach den Energiezähler und schließt das Protokoll |
 | `bridge_client.py` | gRPC-Client (`grpc.aio`): Server-Info, Gerätesuche, Kopplung, Gerätestatus, Snapshot, Ereignis-Streams, Struktur-Dump; **Schreibmethoden** (`WRITE_METHODS`: Zone-Soll/-Betriebsart mit `zone_id`, Warmwasser-Soll/-Betriebsart/Einmalladung, Leistungsdeckel, Failsafe, Verdichter-Flexibilität) mit 15 s Zeitlimit (die Bridge wartet bis zu 10 s auf das Gerät); Backoff, `RETRYABLE_CODES`, max. Nachrichtengröße 64 MB |
 | `pairing.py` | Kopplung und Verbindungszustand (`ConnectionState`); prüft, ob die eigene Bridge antwortet; erkennt fremde Bridge und belegten SHIP-Port; meldet das gekoppelte Gateway nach jedem Bridge-Neustart wieder an; `ConnectionLog` fasst abgelehnte Verbindungsversuche beim Start zusammen und schreibt Verbindungsereignisse deutsch ins Protokoll; Diagnose-Dump |
 | `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a). |
+| `energy.py` | `EnergyMeter`: summiert die gemeldete Gesamtleistung (`power_consumption`) über die Zeit zu Wh je Tag (die Anlage liefert keine Energiezähler); > 3 min ohne Messwert wird nicht überbrückt, der Tag gilt dann als lückenhaft (auch der erste Tag); Tageswechsel um Mitternacht in `TZ` (Rückfall UTC mit Warnung); `/data/energy.json` atomar, höchstens einmal pro Minute und beim Beenden, 400 Tage; kurzer Neustart (< 3 min) wird überbrückt. `today()` zählt das laufende Intervall bis jetzt mit. |
 | `log_store.py` | Protokoll in SQLite (`/data/app.db`): `add()` kehrt sofort zurück, alle DB-Arbeit läuft geordnet in einem Worker-Thread; höchstens 10.000 Einträge; Kategorien `mode`, `write`, `connection`, `device`; beschädigte DB wird beiseitegelegt |
 | `state.py` | `StateService`: liest den Geräte-Snapshot nach jedem Zustandsereignis der Bridge (1 s gebündelt) und **spätestens jede Minute** – diese Leseanfrage braucht auch die Verbindungsüberwachung der Bridge (ohne Lesezugriff baut sie die Verbindung nach 2 min neu auf). Bildet `DeviceSnapshot` auf `HeatPumpState` ab (Messwerte, Zonen, Warmwasser, Status). Nicht gemeldete Werte bleiben `None`, nie Ersatzwerte. Verdichter gilt als aktiv ab 100 W. Liest auch `mode_writable`, Leistungsdeckel, Failsafe und Verdichter-Flexibilität. `refresh_now()` (nach einem Schreibvorgang) und `republish()` (Modus/offene Schreibvorgänge geändert). |
 | `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, Keep-alive alle 15 s; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
@@ -105,11 +107,16 @@ Svelte 5 (Runes), Hash-Routing (`#/uebersicht`, `#/protokoll`, `#/einstellungen`
 (Ingress-Pfad), Live-Daten über `EventSource('api/events')`. Seiten: `Overview.svelte` (Rundinstrumente je Zone und
 Warmwasser mit Bedienelementen, Karten für Leistung/Energie und Temperaturen), `Log.svelte` (Protokoll mit Filter und
 „Ältere laden“), `Setup.svelte` (Einrichtungsassistent), `Settings.svelte` (Kopplung, Diagnose-Dump).
-Komponenten: `Dial.svelte`, `SetpointControl.svelte` (−/+, Klicks werden 1,2 s gesammelt), `ModeSegments.svelte`,
-`BoostSwitch.svelte`, `ModeSwitch.svelte` (Demo | Live), `ModeBanner.svelte` (Banner, Bestätigung für Live),
-`HeaderStatus.svelte`, `StatusPill.svelte`, `DumpButton.svelte`. `lib/feedback.svelte.ts` hält Vorschau (nur Demo,
-5 s), Hinweis und Fehler eines Bedienelements. Texte in `lib/texts.ts`, Formatierung (de-DE) in `lib/format.ts`.
-Im Live-Betrieb zeigt die Oberfläche bis zur Bestätigung durch das Gerät den alten Wert mit „Wird gesendet …“.
+Komponenten: `Dial.svelte` (Rundinstrument; besitzt den Entwurf der Solltemperatur: Bogen ziehbar per Pointer,
+Pfeiltasten als `role="slider"`, −/+; gesendet 1,2 s nach dem Loslassen bzw. letzten Klick, im Live-Betrieb nicht
+vor Ablauf der 5 s seit dem letzten Senden; Zone im Auto-Betrieb gesperrt mit „Zeitprogramm“),
+`SetpointControl.svelte` (Anzeige und −/+), `ModeSegments.svelte`, `BoostSwitch.svelte`, `ModeSwitch.svelte`
+(Demo | Live), `ModeBanner.svelte` (Band nur im Demo-Betrieb, Bestätigung für Live), `HeaderStatus.svelte`,
+`StatusPill.svelte`, `DumpButton.svelte`. `lib/feedback.svelte.ts` hält Vorschau (nur Demo, 5 s, blau), den gerade
+gesendeten Wert (bis das Gerät oder `pending` ihn zeigt, höchstens 5 s) und Fehler eines Bedienelements. Keine
+Statuszeilen mehr („Wird gesendet …“ usw.), nur für Screenreader (`.sr-only`); Fehler, „Ergebnis unbekannt“ und
+„Am Gerät nicht änderbar“ bleiben sichtbar. Bedienelemente sind nach der Quittung des Geräts wieder frei; der
+Wert bleibt blass, bis das Gerät ihn meldet. Texte in `lib/texts.ts`, Formatierung (de-DE) in `lib/format.ts`.
 
 ## 5. Mehrere Heizzonen (Bridge, Commits `69234ad` und `78a1a5a`)
 
@@ -143,7 +150,8 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
   Pflichtfeld `operating_mode`): der Betrieb, den der Nutzer beim Ändern sah; weicht er ab → 409, nichts gesendet. Die
   Oberfläche verwirft gesammelte Klicks bei einem Moduswechsel.
 - Prüfung gegen die Gerätewerte **in beiden Modi**: Zone bekannt (404), schreibbar (409), Bereich und Schrittweite
-  (422; Schrittweite ≤ 0 → 409, fail closed), Betriebsart angeboten (422).
+  (422; Schrittweite ≤ 0 → 409, fail closed), Betriebsart angeboten (422). Zonen-Solltemperatur bei Zone im
+  Auto-Betrieb → 409 (wirkt dort nicht, Feldtest 0.5.1; Boost über myVAILLANT/HA).
 - **Demo:** nichts senden. Zonen/Warmwasser → `WriteResult(sent=False, would_send=…)` und „Würde senden: …“ im
   Protokoll; Leistungsdeckel/Failsafe/Verdichter → „Im Demo-Betrieb gesperrt“.
 - **Live:** gleicher Wert wie am Gerät oder wie ein noch offener Schreibvorgang → nicht senden; höchstens ein
@@ -167,15 +175,19 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 - Betriebsarten: auto/on/off, **kein eco**.
 - Raumtemperatur: Zone 2 immer mit Fehlerstatus; Zone 1 nur zeitweise gültig. Daher soll die Raumtemperatur je Zone
   künftig als Mittelwert gewählter HA-Sensoren berechnet werden (Phase 6).
-- Nicht gemeldet: Vorlauf, Rücklauf, Verdichtertemperatur, Energiezähler, Werte je Phase.
+- Nicht gemeldet: Vorlauf, Rücklauf, Verdichtertemperatur, Energiezähler, Werte je Phase, Wärmemenge. Gemeldet:
+  elektrische Gesamtleistung der Wärmepumpe und des Verdichters (daraus „Energie heute“).
 - Nach jedem Start lehnt das Gateway die SHIP-Verbindung oft rund 2 Minuten lang ab (einmal 5,5 min), bevor sie
   hält. Ursache **unbekannt** (SHIP-Log mit `log_level: debug` steht aus).
 - Der minütliche Snapshot-Lesezugriff hat die zyklischen Neuverbindungen der Bridge-Überwachung behoben (bestätigt).
 - 0.4.0 an der Anlage (19.10.2026, 20:33): Verbindung sofort, ohne abgelehnte Versuche; zwei Kacheln „Zone 1“/„Zone 2“.
 - **Sollwert im Auto-Betrieb:** Das Gateway meldet je Zone genau einen Sollwert (Zone 2: 23 °C), die myVAILLANT-App
   zeigt im Auto-Betrieb mit Zeitprogramm aber 21,5 °C. Die Temperatur des laufenden Zeitfensters kommt nicht über
-  EEBUS. Vermutlich ist der EEBUS-Sollwert die Wunschtemperatur für „Ein“/manuell – **nicht bestätigt**, der Nutzer
-  prüft es in myVAILLANT. Die Oberfläche weist im Auto-Betrieb darauf hin.
+  EEBUS. **Feldtest 20.10.2026:** Erhöhen/Senken im Auto-Betrieb über EEBUS bewirkt nichts; myVAILLANT startet
+  dabei eine zeitweise Übersteuerung (3 h, Dauer änderbar, späteres Ändern der Temperatur verlängert sie nicht).
+  Diese Übersteuerung und Änderungen in myVAILLANT im Auto-Betrieb sind über EEBUS nicht sichtbar, die Zonen bieten
+  keinen Overrun an (nur Warmwasser `oneTimeDhw`). Entscheidung: kein Nachbau, App sperrt die Solltemperatur im
+  Auto-Betrieb, Boost über myVAILLANT/HA. Ob die Zone in „Ein“ auf den EEBUS-Sollwert heizt, ist noch zu prüfen.
 - Vom Gerät gemeldet: Zonen 5–30 °C in 0,5er-Schritten, Warmwasser 35–70 °C in 1er-Schritten, Betriebsarten
   änderbar, Einmalladung schreibbar, Leistungsdeckel 0 W inaktiv, Failsafe 1.000.000 W für 2 h.
 
@@ -217,7 +229,7 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
 10. Der gRPC-Port der Bridge (127.0.0.1:50471) hat keine Anmeldung. Andere Prozesse im Host-Netzwerk (unter HAOS auch
     HA Core) könnten an der App und ihrem Demo-Betrieb vorbei schreiben. Absicherung (Token) ist für eine spätere
     Phase vorgesehen.
-4. Raumtemperatur aus Home Assistant und Export nach HA kommen in Phase 6.
+4. Raumtemperatur und Wärmemenge aus Home Assistant sowie Export nach HA kommen in Phase 6.
 5. Im Fork gibt es einen Alt-Pfad in `hvac_service.go` für Quellen ohne Zonenliste (per Typ-Zusicherung). Er existiert
    für bestehende Test-Doubles; im Produktivbetrieb liefern alle Use Cases Zonenlisten.
 6. `recordCapabilitySupport()` in `internal/usecases/entity.go` (Original-Code) entfernt die Registry-Beobachtung
