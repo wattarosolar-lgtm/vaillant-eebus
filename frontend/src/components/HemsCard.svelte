@@ -23,14 +23,34 @@
     }
   }
 
+  function loadIfVisible(): void {
+    if (document.visibilityState === 'visible') {
+      void load();
+    }
+  }
+
   onMount(() => {
     void load();
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void load();
-      }
-    }, RELOAD_MS);
-    return () => clearInterval(timer);
+    const timer = setInterval(loadIfVisible, RELOAD_MS);
+    document.addEventListener('visibilitychange', loadIfVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', loadIfVisible);
+    };
+  });
+
+  // Once the next action is due, the card shows the one after it without waiting for the reload.
+  $effect(() => {
+    const at = status?.next_action?.at;
+    if (!at) {
+      return;
+    }
+    const wait = new Date(at).getTime() - Date.now() + 1000;
+    if (wait <= 0) {
+      return;
+    }
+    const timer = setTimeout(loadIfVisible, wait);
+    return () => clearTimeout(timer);
   });
 
   const tone = $derived(

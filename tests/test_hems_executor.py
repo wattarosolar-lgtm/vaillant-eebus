@@ -12,6 +12,7 @@ import pytest
 from tests.fake_bridge import GATEWAY_SKI, FakeBridge
 from vaillant_eebus import hems
 from vaillant_eebus.bridge_client import BridgeClient
+from vaillant_eebus.hems import executor as executor_module
 from vaillant_eebus.hems.config import PlannerMode
 from vaillant_eebus.hems.executor import Executor
 from vaillant_eebus.hems.planner import DHW, Action, Block, Plan
@@ -301,6 +302,114 @@ async def test_a_hot_water_block_raises_the_setpoint_then_starts_the_charge(
 
     assert sent(fake_bridge) == [("SetDHWSetpoint", 60.0), ("SetDHWBoost", True), ("SetDHWSetpoint", 55.0)]
     assert executor.charged_days(preview=False) == {NOW.date()}
+
+
+async def test_switching_from_preview_to_control_in_a_hot_water_block_still_starts_the_charge(
+    executor: Executor,
+    connected: StateService,
+    fake_bridge: FakeBridge,
+    settings_store: SettingsStore,
+    clock: Clock,
+) -> None:
+    planner_mode(settings_store, PlannerMode.PREVIEW)
+    current = plan(block(DHW, Action.CHARGE, target=60.0, hours=1.5))
+    await step(executor, connected, current)
+
+    clock.now += timedelta(minutes=5)
+    planner_mode(settings_store, PlannerMode.CONTROL)
+    await step(executor, connected, current)
+    # Back and forth within the same block: the charge is not given twice.
+    clock.now += timedelta(minutes=5)
+    planner_mode(settings_store, PlannerMode.PREVIEW)
+    await step(executor, connected, current)
+    clock.now += timedelta(minutes=35)
+    planner_mode(settings_store, PlannerMode.CONTROL)
+    await step(executor, connected, current)
+
+    assert sent(fake_bridge) == [
+        ("SetDHWSetpoint", 60.0),
+        ("SetDHWBoost", True),
+        ("SetDHWSetpoint", 55.0),
+        ("SetDHWSetpoint", 60.0),
+    ]
+    assert executor.charged_days(preview=False) == {NOW.date()}
+
+
+@pytest.mark.parametrize("mode", list(PlannerMode))
+async def test_a_setpoint_changed_while_the_app_was_stopped_becomes_the_new_base_value(
+    mode: PlannerMode,
+    live_gate: WriteGate,
+    connected: StateService,
+    fake_bridge: FakeBridge,
+    settings_store: SettingsStore,
+    log_store: LogStore,
+    tmp_path: Path,
+    clock: Clock,
+) -> None:
+    planner_mode(settings_store, mode)
+    first = make_executor(live_gate, connected, settings_store, log_store, tmp_path, clock)
+    await step(first, connected, plan())
+
+    # Changed in myVAILLANT while the app was stopped.
+    fake_bridge.device.zones[ZONE].setpoint = 21.5
+    second = make_executor(live_gate, connected, settings_store, log_store, tmp_path, clock)
+    clock.now += timedelta(minutes=10)
+    await step(second, connected, plan())
+    planner_mode(settings_store, PlannerMode.CONTROL)
+    await step(second, connected, plan())
+
+    assert fake_bridge.device.write_calls == []
+    assert second.bases()[ZONE] == 21.5
+    noticed = "Planer: neuer Grundwert Zone 2: 21,5 °C (von Hand geändert)." in await messages(log_store)
+    assert noticed is (mode is PlannerMode.CONTROL)
+
+
+async def test_a_value_set_by_hand_that_the_planner_only_would_have_sent_becomes_the_base_value(
+    bridge_client: BridgeClient,
+    pairing: PairingService,
+    connected: StateService,
+    fake_bridge: FakeBridge,
+    settings_store: SettingsStore,
+    log_store: LogStore,
+    tmp_path: Path,
+    clock: Clock,
+) -> None:
+    # Demo mode: the planner decides on 24 °C but never sends it.
+    gate = WriteGate(bridge_client, pairing, connected, settings_store, log_store, clock=clock.monotonic)
+    executor = make_executor(gate, connected, settings_store, log_store, tmp_path, clock)
+    planner_mode(settings_store, PlannerMode.CONTROL)
+    current = plan(block(ZONE, Action.RAISE, shift=1.0, hours=2))
+    await step(executor, connected, current)
+
+    fake_bridge.device.zones[ZONE].setpoint = 24.0
+    clock.now += timedelta(minutes=10)
+    await step(executor, connected, current)
+
+    assert executor.bases()[ZONE] == 24.0
+    assert "Planer: neuer Grundwert Zone 2: 24,0 °C (von Hand geändert)." in await messages(log_store, LogCategory.HEMS)
+
+
+async def test_a_return_to_the_base_value_held_back_by_the_gate_is_tried_again(
+    executor: Executor,
+    connected: StateService,
+    fake_bridge: FakeBridge,
+    settings_store: SettingsStore,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(executor_module, "URGENT_WAIT_S", 0.0)
+    planner_mode(settings_store, PlannerMode.CONTROL)
+    await step(executor, connected, plan(block(ZONE, Action.RAISE, shift=1.0)))
+
+    # Within the gate's 5 seconds per control: 429.
+    await executor.release("Test")
+    held_back = executor.shifted()
+    clock.now += timedelta(seconds=10)
+    await executor.release("Test")
+
+    assert held_back == {ZONE: 24.0}
+    assert sent(fake_bridge) == [("SetRoomHeatingTemperature", 24.0), ("SetRoomHeatingTemperature", 23.0)]
+    assert executor.shifted() == {}
 
 
 async def test_zones_outside_operation_mode_on_are_not_touched(

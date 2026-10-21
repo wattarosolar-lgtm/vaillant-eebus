@@ -59,6 +59,14 @@
         (value) => typeof value === 'number' && Number.isFinite(value),
       ),
   );
+  // With a battery the planner needs its capacity and charging power.
+  const batteryComplete = $derived(
+    draft === null ||
+      !draft.battery_soc ||
+      [draft.battery_capacity_kwh, draft.battery_charge_kw].every(
+        (value) => typeof value === 'number' && Number.isFinite(value) && value > 0,
+      ),
+  );
 
   onMount(async () => {
     try {
@@ -464,13 +472,20 @@
     </div>
 
     <div class="actions">
-      <button type="button" class="button primary" disabled={!changed || !complete || saving} onclick={save}>
+      <button
+        type="button"
+        class="button primary"
+        disabled={!changed || !complete || !batteryComplete || saving}
+        onclick={save}
+      >
         Speichern
       </button>
       {#if saveError}
         <p class="error" role="alert">{saveError}</p>
       {:else if !complete}
         <p class="hint">Bitte alle Zahlenfelder ausfüllen.</p>
+      {:else if !batteryComplete}
+        <p class="hint">Für den Akku bitte Kapazität und Ladeleistung angeben.</p>
       {:else if justSaved && !changed}
         <p class="hint" role="status">Gespeichert. Der Planer plant neu.</p>
       {/if}

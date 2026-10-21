@@ -239,6 +239,8 @@ class FakeDeviceService(DeviceServiceServicer):
         self.readiness: dict[str, DeviceReadinessState.ValueType] = {}
         self.register_calls: list[str] = []
         self.unregister_calls: list[str] = []
+        # When set, RegisterRemoteSKI fails with this status code.
+        self.fail_register_with: grpc.StatusCode | None = None
         self.structure_json = json.dumps(FAKE_STRUCTURE)
         # Standalone mode: the gateway accepts a registration after this delay.
         self.auto_connect_after = auto_connect_after
@@ -415,6 +417,8 @@ class FakeDeviceService(DeviceServiceServicer):
     ) -> Empty:
         ski = _normalize(request.ski)
         self.register_calls.append(ski)
+        if self.fail_register_with is not None:
+            await context.abort(self.fail_register_with, "fake bridge registration failure")
         self.registered.add(ski)
         if self.auto_connect_after is not None and ski not in self.connected:
             asyncio.get_running_loop().call_later(self.auto_connect_after, self.connect, ski)

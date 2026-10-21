@@ -12,10 +12,15 @@ arch:
 # s6-overlay from the base image is PID 1.
 init: false
 startup: services
+# Seconds the Supervisor waits on stop. The energy management returns the
+# setpoints it changed to their base values first (RELEASE_TIMEOUT in
+# hems/service.py), and s6 stops the bridge only after the backend.
+timeout: 30
 # Required: EEBUS discovery uses mDNS, and the gateway connects to port 4712.
 host_network: true
 # SUPERVISOR_TOKEN for Home Assistant Core: read the chosen room sensors and
-# report the heat pump as sensors. The app calls no services.
+# report the heat pump as sensors. The only service it calls is the read-only
+# weather.get_forecasts (energy management).
 homeassistant_api: true
 # The UI behind the Home Assistant login. With host networking this port is
 # opened on the host; the backend binds it to the hassio network address only.

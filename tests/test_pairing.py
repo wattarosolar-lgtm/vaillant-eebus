@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 
+import grpc
 import pytest
 from eebus.v1.device_service_pb2 import (
     DEVICE_EVENT_CONNECTED,
@@ -75,6 +76,20 @@ async def test_pairing_another_gateway_unregisters_the_previous_one(
     assert fake_bridge.device.unregister_calls == [GATEWAY_SKI]
     assert fake_bridge.device.registered == {OTHER_SKI}
     assert pairing.paired_ski == OTHER_SKI
+
+
+async def test_a_failed_registration_of_another_gateway_keeps_the_paired_one(
+    pairing: PairingService, fake_bridge: FakeBridge
+) -> None:
+    await pairing.pair(GATEWAY_SKI)
+    fake_bridge.device.fail_register_with = grpc.StatusCode.INTERNAL
+
+    with pytest.raises(grpc.aio.AioRpcError):
+        await pairing.pair(OTHER_SKI)
+
+    assert fake_bridge.device.unregister_calls == []
+    assert fake_bridge.device.registered == {GATEWAY_SKI}
+    assert pairing.paired_ski == GATEWAY_SKI
 
 
 async def test_pair_rejects_malformed_ski(pairing: PairingService, fake_bridge: FakeBridge) -> None:

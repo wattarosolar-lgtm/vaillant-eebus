@@ -221,6 +221,29 @@ async def test_missing_inputs_are_named(
     ]
 
 
+async def test_a_battery_from_older_settings_without_charging_power_is_named(
+    settings_store: SettingsStore,
+    connected: StateService,
+    gate: WriteGate,
+    energy_meter: EnergyMeter,
+    home_assistant: HomeAssistant,
+    log_store: LogStore,
+    tmp_path: Path,
+    clock: Clock,
+) -> None:
+    settings_store.update(
+        lambda current: replace(
+            current,
+            hems=HemsSettings(mode=PlannerMode.PREVIEW, battery_soc="sensor.battery", battery_capacity_kwh=10.0),
+        )
+    )
+    hems = service(settings_store, connected, gate, energy_meter, home_assistant, log_store, tmp_path, clock)
+
+    await hems.plan_now()
+
+    assert "Die Ladeleistung des Akkus fehlt in den Einstellungen." in hems.status().problems
+
+
 async def test_switched_off_there_is_no_plan(
     settings_store: SettingsStore,
     connected: StateService,
@@ -407,6 +430,9 @@ async def test_the_settings_and_the_stage_are_changed_over_the_api(
             "/api/hems/settings", json={**body, "zones": [{"zone_id": "6.1.1", "up_k": 0.7, "down_k": 0}]}
         )
         too_hot = await http.put("/api/hems/settings", json={**body, "dhw_max_c": 80})
+        battery_without_power = await http.put(
+            "/api/hems/settings", json={**body, "battery_soc": "sensor.battery", "battery_capacity_kwh": 10}
+        )
         stage = await http.post("/api/hems/mode", json={"mode": "preview"})
         status = await http.get("/api/hems")
 
@@ -416,6 +442,9 @@ async def test_the_settings_and_the_stage_are_changed_over_the_api(
     assert bad_step.status_code == 422
     assert bad_step.json()["detail"] == "Die Verschiebung der Zonen geht nur in Schritten von 0,5 K."
     assert too_hot.status_code == 422
+    assert battery_without_power.status_code == 422
+    assert battery_without_power.json()["detail"] == "Für den Akku fehlen Kapazität oder Ladeleistung."
+    assert settings_store.current.hems.battery_soc is None
     assert stage.json()["mode"] == "preview"
     assert status.json()["plan"] is not None
     assert settings_store.current.hems.mode is PlannerMode.PREVIEW
@@ -452,6 +481,66 @@ async def test_switching_to_demo_first_returns_to_the_base_values(
     values = [getattr(request, "value_celsius", None) for _name, request in fake_bridge.device.write_calls]
     assert values == [24.0, 23.0]
     assert gate.mode is OperatingMode.DEMO
+
+
+async def test_stopping_the_app_returns_to_the_base_values_even_when_cancelled_again(
+    pairing: PairingService,
+    connected: StateService,
+    bridge_client: BridgeClient,
+    energy_meter: EnergyMeter,
+    home_assistant: HomeAssistant,
+    log_store: LogStore,
+    settings_store: SettingsStore,
+    fake_bridge: FakeBridge,
+    tmp_path: Path,
+    clock: Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gate = WriteGate(bridge_client, pairing, connected, settings_store, log_store, clock=lambda: clock.now.timestamp())
+    gate.set_mode(OperatingMode.LIVE, confirm=True)
+    settings_store.update(lambda current: replace(current, hems=HemsSettings(mode=PlannerMode.CONTROL)))
+    hems = service(settings_store, connected, gate, energy_meter, home_assistant, log_store, tmp_path, clock)
+    blocks = [
+        Block("6.1.1", Action.RAISE, NOW, NOW + timedelta(hours=1), 1.0, None, "Test"),
+        Block("dhw", Action.CHARGE, NOW, NOW + timedelta(hours=1.5), None, 60.0, "Test"),
+    ]
+    await hems.executor.step(Plan(created_at=NOW, slots=[], blocks=blocks))
+    await connected.refresh(GATEWAY_SKI)
+    clock.now += timedelta(seconds=10)
+
+    async def idle() -> None:
+        await asyncio.Event().wait()
+
+    # Only the stop is under test; planning and carrying out would return to the base values themselves.
+    monkeypatch.setattr(hems, "_planning", idle)
+    monkeypatch.setattr(hems, "_executing", idle)
+    in_flight = most = 0
+
+    async def slow_device() -> None:
+        nonlocal in_flight, most
+        in_flight += 1
+        most = max(most, in_flight)
+        await asyncio.sleep(0.2)
+        in_flight -= 1
+
+    fake_bridge.device.before_write = slow_device
+    task = asyncio.create_task(hems.run())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    # uvicorn passes SIGTERM on after its own shutdown: the stop cancels a second time.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    returned = [
+        (name, request.value_celsius)
+        for name, request in fake_bridge.device.write_calls[-2:]
+        if hasattr(request, "value_celsius")
+    ]
+    assert sorted(returned) == [("SetDHWSetpoint", 55.0), ("SetRoomHeatingTemperature", 23.0)]
+    assert most == 2
+    assert hems.executor.shifted() == {}
 
 
 async def test_the_planner_is_reported_as_sensors(

@@ -246,17 +246,21 @@ class PairingService:
             raise ValueError("SKI must be 40 hexadecimal characters")
         await self._require_own_bridge()
         previous = self.paired_ski
-        if previous is not None and previous != ski:
-            try:
-                await self._bridge.unregister_ski(previous)
-            except grpc.aio.AioRpcError as err:
-                if err.code() is not grpc.StatusCode.NOT_FOUND:
-                    raise
+        # The new gateway first: if that fails, the paired one stays registered.
         await self._bridge.register_ski(ski)
         self._store.update(lambda settings: replace(settings, paired_ski=ski))
         _LOGGER.info("Paired gateway %s", short_ski(ski))
         if self._log is not None:
             self._log.add(LogCategory.CONNECTION, f"Gateway {short_ski(ski)} gekoppelt.")
+        if previous is not None and previous != ski:
+            try:
+                await self._bridge.unregister_ski(previous)
+            except grpc.aio.AioRpcError as err:
+                # The new pairing stands; the bridge forgets the old one at its next start.
+                if err.code() is not grpc.StatusCode.NOT_FOUND:
+                    _LOGGER.warning(
+                        "Unregistering the previous gateway %s failed (%s)", short_ski(previous), err.code().name
+                    )
         return await self.status()
 
     async def diagnostic_dump(self) -> DiagnosticDump:

@@ -4,9 +4,9 @@ Each control (hot water, every zone) has a base value: the setpoint the user
 wants normally. The planner shifts around it and always returns to it - at
 the end of a block, when the planner is switched off or to preview, before
 the app goes to demo mode and when the app stops. A setpoint the planner did
-not set (changed in the app, in myVAILLANT or at the device) becomes the new
-base value; the planner leaves that control alone until its running block
-ends.
+not send (changed in the app, in myVAILLANT or at the device, also while the
+app was stopped) becomes the new base value; the planner leaves that control
+alone until its running block ends.
 
 Each control changes at most every 30 minutes; returning to the base value
 is never held back. Base values and the values the planner set survive a
@@ -73,8 +73,10 @@ class _Control:
     observed: float | None = None
     # A manual change pauses the control until the block it fell into ends.
     paused_until: datetime | None = None
-    # Start of the hot water block whose one-time charge was given.
+    # Start of the hot water block whose one-time charge was given, and of the one it was
+    # only previewed for (switching to control in that block still gives it).
     boosted_block: datetime | None = None
+    previewed_block: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,11 +169,16 @@ class Executor:
         now = self._clock()
         devices = _devices(heat_pump)
         self._log.add(LogCategory.HEMS, f"Planer setzt die Grundwerte zurück: {reason}.")
-        for key in list(self.shifted()):
-            device = devices.get(key)
-            base = self._controls[key].base
-            if device is not None and base is not None:
-                await self._apply(key, device, base, now, urgent=True)
+        bases = {key: self._controls[key].base for key in self.shifted()}
+        returns = [
+            self._apply(key, devices[key], base, now, urgent=True)
+            for key, base in bases.items()
+            if key in devices and base is not None
+        ]
+        # All at the same time: when the app stops, there are only a few seconds.
+        for outcome in await asyncio.gather(*returns, return_exceptions=True):
+            if isinstance(outcome, Exception):
+                _LOGGER.error("Returning to a base value failed", exc_info=outcome)
 
     # --- internals -------------------------------------------------------------
 
@@ -188,7 +195,10 @@ class Executor:
                 continue
             if previous is None:
                 # First reading since the start: was the setpoint changed while the app was away?
-                if control.applied is not None and value not in (control.applied, control.base):
+                if control.applied is None and value != control.base:
+                    self._follow(key, device, value, mode, plan, now)
+                    changed = True
+                elif control.applied is not None and value not in (control.applied, control.base):
                     self._manual(key, device, value, plan, now)
                     changed = True
                 elif control.applied is not None and value == control.base:
@@ -197,19 +207,27 @@ class Executor:
                 continue
             if value == previous:
                 continue
-            if mode is not PlannerMode.CONTROL and control.applied is None:
-                # Nothing of the planner's is on the device: the base follows it.
-                control.base = value
-                changed = True
-            elif value in (control.applied, control.decided):
-                if value == control.base:
-                    control.applied = None
-                changed = True
-            else:
+            # Only a value the planner really sent is its own; one it merely decided on
+            # (in demo mode, or rejected) and someone set by hand is a manual change.
+            if control.applied is None:
+                if value != control.base:
+                    self._follow(key, device, value, mode, plan, now)
+                    changed = True
+            elif value != control.applied:
                 self._manual(key, device, value, plan, now)
                 changed = True
         if changed:
             self._save()
+
+    def _follow(
+        self, key: str, device: _Device, value: float, mode: PlannerMode, plan: Plan | None, now: datetime
+    ) -> None:
+        """A setpoint the planner did not set while nothing of its own is on the device."""
+        if mode is PlannerMode.CONTROL:
+            self._manual(key, device, value, plan, now)
+        else:
+            # The planner is not steering: the base value follows the device quietly.
+            self._controls[key].base = value
 
     def _manual(self, key: str, device: _Device, value: float, plan: Plan | None, now: datetime) -> None:
         control = self._controls[key]
@@ -305,14 +323,15 @@ class Executor:
             return
         block = block_at(plan.blocks, DHW, now)
         control = self._controls[DHW]
-        if block is None or block.action is not Action.CHARGE or control.boosted_block == block.start:
+        given = control.previewed_block if preview else control.boosted_block
+        if block is None or block.action is not Action.CHARGE or given == block.start:
             return
         raised = control.previewed if preview else control.decided
         if raised is None or control.base is None or raised <= control.base:
             return
         water = heat_pump.hot_water
         if water is not None and water.boost in ("active", "running"):
-            control.boosted_block = block.start
+            self._mark_boost(control, block.start, preview=preview)
             return
         try:
             await self._gate.submit(SetHotWaterBoost(active=True), source=Source.PLANNER, preview=preview)
@@ -321,13 +340,20 @@ class Executor:
                 return
         except (WriteOutcomeUnknown, grpc.aio.AioRpcError, NotPairedError):
             pass
-        control.boosted_block = block.start
+        self._mark_boost(control, block.start, preview=preview)
         day = block.start.astimezone(self._zone).date()
         if preview:
             self._previewed_charges.add(day)
         else:
             self._charged.add(day)
             self._save()
+
+    @staticmethod
+    def _mark_boost(control: _Control, block_start: datetime, *, preview: bool) -> None:
+        if preview:
+            control.previewed_block = block_start
+        else:
+            control.boosted_block = block_start
 
     def _load(self) -> _Saved:
         if not self._path.exists():

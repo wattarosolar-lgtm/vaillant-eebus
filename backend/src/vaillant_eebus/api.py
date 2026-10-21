@@ -465,6 +465,8 @@ def create_app(
             raise WriteRejected(422, "Die Verschiebung der Zonen geht nur in Schritten von 0,5 K.")
         if len({zone.zone_id for zone in request.zones}) != len(request.zones):
             raise WriteRejected(422, "Jede Zone kann nur einmal eingestellt werden.")
+        if request.battery_soc is not None and not (request.battery_capacity_kwh and request.battery_charge_kw):
+            raise WriteRejected(422, "Für den Akku fehlen Kapazität oder Ladeleistung.")
         service.change_settings(hems_from_json(request.model_dump(mode="json")))
         await service.plan_now()
         return service.status()

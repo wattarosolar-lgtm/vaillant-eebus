@@ -13,7 +13,7 @@ import asyncio
 import contextlib
 import logging
 import statistics
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -42,8 +42,9 @@ EXECUTE_EVERY = 30.0
 # Bursts of new prices and forecasts are planned once.
 PLAN_SETTLE = 2.0
 PROFILE_EVERY = timedelta(hours=6)
-# Time to return to the base values when the app stops (s6 waits a few seconds).
-RELEASE_TIMEOUT = 2.5
+# Time to return to the base values when the app stops: the gate's 5 s per control plus
+# up to 10 s for the device's answer. The Supervisor waits 30 s (config.yaml timeout).
+RELEASE_TIMEOUT = 15.0
 PLAN_LOG_BLOCKS = 6
 
 _MODE_LOG = {
@@ -143,9 +144,12 @@ class HemsService:
                 tasks.create_task(self.days.run())
         finally:
             self.days.close()
-            with contextlib.suppress(Exception):
-                async with asyncio.timeout(RELEASE_TIMEOUT):
-                    await self.release("Die App wird beendet")
+            await _despite_cancellation(self._release_on_stop())
+
+    async def _release_on_stop(self) -> None:
+        with contextlib.suppress(Exception):
+            async with asyncio.timeout(RELEASE_TIMEOUT):
+                await self.release("Die App wird beendet")
 
     async def release(self, reason: str) -> None:
         """Return every control the planner changed to its base value."""
@@ -311,6 +315,8 @@ class HemsService:
         soc = number(self._home_assistant.entity_state(hems.battery_soc))
         if hems.battery_soc is not None and not hems.battery_capacity_kwh:
             problems.append("Die Akku-Kapazität fehlt in den Einstellungen.")
+        elif hems.battery_soc is not None and not hems.battery_charge_kw:
+            problems.append("Die Ladeleistung des Akkus fehlt in den Einstellungen.")
         elif hems.battery_soc is not None and soc is None:
             problems.append("Der Akku-Ladestand ist gerade nicht verfügbar.")
         supply = surplus(pv, base, soc, hems)
@@ -453,6 +459,18 @@ class HemsService:
             and value.outdoor_c < heating_limit_c
             and value.coverage >= MIN_COVERAGE
         )
+
+
+async def _despite_cancellation(work: Coroutine[Any, Any, None]) -> None:
+    """Run work to its end even if the waiting task is cancelled again meanwhile.
+
+    Stopping the app cancels the services more than once (uvicorn passes SIGTERM on
+    after its own shutdown); work must limit its own duration.
+    """
+    task = asyncio.create_task(work)
+    while not task.done():
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(task)
 
 
 def _price_problems(hems: HemsSettings, prices: list[float | None]) -> list[str]:
