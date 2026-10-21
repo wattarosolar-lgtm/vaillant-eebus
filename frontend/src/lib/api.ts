@@ -5,11 +5,15 @@ import type {
   ApiState,
   AppSettings,
   EntityChoice,
+  EntityKind,
   ExportGroup,
+  HemsSettings,
+  HemsStatus,
   LogFilter,
   LogPage,
   OperatingMode,
   PairingStatus,
+  PlannerMode,
   PowerHistory,
   Room,
   WriteResult,
@@ -117,10 +121,33 @@ export async function saveSettings(change: {
   return response.json() as Promise<AppSettings>;
 }
 
-/** Home Assistant sensors to choose from: temperatures for rooms, energy for the heat of the day. */
-export async function getEntities(kind: 'temperature' | 'energy', query: string): Promise<EntityChoice[]> {
+/** Home Assistant entities to choose from: rooms, heat of the day and the planner's inputs. */
+export async function getEntities(kind: EntityKind, query: string): Promise<EntityChoice[]> {
   const params = new URLSearchParams({ kind, q: query });
   return (await send(`api/ha/entities?${params.toString()}`)).json() as Promise<EntityChoice[]>;
+}
+
+/** Home Assistant's home location, to fill in the coordinates for Open-Meteo. */
+export async function getLocation(): Promise<{ latitude: number; longitude: number }> {
+  return (await send('api/ha/location')).json() as Promise<{ latitude: number; longitude: number }>;
+}
+
+export async function getHems(): Promise<HemsStatus> {
+  return (await send('api/hems')).json() as Promise<HemsStatus>;
+}
+
+/** Saves everything but the stage, which setHemsMode switches. */
+export async function saveHemsSettings(settings: Omit<HemsSettings, 'mode'>): Promise<HemsStatus> {
+  const response = await send('api/hems/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+  return response.json() as Promise<HemsStatus>;
+}
+
+export async function setHemsMode(mode: PlannerMode): Promise<HemsStatus> {
+  return post<HemsStatus>('api/hems/mode', { mode });
 }
 
 function logParams(filter: LogFilter): URLSearchParams {

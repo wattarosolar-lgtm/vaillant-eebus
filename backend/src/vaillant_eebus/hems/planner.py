@@ -8,9 +8,11 @@ no bridge, no Home Assistant. A plan is a list of blocks per control:
   day's mean, the setpoint goes up to its maximum and the one-time charge
   starts. Never below the base value.
 - Zones, only in operation mode "on" and below the heating limit: pre-heat by
-  the zone's upward shift with a surplus of at least 1 kW or cheap
-  electricity, lower by its downward shift with electricity at least 5 ct/kWh
-  above the day's mean (at most 3 hours a day). Blocks last at least an hour.
+  the zone's upward shift with a surplus of at least 1 kW (as long as it
+  lasts) or with electricity at least 5 ct/kWh below the day's mean (at most
+  the 4 cheapest hours a day), lower by its downward shift with electricity
+  at least 5 ct/kWh above the day's mean (at most 3 hours a day). Blocks last
+  at least an hour.
 
 The start values are fixed in 1.1.0; they will be tuned after the field test.
 """
@@ -34,6 +36,8 @@ ZONE_MIN_SURPLUS_W = 1000.0
 PRICE_GAP = 0.05
 MIN_BLOCK_SLOTS = 4
 MAX_LOWER_SLOTS_PER_DAY = 12
+# Pre-heating for a cheap price (not for PV surplus) at most this many slots a day, the cheapest.
+MAX_PRICE_RAISE_SLOTS_PER_DAY = 16
 # Blocks of the same kind closer than this are joined, so the setpoint does not bounce.
 JOIN_GAP_SLOTS = 2
 
@@ -236,9 +240,12 @@ def _zone_blocks(
 ) -> list[Block]:
     limits = settings.zone_limits(zone_id)
     actions: list[Action | None] = []
-    for slot in slots:
+    # Slots raised only for their price, per day: they cost energy, so only the cheapest count.
+    priced: dict[date, list[int]] = {}
+    for index, slot in enumerate(slots):
         action = None
-        mean = means.get(local_day(slot.start, zone))
+        day = local_day(slot.start, zone)
+        mean = means.get(day)
         heating = slot.outdoor_c is not None and slot.outdoor_c < settings.heating_limit_c
         if heating and (free_from is None or slot.start >= free_from):
             cheap = slot.price is not None and mean is not None and slot.price <= mean - PRICE_GAP
@@ -246,9 +253,15 @@ def _zone_blocks(
             expensive = slot.price is not None and mean is not None and slot.price >= mean + PRICE_GAP
             if limits.up_k > 0 and (sunny or cheap):
                 action = Action.RAISE
+                if not sunny:
+                    priced.setdefault(day, []).append(index)
             elif limits.down_k > 0 and expensive:
                 action = Action.LOWER
         actions.append(action)
+    for indexes in priced.values():
+        cheapest = sorted(indexes, key=lambda index: (slots[index].price or 0.0, index))[:MAX_PRICE_RAISE_SLOTS_PER_DAY]
+        for index in set(indexes) - set(cheapest):
+            actions[index] = None
     runs = [run for run in _join(_runs(actions)) if run[2] - run[1] >= MIN_BLOCK_SLOTS]
     runs = _limit_lowering(runs, slots, zone)
     blocks = []

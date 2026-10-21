@@ -1,5 +1,5 @@
 // Mirrors the backend's dataclasses (pairing.py, state.py, write_gate.py, log_store.py, api.py,
-// ha_import.py, home_assistant.py, history.py, settings.py).
+// ha_import.py, home_assistant.py, history.py, settings.py, hems/).
 
 export type ConnectionState =
   | 'not_paired'
@@ -190,7 +190,8 @@ export type ExportGroup =
   | 'temperatures'
   | 'energy'
   | 'power_limits'
-  | 'compressor';
+  | 'compressor'
+  | 'hems';
 
 export interface Room {
   entity_id: string;
@@ -214,7 +215,7 @@ export interface EntityChoice {
   unit: string | null;
 }
 
-export type LogCategory = 'mode' | 'write' | 'connection' | 'device' | 'settings';
+export type LogCategory = 'mode' | 'write' | 'connection' | 'device' | 'settings' | 'hems';
 
 export interface LogEntry {
   id: number;
@@ -234,4 +235,123 @@ export interface LogFilter {
 export interface LogPage {
   entries: LogEntry[];
   more: boolean;
+}
+
+/** What Home Assistant entities are offered for: rooms, heat, and the planner's inputs. */
+export type EntityKind = 'temperature' | 'energy' | 'power' | 'battery' | 'price' | 'pv_forecast' | 'weather';
+
+// --- energy management (hems/) ---------------------------------------------------
+
+/** Aus, Vorschau (plans, sends nothing), Steuern (through the write gate). */
+export type PlannerMode = 'off' | 'preview' | 'control';
+export type TariffKind = 'fixed' | 'dynamic' | 'fixed_14a';
+export type WeatherSource = 'home_assistant' | 'open_meteo';
+
+/** Local time of day "HH:MM"; an end before the start crosses midnight. */
+export interface TimeWindow {
+  start: string;
+  end: string;
+}
+
+export interface Tariff {
+  kind: TariffKind;
+  /** ct/kWh; with §14a the price in standard time. */
+  price_ct: number | null;
+  price_entity: string | null;
+  surcharge_ct: number;
+  vat_percent: number;
+  high_price_ct: number | null;
+  low_price_ct: number | null;
+  high_windows: TimeWindow[];
+  low_windows: TimeWindow[];
+  feed_in_ct: number | null;
+}
+
+export interface ZoneLimits {
+  zone_id: string;
+  up_k: number;
+  down_k: number;
+}
+
+/** The settings as the backend stores them (hems_to_json). */
+export interface HemsSettings {
+  mode: PlannerMode;
+  tariff: Tariff;
+  pv_forecast_today: string | null;
+  pv_forecast_tomorrow: string | null;
+  house_power: string | null;
+  battery_soc: string | null;
+  battery_capacity_kwh: number | null;
+  battery_charge_kw: number | null;
+  battery_min_soc: number;
+  weather_source: WeatherSource;
+  weather_entity: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  zones: ZoneLimits[];
+  dhw_max_c: number;
+  heating_limit_c: number;
+}
+
+export interface PlanSlot {
+  start: string;
+  /** EUR/kWh from the grid. */
+  price: number | null;
+  pv_w: number | null;
+  base_w: number | null;
+  /** What would go to the grid otherwise, W. */
+  surplus_w: number | null;
+  battery_soc: number | null;
+  outdoor_c: number | null;
+}
+
+export type BlockAction = 'charge' | 'raise' | 'lower';
+
+export interface PlanBlock {
+  /** "dhw" or the zone's ID. */
+  control: string;
+  action: BlockAction;
+  start: string;
+  end: string;
+  shift_k: number | null;
+  target_c: number | null;
+  reason: string;
+}
+
+export interface Plan {
+  created_at: string;
+  slots: PlanSlot[];
+  blocks: PlanBlock[];
+  /** Per control: why nothing is planned. */
+  notes: Record<string, string>;
+}
+
+export interface NextAction {
+  at: string;
+  text: string;
+  reason: string | null;
+}
+
+export interface Demand {
+  kwh: number;
+  spread_kwh: number;
+  days: number;
+  outdoor_c: number;
+}
+
+export interface HemsStatus {
+  mode: PlannerMode;
+  app_mode: OperatingMode;
+  settings: HemsSettings;
+  plan: Plan | null;
+  problems: string[];
+  next_action: NextAction | null;
+  labels: Record<string, string>;
+  bases: Record<string, number>;
+  shifted: Record<string, number>;
+  /** EUR/kWh. */
+  feed_in: number | null;
+  demand_tomorrow: Demand | null;
+  learned_days: number;
+  needed_days: number;
 }

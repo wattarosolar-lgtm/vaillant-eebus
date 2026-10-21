@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
 
   import { ApiError, getEntities } from '../lib/api';
-  import type { EntityChoice } from '../lib/types';
+  import type { EntityChoice, EntityKind } from '../lib/types';
 
   let {
     kind,
@@ -10,7 +10,7 @@
     exclude = [],
     onPick,
   }: {
-    kind: 'temperature' | 'energy';
+    kind: EntityKind;
     label: string;
     /** Entity IDs already chosen; they are not offered again. */
     exclude?: string[];

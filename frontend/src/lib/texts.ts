@@ -1,4 +1,13 @@
-import type { ConnectionState, ExportGroup, Gateway, HistoryGap, LogCategory, ValueStatus } from './types';
+import type {
+  ConnectionState,
+  ExportGroup,
+  Gateway,
+  HistoryGap,
+  LogCategory,
+  PlannerMode,
+  TariffKind,
+  ValueStatus,
+} from './types';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'neutral';
 
@@ -74,6 +83,7 @@ export const LOG_CATEGORY_LABELS: Record<LogCategory, string> = {
   connection: 'Verbindung',
   mode: 'Modus',
   settings: 'Einstellungen',
+  hems: 'Planer',
 };
 
 /** Groups of values reported to Home Assistant, in the order of the settings page. */
@@ -85,7 +95,30 @@ export const EXPORT_GROUPS: { group: ExportGroup; label: string; hint: string }[
   { group: 'energy', label: 'Leistung und Energie', hint: 'Leistung, Verdichterleistung, Energie heute (berechnet)' },
   { group: 'power_limits', label: 'Leistungsdeckel', hint: 'Grenze, aktiv, Failsafe-Grenze und -Dauer' },
   { group: 'compressor', label: 'Verdichter-Flexibilität', hint: 'Zustand eines angebotenen Verdichterlaufs' },
+  { group: 'hems', label: 'Energiemanagement', hint: 'Stufe des Planers, nächste Aktion, Plan, Strombedarf morgen' },
 ];
+
+export const PLANNER_MODE_LABELS: Record<PlannerMode, string> = {
+  off: 'Aus',
+  preview: 'Vorschau',
+  control: 'Steuern',
+};
+
+export const PLANNER_MODE_HINTS: Record<PlannerMode, string> = {
+  off: 'Der Planer plant nicht und ändert nichts.',
+  preview: 'Der Planer plant und zeigt, was er senden würde. Er sendet nichts, auch im Live-Betrieb.',
+  control:
+    'Der Planer setzt den Plan um: Er verschiebt Solltemperaturen und startet die Warmwasser-Einmalladung. Im Demo-Betrieb der App sendet er trotzdem nichts.',
+};
+
+export const CONTROL_CONFIRMATION =
+  'Steuern einschalten? Der Planer ändert dann Solltemperaturen der Wärmepumpe und kehrt danach jeweils zum Grundwert zurück.';
+
+export const TARIFF_LABELS: Record<TariffKind, string> = {
+  fixed: 'Festpreis',
+  dynamic: 'Dynamisch (Börsenpreis)',
+  fixed_14a: 'Festpreis mit §14a Modul 3',
+};
 
 /** Shown instead of the power chart. */
 export const HISTORY_GAPS: Record<HistoryGap, string> = {

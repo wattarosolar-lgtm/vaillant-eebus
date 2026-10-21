@@ -1,5 +1,6 @@
 <script lang="ts">
   import DumpButton from '../components/DumpButton.svelte';
+  import HemsSettings from '../components/HemsSettings.svelte';
   import HomeAssistantSettings from '../components/HomeAssistantSettings.svelte';
   import StatusPill from '../components/StatusPill.svelte';
   import { PROJECT_LINKS, gatewayName, groupedSki, skiEnding } from '../lib/texts';
@@ -85,6 +86,8 @@
   </div>
 
   <HomeAssistantSettings {zones} {homeAssistant} />
+
+  <HemsSettings {zones} homeAssistantAvailable={homeAssistant?.available ?? false} />
 </div>
 
 <style>

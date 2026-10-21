@@ -29,6 +29,8 @@
   --heat-text: #a9531a;
   --water: #2e6e8e;
   --water-text: #235670;
+  /* PV surplus in the energy management's timeline. */
+  --sun: #e0a526;
 
   --radius-card: 16px;
   --radius-control: 10px;
@@ -126,6 +128,8 @@ button {
 input[type='text'],
 input[type='search'],
 input[type='date'],
+input[type='number'],
+input[type='time'],
 select {
   min-height: 44px;
   padding: 0 10px;
@@ -140,6 +144,8 @@ select {
 input[type='text']:focus-visible,
 input[type='search']:focus-visible,
 input[type='date']:focus-visible,
+input[type='number']:focus-visible,
+input[type='time']:focus-visible,
 select:focus-visible {
   outline: 3px solid var(--info-text);
   outline-offset: 1px;

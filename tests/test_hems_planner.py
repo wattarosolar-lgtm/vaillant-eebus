@@ -188,6 +188,17 @@ def test_dynamic_prices_preheat_before_and_lower_during_the_evening_peak() -> No
     ]
 
 
+def test_cheap_hours_alone_preheat_at_most_four_hours_a_day() -> None:
+    def low_tariff(local: time) -> float:
+        return 0.18 if local >= time(22) or local < time(6) else 0.30
+
+    result = plan(price=low_tariff)
+
+    raised = [local(block) for block in blocks(result, "5.1.1") if block.action is Action.RAISE]
+    # Two hours of Wednesday and the four cheapest (earliest) of Thursday, joined over midnight.
+    assert raised == [("21. 22:00", "22. 04:00")]
+
+
 def test_a_zone_with_zero_downward_shift_is_never_lowered() -> None:
     settings = replace(SETTINGS, zones=(ZoneLimits(zone_id="5.1.1", up_k=2.0, down_k=0.0),))
 
