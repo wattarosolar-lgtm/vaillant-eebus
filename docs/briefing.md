@@ -311,8 +311,6 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
 3. Leistungsdeckel, Failsafe und Verdichter-Flexibilität sind nur über die API erreichbar und **nicht an der Anlage
    getestet**. Ein niedriger Failsafe-Wert würde die Wärmepumpe nach jedem Neustart der App bis zu 2 h drosseln. Für
    Leistungsdeckel und Failsafe wartet die Bridge nicht auf eine Quittung des Geräts („Gesendet“ = abgeschickt).
-10. Erledigt in 1.0.0: Der gRPC-Port der Bridge hat jetzt TLS und Token (Abschnitt 5c). Wer root im Container oder
-    Zugriff auf `/data` der App hat (Supervisor, Sicherungen), kann das Token lesen – das ist gewollt.
 4. Raumtemperatur und Wärmemenge aus Home Assistant sowie Export nach HA sind umgesetzt (0.6.0), an der Anlage noch nicht geprüft.
 5. Im Fork gibt es einen Alt-Pfad in `hvac_service.go` für Quellen ohne Zonenliste (per Typ-Zusicherung). Er existiert
    für bestehende Test-Doubles; im Produktivbetrieb liefern alle Use Cases Zonenlisten.
@@ -325,9 +323,43 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
    stabil, solange alle Zonen lesbar sind (die echte Anlage benennt ihre Zonen).
 9. Die Prüfung von v0.4.0 (Funde 1–10) ist eingearbeitet: 1, 2, 5 im Fork (`78a1a5a`); 3, 7, 8, 9 in der App; 6
    dokumentiert; 4 bewertet (Punkt 6); Testlücken aus 10 geschlossen.
+10. Erledigt in 1.0.0: Der gRPC-Port der Bridge hat jetzt TLS und Token (Abschnitt 5c). Wer root im Container oder
+    Zugriff auf `/data` der App hat (Supervisor, Sicherungen), kann das Token lesen – das ist gewollt.
+11. Energiemanagement (1.1.0), bewusst so: feste Startschwellen; der Planer kennt die Leistung der Wärmepumpe nicht und
+    rechnet den Überschuss für Warmwasser und Zonen unabhängig (Blöcke dürfen sich überschneiden); Vorheizen wegen
+    günstigen Stroms höchstens 4 h je Kalendertag (über Mitternacht können es zusammen mehr werden); das Modell in
+    `days.py` ist nur Anzeige. Der Hausverbrauch ohne WP ist nur so gut wie `sensor.vaillant_eebus_power` im Verlauf
+    (ohne den Export „Leistung und Energie“ bleibt die WP in der Grundlast).
+12. Energiemanagement, an der Anlage ungeprüft: Wirkung von Warmwasser-Soll + Einmalladung im Auto-Betrieb; ob
+    Soll-Änderungen aus myVAILLANT bei Zone in „Ein“ über EEBUS ankommen (sonst erkennt der Planer sie nicht als
+    neuen Grundwert); Formate von `epex_spot`, `open_meteo_solar_forecast` und `weather.get_forecasts` per REST mit
+    `return_response` nur nach Doku und Quellcode, nicht gegen ein echtes Home Assistant.
+13. Unter Windows fehlt die Zeitzonen-Datenbank; zwei Tests (Zeitumstellung) laufen nur in der CI. Im Image prüft der
+    Rauchtest `zoneinfo`.
 
 ## 10. Wo eine Prüfung am meisten bringt
 
+Zu prüfen ist `main` = `caa7a20` (Tag `v1.1.0`). Neu seit 1.0.0: `git diff 1e59da0..caa7a20` (Backend `6776168`,
+Oberfläche `cea2f3a`, Doku `caa7a20`). Der Schwerpunkt liegt auf dem Energiemanagement, weil es von selbst an die
+Wärmepumpe schreibt.
+
+0. **Energiemanagement** (`backend/src/vaillant_eebus/hems/`, Ergänzungen in `write_gate.py`, `api.py`,
+   `home_assistant.py`, `ha_client.py`, `ha_export.py`, `main.py`):
+   - `executor.py`: Kann der Planer etwas anderes als Zonen-Soll, Warmwasser-Soll und Einmalladung senden? Kann
+     „Vorschau“ (`preview=True`) oder der Demo-Betrieb umgangen werden? Ist die Erkennung von Handänderungen korrekt
+     (Fehlalarme bei unbestätigten, verspäteten oder abgelehnten Schreibvorgängen, im Demo-Betrieb, nach 429)? Kommt
+     jeder verschobene Wert sicher zum Grundwert zurück (Blockende, Aus/Vorschau, `POST api/mode` auf Demo,
+     Beenden innerhalb der s6-Frist, Neustart mit `/data/hems.json`)? 30-min-Ruhe, Einmalladung genau einmal je Block.
+   - `service.py`: Nebenläufigkeit von `step()` und `release()` (Sperre), Planen ohne Sperre, Verhalten bei
+     Fehlern (darf die App nicht beenden), Abbruch beim Herunterfahren.
+   - `planner.py`: Regeln, Tagesmittel, Verbinden und Verwerfen von Blöcken, Grenzen je Tag, laufende Blöcke,
+     Zeitumstellung (Raster in UTC, Tage lokal).
+   - `supply.py`, `tariff.py`, `weather.py`, `inputs.py`: Auswertung der HA-Attribute (Einheiten, Zeitzonen, fehlende
+     Werte), Akku-Hochrechnung, Grundlast aus 7 Tagen Verlauf (Größe der Antworten, Laufzeit), Open-Meteo nur wenn
+     gewählt, `weather.get_forecasts` als einziger Dienst.
+   - API: Prüfung von `PUT api/hems/settings`, Speichern in `settings.json` (`hems/config.py`).
+   - Oberfläche: `HemsSettings.svelte` (Formularzustand, leere Zahlenfelder, Bestätigung für „Steuern“),
+     `HemsTimeline.svelte` / `HemsCard.svelte` (Darstellung, Tastatur, Screenreader).
 1. **Schreibschutz** (`write_gate.py`): Kann im Demo-Betrieb irgendein Weg einen Schreibbefehl an die Bridge
    bringen? Sind Sperre je Steuerung, 5-s-Grenze, Duplikaterkennung und Bestätigung nebenläufig korrekt? Kann ein
    Befehl die falsche Zone treffen (App → `zone_id` → Fork `78a1a5a`)?
@@ -340,7 +372,7 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
    Konfigurationsdatei), `config.yaml`.
 5. **Oberfläche**: Wiederverbindung des Event-Streams, Darstellung „nicht verfügbar“, Barrierefreiheit,
    relative Pfade unter Ingress.
-6. **Testlücken**: Was ist ungetestet und sollte vor Phase 5 (Schreiben) abgesichert sein?
+6. **Testlücken**: Was ist ungetestet und sollte abgesichert sein, bevor der Planer auf „Steuern“ geht?
 7. **Lieferkette**: gepinnte Actions, Lock-Dateien mit Hashes, Basis-Images.
 
 Nicht prüfen: erzeugte Dateien (`backend/gen/`, `*.pb.go`, `*_pb2*.py`), den Original-Code des Forks außerhalb der
