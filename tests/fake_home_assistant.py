@@ -1,7 +1,8 @@
 """A small Home Assistant Core for tests and the local UI preview.
 
 Serves the parts of the REST and WebSocket API the app uses: states, the
-app's own sensors, the history of an entity, authentication,
+app's own sensors, the history of an entity, the home location, the service
+weather.get_forecasts, authentication,
 subscribe_trigger for state changes, subscribe_events for
 homeassistant_started, and a restart that drops every connection and every
 state the app set (the history stays, as in the recorder).
@@ -39,6 +40,12 @@ class FakeHomeAssistant:
         self.history: dict[str, list[tuple[datetime, str]]] = {}
         # Path start and query of every history request.
         self.history_requests: list[dict[str, str]] = []
+        # Home location for /api/config; None: not set.
+        self.location: tuple[float, float] | None = (52.52, 13.405)
+        # Hourly forecast per weather entity for weather.get_forecasts.
+        self.forecasts: dict[str, list[dict[str, Any]]] = {}
+        # Every service call: (domain.service, body, query).
+        self.service_calls: list[tuple[str, dict[str, Any], dict[str, str]]] = []
         self.connections = 0
         self.refuse_auth = False
         self._sockets: list[_Socket] = []
@@ -52,6 +59,8 @@ class FakeHomeAssistant:
         app.router.add_post("/api/states/{entity_id}", self._post_state)
         app.router.add_delete("/api/states/{entity_id}", self._delete_state)
         app.router.add_get("/api/history/period/{start}", self._get_history)
+        app.router.add_get("/api/config", self._get_config)
+        app.router.add_post("/api/services/{domain}/{service}", self._call_service)
         app.router.add_get("/websocket", self._websocket)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -74,10 +83,11 @@ class FakeHomeAssistant:
         unit: str | None = None,
         name: str | None = None,
         reported: datetime | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> None:
         """Set an entity's state as an integration would, and notify subscribers."""
         old = self.states.get(entity_id)
-        attributes: dict[str, Any] = {}
+        attributes = dict(attributes or {})
         if unit is not None:
             attributes["unit_of_measurement"] = unit
         if name is not None:
@@ -178,6 +188,35 @@ class FakeHomeAssistant:
         ]
         rows += [{"state": state, "last_changed": moment.isoformat()} for moment, state in items[1:]]
         return web.json_response([rows])
+
+    async def _get_config(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return web.json_response({"message": "Unauthorized"}, status=401)
+        location = self.location
+        return web.json_response(
+            {
+                "latitude": location[0] if location else 0,
+                "longitude": location[1] if location else 0,
+                "time_zone": "Europe/Berlin",
+            }
+            if location
+            else {"time_zone": "Europe/Berlin"}
+        )
+
+    async def _call_service(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return web.json_response({"message": "Unauthorized"}, status=401)
+        service = f"{request.match_info['domain']}.{request.match_info['service']}"
+        body = await request.json()
+        self.service_calls.append((service, body, dict(request.query)))
+        if service != "weather.get_forecasts" or "return_response" not in request.query:
+            return web.json_response({"message": "Service does not support responses"}, status=400)
+        entity_id = body.get("entity_id")
+        if entity_id not in self.forecasts:
+            return web.json_response({"message": "Entity not found"}, status=400)
+        return web.json_response(
+            {"changed_states": [], "service_response": {entity_id: {"forecast": self.forecasts[entity_id]}}}
+        )
 
     # --- WebSocket ---------------------------------------------------------------
 

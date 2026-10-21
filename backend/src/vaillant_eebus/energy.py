@@ -100,6 +100,15 @@ class EnergyMeter:
         wh = (day.wh if day else 0.0) + running
         return EnergyToday(kwh=round(wh / 1000, 3), incomplete=day.incomplete if day else False)
 
+    def past_days(self) -> dict[date, EnergyToday]:
+        """Energy of every finished day that is kept, oldest first."""
+        today = self._date(self._clock())
+        return {
+            day: EnergyToday(kwh=round(entry.wh / 1000, 3), incomplete=entry.incomplete)
+            for day, entry in sorted(self._days.items())
+            if day < today
+        }
+
     async def run(self) -> None:
         async with self._state.listen() as updates:
             while True:

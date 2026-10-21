@@ -1,8 +1,10 @@
 """Access to Home Assistant Core through the Supervisor (spec 6.3).
 
 The app reads the states of the entities the user chose and reports its own
-sensors. It never calls services and never changes other entities:
-set_state() and remove_state() refuse every entity outside this app's prefix.
+sensors. It never changes other entities: set_state() and remove_state()
+refuse every entity outside this app's prefix. The only service it calls is
+weather.get_forecasts, which reads a weather forecast for the energy
+management.
 
 One WebSocket connection carries the state changes of the watched entities
 and the "homeassistant_started" event; the REST API serves single states, the
@@ -34,6 +36,8 @@ _LOGGER = logging.getLogger(__name__)
 SUPERVISOR_CORE_URL = "http://supervisor/core"
 # The only entities this app ever writes.
 OWN_ENTITY = re.compile(r"^(sensor|binary_sensor)\.vaillant_eebus_[a-z0-9_]+$")
+# Entities whose forecast the app may ask for.
+WEATHER_ENTITY = re.compile(r"^weather\.[a-z0-9_]+$")
 # Seconds between reading the watched entities again.
 REFRESH_INTERVAL = 300.0
 # Seconds to wait for an answer of Home Assistant.
@@ -149,6 +153,38 @@ class HomeAssistantClient:
         """Remove one of this app's own sensors (the user stopped exporting it)."""
         _check_own(entity_id)
         await self._rest("DELETE", f"/api/states/{entity_id}", missing_ok=True)
+
+    async def location(self) -> tuple[float, float] | None:
+        """Home Assistant's home location (latitude, longitude); None if it is not set."""
+        data = await self._rest("GET", "/api/config")
+        if not isinstance(data, dict):
+            raise HomeAssistantUnavailable("unexpected answer to /api/config")
+        latitude, longitude = data.get("latitude"), data.get("longitude")
+        if isinstance(latitude, int | float) and isinstance(longitude, int | float):
+            return float(latitude), float(longitude)
+        return None
+
+    async def hourly_forecast(self, entity_id: str) -> list[dict[str, Any]]:
+        """The hourly forecast of a weather entity.
+
+        weather.get_forecasts is the only service this app calls; it reads and
+        changes nothing (a test checks that no other service is called).
+        """
+        if not WEATHER_ENTITY.match(entity_id):
+            raise ValueError(f"{entity_id!r} is not a weather entity")
+        data = await self._rest(
+            "POST",
+            "/api/services/weather/get_forecasts",
+            body={"entity_id": entity_id, "type": "hourly"},
+            # Flag: Home Assistant only checks that it is present.
+            params={"return_response": ""},
+        )
+        response = data.get("service_response") if isinstance(data, dict) else None
+        entry = response.get(entity_id) if isinstance(response, dict) else None
+        forecast = entry.get("forecast") if isinstance(entry, dict) else None
+        if not isinstance(forecast, list):
+            raise HomeAssistantUnavailable(f"no hourly forecast from {entity_id}")
+        return [item for item in forecast if isinstance(item, dict)]
 
     async def history(self, entity_id: str, start: datetime, end: datetime) -> list[tuple[datetime, str]]:
         """The entity's state at start and every change until end, oldest first (spec 6.3)."""

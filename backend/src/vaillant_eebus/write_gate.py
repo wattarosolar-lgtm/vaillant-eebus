@@ -1,9 +1,11 @@
 """The only place that writes to the heat pump.
 
-Every change - from the UI, the API and later the HEMS - goes through
-WriteGate.submit(). The gate checks the command against what the device
-reports (zone, writable flag, limits, step, offered modes). Then:
+Every change - from the UI, the API and the energy management's planner -
+goes through WriteGate.submit(). The gate checks the command against what the
+device reports (zone, writable flag, limits, step, offered modes). Then:
 
+- preview (the planner's stage "Vorschau"): nothing is sent, in either mode;
+  the protocol says what the planner would send.
 - demo mode: nothing is sent. Setpoints, modes and boost are answered with
   what would be sent; power limits and compressor control are blocked.
 - live mode: at most one command per control every few seconds, values that
@@ -63,6 +65,13 @@ _NOT_EXECUTED = frozenset(
 _COMPRESSOR_ACTIONS = {"schedule": "einplanen", "pause": "pausieren", "resume": "fortsetzen", "abort": "abbrechen"}
 
 type JsonScalar = str | bool | int | float | None
+
+
+class Source(StrEnum):
+    """Who gives a command; the protocol names the planner."""
+
+    UI = "ui"
+    PLANNER = "planner"
 
 
 class Control(StrEnum):
@@ -255,12 +264,20 @@ class WriteGate:
         self._state.republish()
         return mode
 
-    async def submit(self, command: Command, *, expected_mode: OperatingMode | None = None) -> WriteResult:
+    async def submit(
+        self,
+        command: Command,
+        *,
+        expected_mode: OperatingMode | None = None,
+        source: Source = Source.UI,
+        preview: bool = False,
+    ) -> WriteResult:
         """Check the command and, in live mode, send it to the heat pump.
 
         expected_mode is the mode the caller showed the user when the change was
-        made; if the mode changed since, nothing is sent. Raises WriteRejected
-        when the command is not allowed, NotPairedError without a paired gateway,
+        made; if the mode changed since, nothing is sent. preview checks the
+        command and sends nothing, in either mode. Raises WriteRejected when the
+        command is not allowed, NotPairedError without a paired gateway,
         WriteOutcomeUnknown when it is unknown whether a sent value arrived, and
         the bridge's gRPC error when the value certainly did not arrive.
         """
@@ -271,6 +288,8 @@ class WriteGate:
                 raise NotPairedError
             heat_pump = self._state.current
             description = _describe(command, heat_pump)
+            if source is Source.PLANNER and not preview:
+                description += " (Planer)"
             try:
                 if expected_mode is not None and expected_mode is not self.mode:
                     now_named = "Live" if self.mode is OperatingMode.LIVE else "Demo"
@@ -283,8 +302,17 @@ class WriteGate:
                     raise WriteRejected(409, "Die Wärmepumpe ist gerade nicht verbunden.")
                 _validate(command, heat_pump)
             except WriteRejected as rejected:
-                self._log.add(LogCategory.WRITE, f"Abgelehnt: {description}. {rejected.message}", problem=True)
+                if preview:
+                    self._log.add(
+                        LogCategory.HEMS, f"Planer abgelehnt: {description}. {rejected.message}", problem=True
+                    )
+                else:
+                    self._log.add(LogCategory.WRITE, f"Abgelehnt: {description}. {rejected.message}", problem=True)
                 raise
+            if preview:
+                message = f"Planer würde senden: {description}"
+                self._log.add(LogCategory.HEMS, message)
+                return WriteResult(sent=False, mode=self.mode, message=message, would_send=_payload(command))
             if self.mode is OperatingMode.DEMO:
                 return self._demo(command, description)
             return await self._send(command, key, ski, heat_pump, description)

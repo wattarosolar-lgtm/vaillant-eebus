@@ -486,7 +486,7 @@ async def test_a_start_time_belongs_to_scheduling_only(gate: WriteGate) -> None:
 def test_only_the_write_gate_calls_the_bridges_write_methods() -> None:
     package = Path(write_gate.__file__).parent
     callers: dict[str, set[str]] = {}
-    for source in package.glob("*.py"):
+    for source in package.rglob("*.py"):
         tree = ast.parse(source.read_text(encoding="utf-8"))
         used = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr in WRITE_METHODS}
         if used:

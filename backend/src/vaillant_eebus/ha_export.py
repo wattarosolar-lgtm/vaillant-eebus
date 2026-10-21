@@ -110,7 +110,13 @@ class HomeAssistantExport(HomeAssistantListener):
         self._reported: set[str] = set()
         # Sensors created so far; they stay (as unavailable) when their value goes away.
         self._known: dict[str, Sensor] = {}
+        # More sensors, from the energy management.
+        self._sources: list[Callable[[], list[Sensor]]] = []
         self._wake = asyncio.Event()
+
+    def add_source(self, source: Callable[[], list[Sensor]]) -> None:
+        """Report the sensors of source too, in the group "Energiemanagement"."""
+        self._sources.append(source)
 
     def exported(self) -> list[str]:
         """Entity IDs this app currently reports, for the settings page."""
@@ -190,6 +196,8 @@ class HomeAssistantExport(HomeAssistantListener):
         sensors: list[Sensor] = []
         if ExportGroup.STATUS in groups:
             sensors.append(_binary("connected", "Wärmepumpe verbunden", reachable, device_class="connectivity"))
+        if ExportGroup.HEMS in groups:
+            sensors += [replace(sensor, group=ExportGroup.HEMS) for source in self._sources for sensor in source()]
         if heat_pump is None or not reachable:
             return sensors
         temperatures = [

@@ -18,6 +18,7 @@ from vaillant_eebus.bridge_auth import BridgeCredentials
 from vaillant_eebus.bridge_client import DEFAULT_ADDRESS, BridgeClient
 from vaillant_eebus.energy import EnergyMeter, local_zone
 from vaillant_eebus.ha_client import SUPERVISOR_CORE_URL, HomeAssistantClient
+from vaillant_eebus.hems.service import HemsService
 from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import PairingService
@@ -128,6 +129,7 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
     if ha_client is None:
         _LOGGER.info("No Supervisor token: running without Home Assistant")
     home_assistant = HomeAssistant(settings, state, energy, log, ha_client)
+    hems = HemsService(settings, state, gate, energy, home_assistant, log, config.data_dir, zone=zone)
     app = create_app(
         pairing,
         state,
@@ -138,6 +140,7 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
         static_dir=config.static_dir,
         trusted_clients=config.trusted_clients,
         zone=zone,
+        hems=hems,
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -161,6 +164,7 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
                 tasks.create_task(gate.run()),
                 tasks.create_task(energy.run()),
                 tasks.create_task(home_assistant.run()),
+                tasks.create_task(hems.run()),
             ]
             # Returns when uvicorn handles SIGTERM; it re-raises the signal afterwards.
             await server.serve()

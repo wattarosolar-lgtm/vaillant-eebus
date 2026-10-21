@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+from vaillant_eebus.hems.config import HemsSettings, hems_from_json, hems_to_json
+from vaillant_eebus.ids import ENTITY_ID, ZONE_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,17 +37,22 @@ class ExportGroup(StrEnum):
     ENERGY = "energy"
     POWER_LIMITS = "power_limits"
     COMPRESSOR = "compressor"
+    # The energy management's status and plan.
+    HEMS = "hems"
 
 
 # Spec 7.1: everything the overview shows; power limits and compressor control are off.
 DEFAULT_EXPORT = frozenset(
-    {ExportGroup.STATUS, ExportGroup.ZONES, ExportGroup.HOT_WATER, ExportGroup.TEMPERATURES, ExportGroup.ENERGY}
+    {
+        ExportGroup.STATUS,
+        ExportGroup.ZONES,
+        ExportGroup.HOT_WATER,
+        ExportGroup.TEMPERATURES,
+        ExportGroup.ENERGY,
+        ExportGroup.HEMS,
+    }
 )
 
-# A Home Assistant entity ID, e.g. "sensor.wohnzimmer_temperatur".
-ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
-# The bridge's zone ID, the SPINE address of the zone's room entity, e.g. "5.1.1".
-ZONE_ID = re.compile(r"^[0-9]{1,5}(\.[0-9]{1,5}){0,7}$")
 ROOM_NAME_MAX = 60
 # Heat sensors that are added up, e.g. heating and hot water of the myVAILLANT integration.
 HEAT_SENSORS_MAX = 4
@@ -72,6 +79,7 @@ class Settings:
     # Home Assistant sensors with the heat produced today (each starts at 0 every day); their sum counts.
     heat_energy_entities: tuple[str, ...] = ()
     export: frozenset[ExportGroup] = DEFAULT_EXPORT
+    hems: HemsSettings = field(default_factory=HemsSettings)
 
 
 class SettingsStore:
@@ -128,6 +136,7 @@ class SettingsStore:
                 rooms=_rooms(data.get("rooms", [])),
                 heat_energy_entities=_heat_entities(data),
                 export=_export(data.get("export")),
+                hems=hems_from_json(data.get("hems")),
             )
         except (ValueError, AttributeError) as err:
             corrupt = self._path.with_name(SETTINGS_FILE + ".corrupt")
@@ -214,4 +223,5 @@ def _to_json(settings: Settings) -> dict[str, Any]:
         "rooms": [{"entity_id": room.entity_id, "name": room.name, "zone_id": room.zone_id} for room in settings.rooms],
         "heat_energy_entities": list(settings.heat_energy_entities),
         "export": sorted(group.value for group in settings.export),
+        "hems": hems_to_json(settings.hems),
     }

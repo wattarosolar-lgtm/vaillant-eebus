@@ -52,6 +52,8 @@ class LogCategory(StrEnum):
     DEVICE = "device"
     # Rooms, Home Assistant sensors and the export choice.
     SETTINGS = "settings"
+    # The energy management: plan changes, previews, new base values, missing data.
+    HEMS = "hems"
 
 
 # As on the protocol page, for the downloaded file.
@@ -61,6 +63,7 @@ CATEGORY_NAMES = {
     LogCategory.CONNECTION: "Verbindung",
     LogCategory.MODE: "Modus",
     LogCategory.SETTINGS: "Einstellungen",
+    LogCategory.HEMS: "Planer",
 }
 
 

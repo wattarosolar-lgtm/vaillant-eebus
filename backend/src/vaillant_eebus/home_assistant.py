@@ -13,9 +13,10 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from vaillant_eebus.energy import EnergyMeter, EnergyToday
-from vaillant_eebus.ha_client import HomeAssistantClient, HomeAssistantUnavailable
+from vaillant_eebus.ha_client import EntityState, HomeAssistantClient, HomeAssistantUnavailable
 from vaillant_eebus.ha_export import PREFIX, HomeAssistantExport
 from vaillant_eebus.ha_import import HeatToday, HomeAssistantImport, HomeAssistantState, ValueStatus
+from vaillant_eebus.hems.inputs import HemsEntities
 from vaillant_eebus.history import HistoryGap, PowerHistory, bucket_means, first_bucket
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.settings import ExportGroup, Room, Settings, SettingsStore
@@ -30,8 +31,16 @@ POWER_SENSOR = f"sensor.{PREFIX}power"
 # The history is read from Home Assistant at most this often; several open pages share it.
 HISTORY_CACHE = timedelta(seconds=60)
 
-# Units that make an entity a candidate for a room or for the heat of the day.
-_KIND_UNITS = {"temperature": frozenset({"°C", "°F"}), "energy": frozenset({"Wh", "kWh", "MWh"})}
+# Units that make a sensor a candidate for a room, the heat of the day, the house's power or the battery.
+_KIND_UNITS = {
+    "temperature": frozenset({"°C", "°F"}),
+    "energy": frozenset({"Wh", "kWh", "MWh"}),
+    "power": frozenset({"W", "kW"}),
+    "battery": frozenset({"%"}),
+}
+# Kinds recognized by an attribute: epex_spot prices and open_meteo_solar_forecast forecasts.
+_KIND_ATTRIBUTES = {"price": ("data", list), "pv_forecast": ("watts", dict)}
+ENTITY_KINDS = (*_KIND_UNITS, *_KIND_ATTRIBUTES, "weather")
 MAX_CHOICES = 200
 
 _EXPORT_NAMES = {
@@ -42,6 +51,7 @@ _EXPORT_NAMES = {
     ExportGroup.ENERGY: "Leistung und Energie",
     ExportGroup.POWER_LIMITS: "Leistungsdeckel",
     ExportGroup.COMPRESSOR: "Verdichter-Flexibilität",
+    ExportGroup.HEMS: "Energiemanagement",
 }
 
 
@@ -51,6 +61,17 @@ class EntityChoice:
     name: str
     state: str
     unit: str | None
+
+
+def _is_kind(entity: EntityState, kind: str) -> bool:
+    if kind == "weather":
+        return entity.entity_id.startswith("weather.")
+    if not entity.entity_id.startswith("sensor.") or entity.entity_id.startswith(f"sensor.{PREFIX}"):
+        return False
+    if kind in _KIND_ATTRIBUTES:
+        attribute, kind_type = _KIND_ATTRIBUTES[kind]
+        return isinstance(entity.attributes.get(attribute), kind_type)
+    return entity.attributes.get("unit_of_measurement") in _KIND_UNITS[kind]
 
 
 def performance_today(heat: HeatToday | None, electricity: EnergyToday | None) -> float | None:
@@ -84,18 +105,44 @@ class HomeAssistant:
         self._clock = clock
         self._history: tuple[datetime, PowerHistory] | None = None
         self.importer = HomeAssistantImport(settings, available=client is not None, on_change=state.republish)
+        self.hems_entities = HemsEntities(settings)
         self.exporter = (
             HomeAssistantExport(client, state, energy, self.importer, settings) if client is not None else None
         )
         if client is not None:
             client.add_listener(self.importer)
+            client.add_listener(self.hems_entities)
             if self.exporter is not None:
                 client.add_listener(self.exporter)
-            client.watch(self.importer.watched())
+        self.watch()
 
     @property
     def available(self) -> bool:
         return self._client is not None
+
+    @property
+    def client(self) -> HomeAssistantClient | None:
+        return self._client
+
+    def watch(self) -> None:
+        """Follow the entities of the current settings: rooms, heat and the planner's inputs."""
+        if self._client is not None:
+            self._client.watch(self.importer.watched() | self.hems_entities.watched())
+
+    def entity_state(self, entity_id: str | None) -> EntityState | None:
+        return self.hems_entities.get(entity_id)
+
+    async def history(self, entity_id: str, start: datetime, end: datetime) -> list[tuple[datetime, str]]:
+        """Recorded states of any entity, read a day at a time to keep the answers small."""
+        if self._client is None:
+            raise HomeAssistantUnavailable("no Supervisor token")
+        changes: list[tuple[datetime, str]] = []
+        moment = start
+        while moment < end:
+            until = min(end, moment + timedelta(days=1))
+            changes += await self._client.history(entity_id, moment, until)
+            moment = until
+        return sorted(set(changes))
 
     @property
     def settings(self) -> Settings:
@@ -115,24 +162,35 @@ class HomeAssistant:
             tasks.create_task(self.exporter.run())
 
     async def entities(self, kind: str, query: str) -> list[EntityChoice]:
-        """Sensors to choose from: temperatures for rooms, energy for the heat of the day."""
+        """Entities to choose from: temperatures for rooms, energy for the heat of the day, and the
+        planner's inputs (power, battery, prices, PV forecast, weather)."""
         if self._client is None:
             raise HomeAssistantUnavailable("no Supervisor token")
-        units = _KIND_UNITS[kind]
         needle = query.strip().lower()
         choices = []
         for entity in await self._client.states():
+            if not _is_kind(entity, kind):
+                continue
             unit = entity.attributes.get("unit_of_measurement")
-            if not entity.entity_id.startswith("sensor.") or entity.entity_id.startswith(f"sensor.{PREFIX}"):
-                continue
-            if unit not in units:
-                continue
             name = str(entity.attributes.get("friendly_name") or entity.entity_id)
             if needle and needle not in entity.entity_id.lower() and needle not in name.lower():
                 continue
-            choices.append(EntityChoice(entity_id=entity.entity_id, name=name, state=entity.state, unit=str(unit)))
+            choices.append(
+                EntityChoice(
+                    entity_id=entity.entity_id,
+                    name=name,
+                    state=entity.state,
+                    unit=str(unit) if unit is not None else None,
+                )
+            )
         choices.sort(key=lambda choice: (choice.name.lower(), choice.entity_id))
         return choices[:MAX_CHOICES]
+
+    async def location(self) -> tuple[float, float] | None:
+        """Home Assistant's home location, to fill in the coordinates for Open-Meteo."""
+        if self._client is None:
+            return None
+        return await self._client.location()
 
     async def power_history(self) -> PowerHistory:
         """The last 24 hours of power as five-minute means, from Home Assistant's history."""
@@ -168,8 +226,7 @@ class HomeAssistant:
         if after.export != before.export:
             groups = [name for group, name in _EXPORT_NAMES.items() if group in after.export]
             self._log.add(LogCategory.SETTINGS, f"Export nach Home Assistant: {', '.join(groups) or 'nichts'}")
-        if self._client is not None:
-            self._client.watch(self.importer.watched())
+        self.watch()
         if self.exporter is not None:
             self.exporter.refresh()
         self._state.republish()
