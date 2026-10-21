@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.0.0)
+# Briefing: Vaillant EEBUS (Stand v1.1.0)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -9,12 +9,14 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 1.0.0, alle 7 Phasen umgesetzt (Abnahme von Phase 7 an der Anlage offen). 0.5.1 enthält
+- **Stand:** Version 1.1.0: die 7 Phasen der Spezifikation (1.0.0, an der Anlage abgenommen) und Phase 8, das
+  Energiemanagement (HEMS, Abschnitt 5d; Abnahme an der Anlage offen). 0.5.1 enthält
   die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a), 0.5.2 die aus der ersten Abnahme an der
   Anlage (ziehbarer Regler, Sperre im Auto-Betrieb, ruhigere Bedienung, „Energie heute“), 0.5.3 zeigt im
   Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt). 0.6.0 bindet Home Assistant an (Abschnitt 5b), 0.6.1
   ordnet die Einstellungsseite neu und addiert mehrere Wärmesensoren. 1.0.0 schließt ab: Protokoll (Probleme,
-  Datum, CSV), Verlauf 24 h, „Über die App“, TLS mit Token für die Bridge (Abschnitt 5c), Doku, Aufräumen.
+  Datum, CSV), Verlauf 24 h, „Über die App“, TLS mit Token für die Bridge (Abschnitt 5c), Doku, Aufräumen. 1.1.0
+  bringt den Planer für Warmwasser und Heizen nach Preis, PV-Prognose und Wetter (Abschnitt 5d).
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -27,7 +29,8 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | 4 | Mehrere Heizzonen in der Bridge, Eco nur wenn angeboten | erledigt (0.4.0), an der Anlage abgenommen |
 | 5 | Schreibschutz, Demo/Live, Steuerung in der Oberfläche, Protokoll | umgesetzt (0.5.0, Korrekturen 0.5.1–0.5.3), an der Anlage abgenommen |
 | 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärme heute), HA-Export als Sensoren | umgesetzt (0.6.0/0.6.1), weitgehend abgenommen (Prüfung von 0.6.1 offen) |
-| 7 | Einstellungs-/Protokollseite fertig, Verlauf 24 h, Absicherung der Bridge, Doku, Release | umgesetzt (1.0.0), Abnahme an der Anlage offen |
+| 7 | Einstellungs-/Protokollseite fertig, Verlauf 24 h, Absicherung der Bridge, Doku, Release | umgesetzt (1.0.0), an der Anlage abgenommen (21.10.2026) |
+| 8 | Energiemanagement: Planer für Warmwasser und Zonen, Tarife, PV-Überschuss, Wetter, Stufen Aus/Vorschau/Steuern | umgesetzt (1.1.0), Abnahme an der Anlage offen (erst Vorschau, dann Steuern) |
 
 ## 2. Repositories
 
@@ -110,6 +113,8 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `log_store.py` | Protokoll in SQLite (`/data/app.db`): `add()` kehrt sofort zurück, alle DB-Arbeit läuft geordnet in einem Worker-Thread; höchstens 10.000 Einträge; Kategorien `mode`, `write`, `connection`, `device`, `settings`; Kennzeichen `problem` (Spalte wird in alten DBs ergänzt); Seiten mit `before`/`after`/`before_time`; `entries()` und `csv_document()` für den Download; beschädigte DB wird beiseitegelegt |
 | `state.py` | `StateService`: liest den Geräte-Snapshot nach jedem Zustandsereignis der Bridge (1 s gebündelt) und **spätestens jede Minute** – diese Leseanfrage braucht auch die Verbindungsüberwachung der Bridge (ohne Lesezugriff baut sie die Verbindung nach 2 min neu auf). Bildet `DeviceSnapshot` auf `HeatPumpState` ab (Messwerte, Zonen, Warmwasser, Status). Nicht gemeldete Werte bleiben `None`, nie Ersatzwerte. Verdichter gilt als aktiv ab 100 W. Liest auch `mode_writable`, Leistungsdeckel, Failsafe und Verdichter-Flexibilität. `refresh_now()` (nach einem Schreibvorgang) und `republish()` (Modus/offene Schreibvorgänge geändert). |
 | `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, Keep-alive alle 15 s; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log` (`category`, `problems`, `before`, `after`, `until`), `GET api/log/export` (CSV), `GET api/history/power`, `GET/PUT api/settings`, `GET api/ha/entities`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
+| `hems/` | Energiemanagement, siehe Abschnitt 5d |
+| `ids.py` | Formate von Entitäts- und Zonen-IDs (`ENTITY_ID`, `ZONE_ID`) |
 | `settings.py` | `SettingsStore` ist alleiniger Besitzer der aktuellen Einstellungen (`current`, `update()`), damit Kopplung und Moduswechsel sich nicht überschreiben; `settings.json` atomar schreiben; beschädigte Datei wird beiseitegelegt (→ Demo) |
 
 ### Oberfläche (`frontend/src/`)
@@ -183,8 +188,9 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 
 ## 5b. Home Assistant (Phase 6)
 
-- Die App liest nur und meldet eigene Sensoren; keine Dienste, keine fremden Entitäten (Test
-  `test_only_the_apps_own_sensors_can_be_written`). Nichts davon läuft über `write_gate`, weil nichts an die
+- Die App liest nur und meldet eigene Sensoren; keine fremden Entitäten (Test
+  `test_only_the_apps_own_sensors_can_be_written`). Einziger Dienst seit 1.1.0: `weather.get_forecasts` (liest nur;
+  Test `test_weather_get_forecasts_is_the_only_service_the_app_calls`). Nichts davon läuft über `write_gate`, weil nichts an die
   Wärmepumpe geht.
 - Einstellungen (`settings.json`): `rooms` (`entity_id`, `name`, `zone_id`), `heat_energy_entities` (0.6.0:
   einzelnes `heat_energy_entity`, wird übernommen), `export`
@@ -211,6 +217,38 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
   `foreign_bridge`; die Prüfung der Seriennummer bleibt zusätzlich bestehen.
 - Lokal Ende-zu-Ende gegen das echte Bridge-Binary geprüft: mit Zertifikat und Token Antwort, falsches Token
   `UNAUTHENTICATED`, Klartext abgewiesen.
+
+## 5d. Energiemanagement (Phase 8, 1.1.0)
+
+Plan und Entscheidungen: `vaillant-eebus-notizen/plan-phase-8-hems.md` und `hems-features-entwurf.md` (außerhalb
+des Repos). Paket `backend/src/vaillant_eebus/hems/`:
+
+| Modul | Aufgabe |
+|---|---|
+| `config.py` | `HemsSettings` (Stufe `off`/`preview`/`control`, Tarif, Entitäten, Akku, Wetterquelle, Grenzen je Zone, Warmwasser-Höchstwert, Heizgrenze); in `settings.json` unter `hems`, ungültige Werte einzeln verworfen |
+| `inputs.py` | `HemsEntities`: Zustände von Preis-, PV-, Hausverbrauch- und Akku-Entität über den HA-Client; neue Preise/Prognosen wecken den Planer |
+| `timeline.py` | Viertelstunden in UTC von jetzt bis Mitternacht nach morgen (lokal; Zeitumstellung ohne Sonderfall) |
+| `tariff.py` | Bezugspreis je Viertelstunde: Festpreis, `epex_spot` (Attribut `data`, `price_per_kwh` u. a., plus Aufschlag/MwSt.), §14a Modul 3 (HT/NT-Fenster, auch über Mitternacht) |
+| `supply.py` | PV-Prognose (Attribut `watts`, linear, Nacht eines bekannten Tags = 0), Hausverbrauch ohne WP (Median je lokaler Viertelstunde aus 7 Tagen HA-Historie minus `sensor.vaillant_eebus_power`), Akku lädt zuerst (Kapazität, Ladeleistung, Entladegrenze) → Überschuss |
+| `weather.py` | Stundenprognose aus `weather.get_forecasts` (°F umgerechnet) oder Open-Meteo (`temperature_2m`), höchstens stündlich, nach Fehler 10 min, alte Prognose bis 6 h |
+| `planner.py` | Reine Funktion `make_plan()`: Warmwasser einmal am Tag (1,5 h, ≥ 1,5 kW Überschuss oder ≥ 5 ct unter Tagesmittel) auf Höchstwert + Einmalladung; Zonen nur in „on“ und unter der Heizgrenze: vorheizen bei ≥ 1 kW Überschuss oder billigem Strom (höchstens die 4 günstigsten Stunden am Tag), absenken bei ≥ 5 ct über Tagesmittel (≤ 3 h am Tag); Blöcke ≥ 1 h, Lücken < 30 min verbunden; laufende Blöcke bleiben |
+| `executor.py` | Grundwerte je Steuerung, Handänderung → neuer Grundwert (pausiert bis Blockende), 30 min Ruhe je Steuerung, Rückkehr zum Grundwert (Blockende, Aus/Vorschau, vor Demo, Beenden, Start), Einmalladung nach dem Anheben, `/data/hems.json` |
+| `days.py` | Tageswerte (Außen- und Innentemperatur je Minute, Strom aus `energy.json`) in `/data/hems_days.json`; Gerade kWh = a·(innen − außen) + b ab 10 Heiztagen, nur Anzeige |
+| `service.py` | `HemsService`: plant alle 15 min und nach neuen Preisen/Prognosen (ohne Sperre), führt alle 30 s und nach jedem Zustand aus (mit Sperre gegen das Zurücksetzen), Status für API und Sensoren, `release()` |
+
+- **Schreiben** nur über `write_gate` mit `source=Source.PLANNER` (Protokoll „… (Planer)“); Stufe Vorschau mit
+  `preview=True` (prüft wie Demo, sendet nie, Protokoll-Kategorie `hems`). Strukturtest: im Paket keine
+  Betriebsarten, kein LPC/Failsafe/Verdichter.
+- **API:** `GET api/hems`, `PUT api/hems/settings`, `POST api/hems/mode`, `GET api/ha/location`; `api/ha/entities`
+  mit weiteren Arten. `POST api/mode` auf Demo ruft vorher `hems.release()`.
+- **Oberfläche:** `HemsCard.svelte` + `HemsTimeline.svelte` (Übersicht, alle 60 s neu), `HemsSettings.svelte`
+  (Einstellungen; „Steuern“ nur nach Bestätigung).
+- **Export:** Gruppe `hems` (Status, nächste Aktion, Plan, Strombedarf morgen), bei neuen Installationen voreingestellt.
+- **Bekannte Vereinfachungen:** Warmwasser und Vorheizen können sich überschneiden (die WP lädt zuerst Warmwasser);
+  der Planer kennt die Leistung der WP nicht und rechnet nur mit Schwellen; Startwerte fest bis zur Abnahme.
+- **An der Anlage zu prüfen (vor „Steuern“):** (a) lädt Warmwasser im Auto-Betrieb mit Soll 60 °C + Einmalladung auf
+  60 °C, (b) ist eine Soll-Änderung in myVAILLANT bei Zone in „Ein“ über EEBUS sichtbar (sonst erkennt der Planer
+  sie nicht als neuen Grundwert).
 
 ## 6. Die echte Anlage (Feldbefunde)
 
@@ -240,7 +278,7 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 
 ## 7. Tests
 
-- Python: 178 Tests (`pytest`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+- Python: 231 Tests (`pytest`, 2 übersprungen ohne Zeitzonen-Datenbank unter Windows), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
   Kein Test spricht mit echter Hardware.

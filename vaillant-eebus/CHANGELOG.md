@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.0
+
+**Energiemanagement (HEMS):** Ein Planer legt Warmwasser und Heizen voraus in PV- und günstige Stunden.
+
+- Plant bis morgen Abend in Viertelstunden: Warmwasser einmal am Tag auf den Höchstwert (Voreinstellung 60 °C) mit
+  Einmalladung, wenn PV-Überschuss oder deutlich günstiger Strom erwartet wird; Zonen in „Ein“ vorheizen bzw. bei
+  teurem Strom absenken, je Zone einstellbar (Voreinstellung ±1 K), nur unter der Heizgrenze.
+- **Strompreis:** Festpreis, dynamisch (`epex_spot`) oder Festpreis mit §14a Modul 3 (Zeitfenster für Hoch- und
+  Niedertarif). **PV-Überschuss** aus der PV-Prognose, dem gelernten Hausverbrauch und dem Akku (lädt zuerst).
+  **Temperaturprognose** aus einer Wetter-Entität oder von Open-Meteo.
+- **Stufen** Aus, Vorschau (sendet nichts, auch im Live-Betrieb) und Steuern (nur nach Bestätigung). Schreibt nur
+  über die Schreibsperre: Solltemperaturen und Einmalladung, nie Betriebsarten, Leistungsdeckel oder Verdichter.
+  Höchstens eine Änderung je Steuerung alle 30 Minuten.
+- **Grundwert:** Eine Änderung von Hand wird neuer Grundwert. Zurück zum Grundwert am Ende jedes Blocks, beim
+  Ausschalten, vor dem Demo-Betrieb und beim Beenden der App.
+- **Übersicht:** Karte „Energiemanagement“ mit Zeitleiste (PV-Überschuss, Preis, geplante Blöcke) statt der
+  gestrichelten Karte. **Einstellungen:** neuer Abschnitt „Energiemanagement“. **Protokoll:** neue Kategorie
+  „Planer“. **Export:** neue Gruppe „Energiemanagement“ mit Status, nächster Aktion, Plan und Strombedarf morgen.
+- Die App lernt je Tag Strom, Außen- und Innentemperatur und schätzt ab zehn Heiztagen den Strombedarf für morgen
+  (nur Anzeige).
+- Anleitung: Abschnitt Energiemanagement; Hinweis zum Abrufintervall der myVAILLANT-Integration.
+
 ## 1.0.0
 
 Abschluss der geplanten Phasen:
