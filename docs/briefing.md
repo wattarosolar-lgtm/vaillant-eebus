@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.1.0)
+# Briefing: Vaillant EEBUS (Stand v1.1.0, Korrekturen für 1.1.1 auf `fix/pruefung-1.1.0`)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -232,9 +232,9 @@ des Repos). Paket `backend/src/vaillant_eebus/hems/`:
 | `supply.py` | PV-Prognose (Attribut `watts`, linear, Nacht eines bekannten Tags = 0), Hausverbrauch ohne WP (Median je lokaler Viertelstunde aus 7 Tagen HA-Historie minus `sensor.vaillant_eebus_power`), Akku lädt zuerst (Kapazität, Ladeleistung, Entladegrenze) → Überschuss |
 | `weather.py` | Stundenprognose aus `weather.get_forecasts` (°F umgerechnet) oder Open-Meteo (`temperature_2m`), höchstens stündlich, nach Fehler 10 min, alte Prognose bis 6 h |
 | `planner.py` | Reine Funktion `make_plan()`: Warmwasser einmal am Tag (1,5 h, ≥ 1,5 kW Überschuss oder ≥ 5 ct unter Tagesmittel) auf Höchstwert + Einmalladung; Zonen nur in „on“ und unter der Heizgrenze: vorheizen bei ≥ 1 kW Überschuss oder billigem Strom (höchstens die 4 günstigsten Stunden am Tag), absenken bei ≥ 5 ct über Tagesmittel (≤ 3 h am Tag); Blöcke ≥ 1 h, Lücken < 30 min verbunden; laufende Blöcke bleiben |
-| `executor.py` | Grundwerte je Steuerung, Handänderung → neuer Grundwert (pausiert bis Blockende), 30 min Ruhe je Steuerung, Rückkehr zum Grundwert (Blockende, Aus/Vorschau, vor Demo, Beenden, Start), Einmalladung nach dem Anheben, `/data/hems.json` |
+| `executor.py` | Grundwerte je Steuerung, Handänderung → neuer Grundwert (pausiert bis Blockende; auch eine Änderung bei gestoppter App, erkannt am ersten Wert nach dem Start), als eigener Wert gilt nur ein wirklich gesendeter (`applied`), 30 min Ruhe je Steuerung, Rückkehr zum Grundwert (Blockende, Aus/Vorschau, vor Demo, Beenden – alle Steuerungen gleichzeitig –, Start), Einmalladung nach dem Anheben, getrennt gemerkt für Vorschau und Steuern, `/data/hems.json` |
 | `days.py` | Tageswerte (Außen- und Innentemperatur je Minute, Strom aus `energy.json`) in `/data/hems_days.json`; Gerade kWh = a·(innen − außen) + b ab 10 Heiztagen, nur Anzeige |
-| `service.py` | `HemsService`: plant alle 15 min und nach neuen Preisen/Prognosen (ohne Sperre), führt alle 30 s und nach jedem Zustand aus (mit Sperre gegen das Zurücksetzen), Status für API und Sensoren, `release()` |
+| `service.py` | `HemsService`: plant alle 15 min und nach neuen Preisen/Prognosen (ohne Sperre), führt alle 30 s und nach jedem Zustand aus (mit Sperre gegen das Zurücksetzen), Status für API und Sensoren, `release()`; beim Beenden bis zu 15 s (`RELEASE_TIMEOUT`) in einer eigenen Aufgabe, die einen zweiten Abbruch übersteht (uvicorn reicht SIGTERM nach seinem Ende weiter); der Supervisor wartet 30 s (`timeout` in `config.yaml`), s6 stoppt die Bridge erst nach dem Backend |
 
 - **Schreiben** nur über `write_gate` mit `source=Source.PLANNER` (Protokoll „… (Planer)“); Stufe Vorschau mit
   `preview=True` (prüft wie Demo, sendet nie, Protokoll-Kategorie `hems`). Strukturtest: im Paket keine
@@ -248,7 +248,8 @@ des Repos). Paket `backend/src/vaillant_eebus/hems/`:
   der Planer kennt die Leistung der WP nicht und rechnet nur mit Schwellen; Startwerte fest bis zur Abnahme.
 - **An der Anlage zu prüfen (vor „Steuern“):** (a) lädt Warmwasser im Auto-Betrieb mit Soll 60 °C + Einmalladung auf
   60 °C, (b) ist eine Soll-Änderung in myVAILLANT bei Zone in „Ein“ über EEBUS sichtbar (sonst erkennt der Planer
-  sie nicht als neuen Grundwert).
+  sie nicht als neuen Grundwert); bei „Steuern“ zusätzlich (c) App während eines Blocks stoppen → Grundwerte zurück
+  (lokal ohne Docker nicht prüfbar).
 
 ## 6. Die echte Anlage (Feldbefunde)
 
@@ -278,7 +279,7 @@ des Repos). Paket `backend/src/vaillant_eebus/hems/`:
 
 ## 7. Tests
 
-- Python: 231 Tests (`pytest`, 2 übersprungen ohne Zeitzonen-Datenbank unter Windows), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+- Python: 240 Tests (`pytest`, 2 übersprungen ohne Zeitzonen-Datenbank unter Windows), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
   Kein Test spricht mit echter Hardware.
@@ -336,6 +337,13 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
     `return_response` nur nach Doku und Quellcode, nicht gegen ein echtes Home Assistant.
 13. Unter Windows fehlt die Zeitzonen-Datenbank; zwei Tests (Zeitumstellung) laufen nur in der CI. Im Image prüft der
     Rauchtest `zoneinfo`.
+14. Die Prüfung von v1.1.0 (15 Funde) ist bewertet und auf `fix/pruefung-1.1.0` eingearbeitet: 1, 3, 7, 8, 10, 11
+    behoben, 5 verbessert (dabei gefunden: ein zweiter Abbruch beim Herunterfahren hat das Zurücksetzen bisher
+    abgebrochen). Ohne Änderung, mit Begründung: 2 (ein Absturz endet mit Exit-Code 1, s6 startet neu), 4, 6, 9,
+    13–15; 12 (Lücken > 3 min machen einen Tag im Energiezähler „lückenhaft“) kommt mit dem Modell in 1.2.0.
+15. Energiemanagement, bewusst offen: Ein Zurücksetzen mit „Ergebnis unbekannt“, das nicht ankam, bleibt bis zum
+    nächsten Block dieser Steuerung stehen (das Protokoll zeigt „Nicht übernommen“). Ist die Wärmepumpe beim Planen
+    noch nicht verbunden (nach dem Start), plant der Planer spätestens zur nächsten Viertelstunde neu.
 
 ## 10. Wo eine Prüfung am meisten bringt
 

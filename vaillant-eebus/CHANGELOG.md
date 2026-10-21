@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.1.1 (noch nicht veröffentlicht)
+
+Korrekturen am Energiemanagement aus einer Prüfung des Codes:
+
+- **Einmalladung:** Wird mitten in einem Warmwasser-Block von Vorschau auf Steuern umgestellt, startet der Planer
+  jetzt auch die Einmalladung; bisher ging nur die Solltemperatur hinaus.
+- **Änderung bei gestoppter App:** Wurde eine Solltemperatur geändert, während die App nicht lief (zum Beispiel in
+  myVAILLANT), wird sie jetzt neuer Grundwert. Bisher hätte der Planer den alten Wert zurückgeschrieben.
+- **Beenden:** Der Planer setzt alle verschobenen Werte gleichzeitig zurück und hat dafür bis zu 15 Sekunden. Bisher
+  konnte das Herunterfahren das Zurücksetzen abbrechen. Home Assistant wartet beim Stoppen der App jetzt bis zu
+  30 Sekunden.
+- **Handänderung:** Ein Wert, den der Planer nur vorhatte, aber nie gesendet hat (Demo-Betrieb, abgelehnt), gilt
+  nicht mehr als seiner. Stellt ihn jemand von Hand ein, wird er neuer Grundwert.
+- **Akku:** Mit Akku-Ladestand sind Kapazität und Ladeleistung jetzt Pflicht. Fehlt die Ladeleistung in älteren
+  Einstellungen, nennt die Karte das.
+- **Karte Energiemanagement:** lädt neu, sobald die nächste Aktion fällig ist und wenn die Seite wieder sichtbar
+  wird.
+- **Kopplung:** Beim Wechsel des Gateways wird erst das neue angemeldet, dann das alte abgemeldet. Schlägt das
+  Anmelden fehl, bleibt das bisherige gekoppelt.
+
 ## 1.1.0
 
 **Energiemanagement (HEMS):** Ein Planer legt Warmwasser und Heizen voraus in PV- und günstige Stunden.

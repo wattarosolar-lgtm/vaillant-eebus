@@ -210,12 +210,12 @@ alle 15 Minuten neu, außerdem sobald neue Strompreise oder eine neue PV-Prognos
 - Warmwasser und Vorheizen können sich überschneiden; die Wärmepumpe lädt dann zuerst das Warmwasser.
 
 **Grundwert:** Für jede Zone und das Warmwasser merkt sich der Planer den normalen Wert, beim Einschalten den
-aktuellen. Ändern Sie eine Solltemperatur selbst – in dieser App, in myVAILLANT oder am Gerät –, wird sie zum neuen
-Grundwert; der Planer lässt diese Steuerung bis zum Ende des laufenden Blocks in Ruhe und plant danach um den neuen
+aktuellen. Ändern Sie eine Solltemperatur selbst – in dieser App, in myVAILLANT oder am Gerät, auch während die
+App nicht läuft –, wird sie zum neuen Grundwert; der Planer lässt diese Steuerung bis zum Ende des laufenden Blocks in Ruhe und plant danach um den neuen
 Wert herum. Jede Steuerung ändert er höchstens alle 30 Minuten.
 
 **Zurück zum Grundwert** geht der Planer am Ende jedes Blocks, beim Umschalten auf Aus oder Vorschau, vor dem
-Wechsel in den Demo-Betrieb und wenn die App beendet wird. Fehlt ihm beim Start noch ein verschobener Wert, den der
+Wechsel in den Demo-Betrieb und wenn die App beendet wird (dafür hat er bis zu 15 Sekunden). Fehlt ihm beim Start noch ein verschobener Wert, den der
 neue Plan nicht mehr vorsieht, setzt er ihn ebenfalls zurück.
 
 **Was der Planer nie tut:** Betriebsarten umschalten, den Leistungsdeckel oder den Verdichter steuern, den Akku
@@ -230,7 +230,7 @@ steuern oder Werte an die Wärmepumpe melden. Im Auto-Betrieb einer Zone verschi
 - **PV, Hausverbrauch und Akku:** die PV-Prognose für heute und morgen (Sensoren `…energy_production_today` und
   `…_tomorrow` der Integration „Open-Meteo Solar Forecast“), ein Sensor mit dem Verbrauch des ganzen Hauses in W
   oder kW (mit Wärmepumpe) und, falls vorhanden, der Ladestand des Akkus mit Kapazität, Ladeleistung und
-  Entladegrenze. Gibt es keinen Hausverbrauch-Sensor, legen Sie in Home Assistant einen Template-Sensor an
+  Entladegrenze (Kapazität und Ladeleistung sind dann Pflicht). Gibt es keinen Hausverbrauch-Sensor, legen Sie in Home Assistant einen Template-Sensor an
   (Einstellungen → Geräte & Dienste → Helfer → Template → Sensor, Einheit W, Zustandsklasse „Messung“). Mit
   `huawei_solar` zum Beispiel:
   `{{ (states('sensor.inverter_active_power') | float(0) - states('sensor.power_meter_active_power') | float(0)) | round(0) }}`
