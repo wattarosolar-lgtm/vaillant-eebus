@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from vaillant_eebus.state import HeatPumpState, StateService
+from vaillant_eebus.state import HeatPumpState, StateHub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ def local_zone(name: str | None) -> tzinfo:
 class EnergyMeter:
     def __init__(
         self,
-        state: StateService,
+        state: StateHub,
         data_dir: Path,
         *,
         zone: tzinfo = UTC,

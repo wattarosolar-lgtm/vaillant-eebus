@@ -5,7 +5,15 @@ from dataclasses import replace
 from pathlib import Path
 
 from vaillant_eebus.hems.config import HemsSettings, hems_to_json
-from vaillant_eebus.settings import ExportGroup, OperatingMode, Room, Settings, SettingsStore
+from vaillant_eebus.settings import (
+    Connection,
+    ExportGroup,
+    MyVaillantEntities,
+    OperatingMode,
+    Room,
+    Settings,
+    SettingsStore,
+)
 
 
 def test_load_without_file_returns_defaults(tmp_path: Path) -> None:
@@ -22,6 +30,8 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
 
     assert store.load() == Settings(paired_ski="6C2B9E41D7A0F3851E2C4B6D8F0A1C3E5B7D9F02")
     assert json.loads(store.path.read_text(encoding="utf-8")) == {
+        "connection": None,
+        "myvaillant": {"zones": [], "hot_water": None, "outdoor_temperature": None, "power": None},
         "paired_ski": "6C2B9E41D7A0F3851E2C4B6D8F0A1C3E5B7D9F02",
         "operating_mode": "demo",
         "rooms": [],
@@ -84,11 +94,62 @@ def test_invalid_home_assistant_choices_keep_the_pairing(tmp_path: Path) -> None
     assert not store.path.with_name("settings.json.corrupt").exists()
 
 
-def test_settings_of_an_older_version_load_in_demo_mode(tmp_path: Path) -> None:
+def test_settings_of_an_older_version_load_in_demo_mode_with_eebus(tmp_path: Path) -> None:
     store = SettingsStore(tmp_path)
     store.path.write_text(json.dumps({"paired_ski": "A" * 40}), encoding="utf-8")
 
-    assert store.load() == Settings(paired_ski="A" * 40, operating_mode=OperatingMode.DEMO)
+    assert store.load() == Settings(connection=Connection.EEBUS, paired_ski="A" * 40, operating_mode=OperatingMode.DEMO)
+
+
+def test_a_new_installation_has_no_connection_yet(tmp_path: Path) -> None:
+    assert SettingsStore(tmp_path).current.connection is None
+
+
+def test_the_myvaillant_choice_round_trips(tmp_path: Path) -> None:
+    settings = Settings(
+        connection=Connection.MYVAILLANT,
+        myvaillant=MyVaillantEntities(
+            zones=("climate.zuhause_zone_1_climate", "climate.zuhause_zone_2_climate"),
+            hot_water="water_heater.zuhause_domestic_hot_water_0",
+            outdoor_temperature="sensor.zuhause_outdoor_temperature",
+            power="sensor.waermepumpe_leistung",
+        ),
+    )
+    SettingsStore(tmp_path).save(settings)
+
+    assert SettingsStore(tmp_path).load() == settings
+
+
+def test_invalid_myvaillant_entities_are_dropped_one_by_one(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    store.path.write_text(
+        json.dumps(
+            {
+                "connection": "myvaillant",
+                "paired_ski": "A" * 40,
+                "myvaillant": {
+                    "zones": ["climate.zone_1", "sensor.no_zone", "climate.zone_1", 7],
+                    "hot_water": "climate.not_water",
+                    "outdoor_temperature": "sensor.aussen",
+                    "power": "Leistung",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = store.load()
+
+    assert settings.connection is Connection.MYVAILLANT
+    assert settings.paired_ski == "A" * 40
+    assert settings.myvaillant == MyVaillantEntities(zones=("climate.zone_1",), outdoor_temperature="sensor.aussen")
+
+
+def test_an_unknown_connection_falls_back_to_eebus(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path)
+    store.path.write_text(json.dumps({"connection": "modbus", "paired_ski": "A" * 40}), encoding="utf-8")
+
+    assert store.load().connection is Connection.EEBUS
 
 
 def test_the_chosen_mode_survives_a_restart(tmp_path: Path) -> None:

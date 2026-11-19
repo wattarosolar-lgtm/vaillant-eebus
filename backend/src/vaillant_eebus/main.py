@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import shutil
 import signal
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -21,12 +22,16 @@ from vaillant_eebus.ha_client import SUPERVISOR_CORE_URL, HomeAssistantClient
 from vaillant_eebus.hems.service import HemsService
 from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
+from vaillant_eebus.myvaillant import MyVaillantLink, MyVaillantState
 from vaillant_eebus.pairing import PairingService
-from vaillant_eebus.settings import SettingsStore
-from vaillant_eebus.state import StateService
+from vaillant_eebus.settings import Connection, SettingsStore
+from vaillant_eebus.state import StateHub, StateService
 from vaillant_eebus.write_gate import WriteGate
 
 _LOGGER = logging.getLogger("vaillant_eebus")
+
+# Seconds the answer to a change of the connection gets before the backend restarts.
+RESTART_DELAY = 1.0
 
 _LOG_LEVELS = {
     "debug": logging.DEBUG,
@@ -62,6 +67,9 @@ class BackendConfig:
     # (config.yaml homeassistant_api). Without a token the app runs without HA.
     ha_url: str = SUPERVISOR_CORE_URL
     ha_token: str | None = None
+    # The bridge's s6 service directory; restarted when the connection changes, so it
+    # starts (EEBUS) or stays idle (myVAILLANT). None outside the container.
+    bridge_service_dir: Path | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> BackendConfig:
@@ -70,6 +78,7 @@ class BackendConfig:
         trusted = env.get("TRUSTED_CLIENTS")
         serial_file = env.get("BRIDGE_SERIAL_FILE")
         credentials_dir = env.get("BRIDGE_CREDENTIALS_DIR")
+        service_dir = env.get("BRIDGE_SERVICE_DIR")
         return cls(
             bridge_address=env.get("BRIDGE_ADDRESS", defaults.bridge_address),
             data_dir=Path(env.get("DATA_DIR", str(defaults.data_dir))),
@@ -89,6 +98,7 @@ class BackendConfig:
             time_zone=env.get("TZ") or None,
             ha_url=env.get("HA_URL", defaults.ha_url),
             ha_token=env.get("SUPERVISOR_TOKEN") or None,
+            bridge_service_dir=Path(service_dir) if service_dir else None,
         )
 
 
@@ -109,8 +119,12 @@ def configure_logging(level_name: str) -> None:
     )
 
 
-async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
-    """Serve the ingress UI and keep the bridge pairing alive until stopped."""
+async def run_backend(config: BackendConfig, bridge: BridgeClient) -> bool:
+    """Serve the ingress UI and keep the heat pump's state current until stopped.
+
+    The connection (EEBUS or myVAILLANT) is read once at the start; changing it
+    restarts the backend. Returns True when it stopped for such a restart.
+    """
     settings = SettingsStore(config.data_dir)
     log = LogStore(config.data_dir)
     pairing = PairingService(
@@ -121,15 +135,25 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
         ship_port=config.ship_port,
         log=log,
     )
-    state = StateService(bridge, pairing)
-    gate = WriteGate(bridge, pairing, state, settings, log)
-    zone = local_zone(config.time_zone)
-    energy = EnergyMeter(state, config.data_dir, zone=zone)
     ha_client = HomeAssistantClient(config.ha_url, config.ha_token, log=log) if config.ha_token else None
     if ha_client is None:
         _LOGGER.info("No Supervisor token: running without Home Assistant")
+    myvaillant = settings.current.connection is Connection.MYVAILLANT
+    state: StateHub
+    if myvaillant:
+        _LOGGER.info("Connection myVAILLANT: the heat pump is read and controlled through Home Assistant")
+        device = MyVaillantState(settings, available=ha_client is not None)
+        state = device
+        gate = WriteGate(bridge, pairing, state, settings, log, link=MyVaillantLink(ha_client, device, settings))
+    else:
+        _LOGGER.info("Connection EEBUS: the heat pump is read and controlled through the bridge")
+        state = StateService(bridge, pairing)
+        gate = WriteGate(bridge, pairing, state, settings, log)
+    zone = local_zone(config.time_zone)
+    energy = EnergyMeter(state, config.data_dir, zone=zone)
     home_assistant = HomeAssistant(settings, state, energy, log, ha_client)
     hems = HemsService(settings, state, gate, energy, home_assistant, log, config.data_dir, zone=zone)
+    restart = asyncio.Event()
     app = create_app(
         pairing,
         state,
@@ -141,6 +165,7 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
         trusted_clients=config.trusted_clients,
         zone=zone,
         hems=hems,
+        restart=restart.set,
     )
     server = uvicorn.Server(
         uvicorn.Config(
@@ -154,25 +179,51 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> None:
             timeout_graceful_shutdown=3,
         )
     )
+
+    async def stop_for_restart() -> None:
+        await restart.wait()
+        await asyncio.sleep(RESTART_DELAY)
+        server.should_exit = True
+
     try:
         async with contextlib.AsyncExitStack() as stack, asyncio.TaskGroup() as tasks:
             if ha_client is not None:
                 await stack.enter_async_context(ha_client)
             background = [
-                tasks.create_task(pairing.run()),
                 tasks.create_task(state.run()),
                 tasks.create_task(gate.run()),
                 tasks.create_task(energy.run()),
                 tasks.create_task(home_assistant.run()),
                 tasks.create_task(hems.run()),
+                tasks.create_task(stop_for_restart()),
             ]
-            # Returns when uvicorn handles SIGTERM; it re-raises the signal afterwards.
+            if not myvaillant:
+                background.append(tasks.create_task(pairing.run()))
+            # Returns when uvicorn handles SIGTERM (it re-raises the signal afterwards)
+            # or when the connection changed.
             await server.serve()
             for task in background:
                 task.cancel()
     finally:
         energy.close()
         log.close()
+    return restart.is_set()
+
+
+async def restart_bridge(service_dir: Path | None) -> None:
+    """Restart the bridge's s6 service, which starts or idles by the saved connection."""
+    if service_dir is None:
+        return
+    command = shutil.which("s6-svc") or "/command/s6-svc"
+    try:
+        process = await asyncio.create_subprocess_exec(command, "-r", str(service_dir))
+        async with asyncio.timeout(10):
+            code = await process.wait()
+    except (OSError, TimeoutError) as err:
+        _LOGGER.error("Restarting the bridge failed: %r", err)
+        return
+    if code != 0:
+        _LOGGER.error("Restarting the bridge failed: s6-svc exited with %d", code)
 
 
 async def _main(config: BackendConfig) -> None:
@@ -185,12 +236,18 @@ async def _main(config: BackendConfig) -> None:
     credentials = (
         BridgeCredentials.load(config.bridge_credentials_dir) if config.bridge_credentials_dir is not None else None
     )
+    restarting = False
     try:
         async with BridgeClient(config.bridge_address, credentials=credentials) as bridge:
-            await run_backend(config, bridge)
+            restarting = await run_backend(config, bridge)
     except asyncio.CancelledError:
         pass
-    _LOGGER.info("Backend stopped")
+    if restarting:
+        # s6 starts the backend again with the new connection; the bridge follows it.
+        await restart_bridge(config.bridge_service_dir)
+        _LOGGER.info("Backend stopped to change the connection; s6 starts it again")
+    else:
+        _LOGGER.info("Backend stopped")
 
 
 def run() -> None:

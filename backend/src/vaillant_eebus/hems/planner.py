@@ -7,7 +7,8 @@ no bridge, no Home Assistant. A plan is a list of blocks per control:
   at least 1.5 kW, otherwise with electricity at least 5 ct/kWh below the
   day's mean, the setpoint goes up to its maximum and the one-time charge
   starts. Never below the base value.
-- Zones, only in operation mode "on" and below the heating limit: pre-heat by
+- Zones, only in operation mode "on" (with myVAILLANT also in "auto", where the
+  executor uses temporary overrides) and below the heating limit: pre-heat by
   the zone's upward shift with a surplus of at least 1 kW (as long as it
   lasts) or with electricity at least 5 ct/kWh below the day's mean (at most
   the 4 cheapest hours a day), lower by its downward shift with electricity
@@ -85,6 +86,8 @@ class ZoneView:
     label: str
     mode: str | None
     writable: bool
+    # myVAILLANT: a zone in auto can be shifted with a temporary override.
+    auto_override: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +225,9 @@ def _zone_note(view: ZoneView, settings: HemsSettings) -> str | None:
     limits = settings.zone_limits(view.id)
     if limits.up_k == 0 and limits.down_k == 0:
         return "Für diese Zone ist keine Verschiebung erlaubt (0 K)."
-    if view.mode != "on":
+    if view.auto_override and view.mode not in ("on", "auto"):
+        return "Der Planer verschiebt Zonen nur in den Betriebsarten Ein und Auto."
+    if not view.auto_override and view.mode != "on":
         return "Der Planer verschiebt Zonen nur in der Betriebsart Ein."
     if not view.writable:
         return "Die Solltemperatur ist am Gerät nicht änderbar."

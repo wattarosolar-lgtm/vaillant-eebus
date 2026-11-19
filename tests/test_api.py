@@ -18,7 +18,7 @@ from vaillant_eebus.ha_import import HomeAssistantState
 from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.pairing import ConnectionState, PairingService
-from vaillant_eebus.settings import OperatingMode, SettingsStore
+from vaillant_eebus.settings import Connection, OperatingMode, SettingsStore
 from vaillant_eebus.state import HeatPumpState, StateService
 from vaillant_eebus.write_gate import WriteGate
 
@@ -203,6 +203,7 @@ async def test_state_contains_connection_and_heat_pump(
 
     assert before == {
         "connection": "not_paired",
+        "link": "eebus",
         "mode": "demo",
         "pending": [],
         "heat_pump": None,
@@ -395,6 +396,7 @@ async def test_event_stream_survives_a_failing_bridge_call(state: StateService) 
             raise grpc.aio.AioRpcError(grpc.StatusCode.INTERNAL, grpc.aio.Metadata(), grpc.aio.Metadata(), "broken")
         return ApiState(
             connection=ConnectionState.CONNECTED,
+            link=Connection.EEBUS,
             mode=OperatingMode.DEMO,
             pending=[],
             heat_pump=heat_pump,

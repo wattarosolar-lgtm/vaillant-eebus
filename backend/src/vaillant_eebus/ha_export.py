@@ -24,7 +24,7 @@ from vaillant_eebus.energy import EnergyMeter
 from vaillant_eebus.ha_client import HomeAssistantClient, HomeAssistantListener, HomeAssistantUnavailable
 from vaillant_eebus.ha_import import HomeAssistantImport
 from vaillant_eebus.settings import ExportGroup, SettingsStore
-from vaillant_eebus.state import MODE_NAMES, HeatPumpState, Reading, StateService
+from vaillant_eebus.state import MODE_NAMES, HeatPumpState, Reading, StateHub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class HomeAssistantExport(HomeAssistantListener):
     def __init__(
         self,
         client: HomeAssistantClient,
-        state: StateService,
+        state: StateHub,
         energy: EnergyMeter,
         ha_import: HomeAssistantImport,
         settings: SettingsStore,

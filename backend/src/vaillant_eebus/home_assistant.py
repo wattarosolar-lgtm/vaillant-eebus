@@ -19,8 +19,9 @@ from vaillant_eebus.ha_import import HeatToday, HomeAssistantImport, HomeAssista
 from vaillant_eebus.hems.inputs import HemsEntities
 from vaillant_eebus.history import HistoryGap, PowerHistory, bucket_means, first_bucket
 from vaillant_eebus.log_store import LogCategory, LogStore
-from vaillant_eebus.settings import ExportGroup, Room, Settings, SettingsStore
-from vaillant_eebus.state import StateService
+from vaillant_eebus.myvaillant import MyVaillantState, discover
+from vaillant_eebus.settings import Connection, ExportGroup, MyVaillantEntities, Room, Settings, SettingsStore
+from vaillant_eebus.state import StateHub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,7 +41,9 @@ _KIND_UNITS = {
 }
 # Kinds recognized by an attribute: epex_spot prices and open_meteo_solar_forecast forecasts.
 _KIND_ATTRIBUTES = {"price": ("data", list), "pv_forecast": ("watts", dict)}
-ENTITY_KINDS = (*_KIND_UNITS, *_KIND_ATTRIBUTES, "weather")
+# Entity domains offered as they are: the weather forecast and the myVAILLANT zones and hot water.
+_KIND_DOMAINS = {"weather": "weather.", "climate": "climate.", "water_heater": "water_heater."}
+ENTITY_KINDS = (*_KIND_UNITS, *_KIND_ATTRIBUTES, *_KIND_DOMAINS)
 MAX_CHOICES = 200
 
 _EXPORT_NAMES = {
@@ -64,8 +67,8 @@ class EntityChoice:
 
 
 def _is_kind(entity: EntityState, kind: str) -> bool:
-    if kind == "weather":
-        return entity.entity_id.startswith("weather.")
+    if kind in _KIND_DOMAINS:
+        return entity.entity_id.startswith(_KIND_DOMAINS[kind])
     if not entity.entity_id.startswith("sensor.") or entity.entity_id.startswith(f"sensor.{PREFIX}"):
         return False
     if kind in _KIND_ATTRIBUTES:
@@ -91,7 +94,7 @@ class HomeAssistant:
     def __init__(
         self,
         settings: SettingsStore,
-        state: StateService,
+        state: StateHub,
         energy: EnergyMeter,
         log: LogStore,
         client: HomeAssistantClient | None,
@@ -109,9 +112,13 @@ class HomeAssistant:
         self.exporter = (
             HomeAssistantExport(client, state, energy, self.importer, settings) if client is not None else None
         )
+        # With the connection myVAILLANT the heat pump's state comes from Home Assistant, too.
+        self.device = state if isinstance(state, MyVaillantState) else None
         if client is not None:
             client.add_listener(self.importer)
             client.add_listener(self.hems_entities)
+            if self.device is not None:
+                client.add_listener(self.device)
             if self.exporter is not None:
                 client.add_listener(self.exporter)
         self.watch()
@@ -125,9 +132,11 @@ class HomeAssistant:
         return self._client
 
     def watch(self) -> None:
-        """Follow the entities of the current settings: rooms, heat and the planner's inputs."""
+        """Follow the entities of the current settings: rooms, heat, the planner's inputs and the
+        myVAILLANT entities."""
         if self._client is not None:
-            self._client.watch(self.importer.watched() | self.hems_entities.watched())
+            device = self.device.watched() if self.device is not None else frozenset()
+            self._client.watch(self.importer.watched() | self.hems_entities.watched() | device)
 
     def entity_state(self, entity_id: str | None) -> EntityState | None:
         return self.hems_entities.get(entity_id)
@@ -185,6 +194,39 @@ class HomeAssistant:
             )
         choices.sort(key=lambda choice: (choice.name.lower(), choice.entity_id))
         return choices[:MAX_CHOICES]
+
+    async def discover_myvaillant(self) -> MyVaillantEntities:
+        """The myVAILLANT integration's entities found in Home Assistant, as a suggestion."""
+        if self._client is None:
+            raise HomeAssistantUnavailable("no Supervisor token")
+        return discover(await self._client.states())
+
+    def change_myvaillant(self, entities: MyVaillantEntities) -> Settings:
+        """Save the chosen myVAILLANT entities and follow them at once."""
+        before = self._settings.current
+        after = self._settings.update(lambda settings: replace(settings, myvaillant=entities))
+        if after.myvaillant != before.myvaillant:
+            chosen = after.myvaillant
+            parts = [
+                f"Zonen {', '.join(chosen.zones) or 'keine'}",
+                f"Warmwasser {chosen.hot_water or 'keins'}",
+                f"Außentemperatur {chosen.outdoor_temperature or 'keine'}",
+                f"Leistung {chosen.power or 'keine'}",
+            ]
+            self._log.add(LogCategory.SETTINGS, f"myVAILLANT-Entitäten: {'; '.join(parts)}.")
+        if self.device is not None:
+            self.device.settings_changed()
+        self.watch()
+        return after
+
+    def change_connection(self, connection: Connection) -> Settings:
+        """Save the chosen connection; a new one takes effect when the app has restarted."""
+        before = self._settings.current.connection
+        after = self._settings.update(lambda settings: replace(settings, connection=connection))
+        if before is not connection:
+            names = {Connection.EEBUS: "EEBUS", Connection.MYVAILLANT: "myVAILLANT"}
+            self._log.add(LogCategory.SETTINGS, f"Anbindung: {names[connection]}.")
+        return after
 
     async def location(self) -> tuple[float, float] | None:
         """Home Assistant's home location, to fill in the coordinates for Open-Meteo."""

@@ -28,7 +28,7 @@ from typing import Any
 from vaillant_eebus.energy import EnergyMeter
 from vaillant_eebus.ha_import import HomeAssistantImport
 from vaillant_eebus.hems.timeline import local_midnight
-from vaillant_eebus.state import StateService
+from vaillant_eebus.state import StateHub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class DemandModel:
 class DayRecorder:
     def __init__(
         self,
-        state: StateService,
+        state: StateHub,
         importer: HomeAssistantImport,
         energy: EnergyMeter,
         data_dir: Path,

@@ -13,6 +13,8 @@ export BRIDGE_SERIAL_FILE="/data/eebus/serial"
 # TLS certificate and token of the bridge's gRPC API (oneshot init-grpc-credentials).
 export BRIDGE_CREDENTIALS_DIR="/data/eebus/grpc"
 export SHIP_PORT="4712"
+# Restarted by the backend when the connection (EEBUS or myVAILLANT) changes.
+export BRIDGE_SERVICE_DIR="/run/service/eebus-bridge"
 export DATA_DIR="/data"
 # Ingress: the Supervisor connects to the host's address in the hassio network
 # and is the only accepted client. HTTP_PORT must match ingress_port in config.yaml.

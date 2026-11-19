@@ -1,10 +1,12 @@
 """Access to Home Assistant Core through the Supervisor (spec 6.3).
 
 The app reads the states of the entities the user chose and reports its own
-sensors. It never changes other entities: set_state() and remove_state()
-refuse every entity outside this app's prefix. The only service it calls is
-weather.get_forecasts, which reads a weather forecast for the energy
-management.
+sensors: set_state() and remove_state() refuse every entity outside this
+app's prefix. It calls two kinds of services: weather.get_forecasts, which
+reads a weather forecast for the energy management, and - with the
+connection myVAILLANT - the few services in DEVICE_SERVICES that control the
+heat pump through the myVAILLANT integration's entities. Those are called
+only by the write gate (write_gate.py through myvaillant.py; a test checks it).
 
 One WebSocket connection carries the state changes of the watched entities
 and the "homeassistant_started" event; the REST API serves single states, the
@@ -28,6 +30,7 @@ from typing import Any
 import aiohttp
 
 from vaillant_eebus.bridge_client import Backoff
+from vaillant_eebus.ids import CLIMATE_ENTITY, WATER_HEATER_ENTITY
 from vaillant_eebus.log_store import LogCategory, LogStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,14 +41,43 @@ SUPERVISOR_CORE_URL = "http://supervisor/core"
 OWN_ENTITY = re.compile(r"^(sensor|binary_sensor)\.vaillant_eebus_[a-z0-9_]+$")
 # Entities whose forecast the app may ask for.
 WEATHER_ENTITY = re.compile(r"^weather\.[a-z0-9_]+$")
+# The services that control the heat pump through the myVAILLANT integration,
+# and the entities each one may target. No other service changes anything.
+DEVICE_SERVICES: dict[tuple[str, str], re.Pattern[str]] = {
+    ("climate", "set_temperature"): CLIMATE_ENTITY,
+    ("climate", "set_hvac_mode"): CLIMATE_ENTITY,
+    ("water_heater", "set_temperature"): WATER_HEATER_ENTITY,
+    ("water_heater", "set_operation_mode"): WATER_HEATER_ENTITY,
+    ("mypyllant", "set_quick_veto"): CLIMATE_ENTITY,
+    ("mypyllant", "cancel_quick_veto"): CLIMATE_ENTITY,
+}
 # Seconds between reading the watched entities again.
 REFRESH_INTERVAL = 300.0
 # Seconds to wait for an answer of Home Assistant.
 REQUEST_TIMEOUT = 10.0
+# A device service waits for the Vaillant cloud and the integration's refresh after it.
+DEVICE_SERVICE_TIMEOUT = 30.0
+# Answers that mean Home Assistant refused the call before the integration acted.
+_REFUSED = frozenset({400, 401, 403, 404, 405})
 
 
 class HomeAssistantUnavailable(Exception):
     """Home Assistant cannot be reached or refused the request."""
+
+
+class ServiceCallFailed(Exception):
+    """A device service failed.
+
+    executed is False when the command certainly did not reach the heat pump
+    (Home Assistant refused it or was not reachable), None when that is unknown
+    (an error of the integration or the cloud, or no answer in time).
+    """
+
+    def __init__(self, message: str, *, executed: bool | None, code: str) -> None:
+        super().__init__(message)
+        self.executed = executed
+        # Short reason for the protocol, e.g. "HTTP 500" or "TIMEOUT".
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,8 +199,8 @@ class HomeAssistantClient:
     async def hourly_forecast(self, entity_id: str) -> list[dict[str, Any]]:
         """The hourly forecast of a weather entity.
 
-        weather.get_forecasts is the only service this app calls; it reads and
-        changes nothing (a test checks that no other service is called).
+        weather.get_forecasts reads and changes nothing; apart from it the app
+        calls only DEVICE_SERVICES (a test checks that no other service is called).
         """
         if not WEATHER_ENTITY.match(entity_id):
             raise ValueError(f"{entity_id!r} is not a weather entity")
@@ -185,6 +217,39 @@ class HomeAssistantClient:
         if not isinstance(forecast, list):
             raise HomeAssistantUnavailable(f"no hourly forecast from {entity_id}")
         return [item for item in forecast if isinstance(item, dict)]
+
+    async def call_device_service(self, domain: str, service: str, entity_id: str, data: Mapping[str, Any]) -> None:
+        """Call one of DEVICE_SERVICES on a myVAILLANT entity; only the write gate does this.
+
+        Raises ValueError for any other service or entity, ServiceCallFailed when the call failed.
+        """
+        pattern = DEVICE_SERVICES.get((domain, service))
+        if pattern is None:
+            raise ValueError(f"{domain}.{service} is not a service this app may call")
+        if not pattern.match(entity_id):
+            raise ValueError(f"{domain}.{service} may not target {entity_id!r}")
+        if self._session is None:
+            raise ServiceCallFailed("client not started", executed=False, code="NOT_STARTED")
+        try:
+            async with self._session.post(
+                f"{self._url}/api/services/{domain}/{service}",
+                json={"entity_id": entity_id, **data},
+                timeout=aiohttp.ClientTimeout(total=DEVICE_SERVICE_TIMEOUT),
+            ) as response:
+                if response.status in _REFUSED:
+                    raise ServiceCallFailed(
+                        f"{domain}.{service}: HTTP {response.status}", executed=False, code=f"HTTP {response.status}"
+                    )
+                if response.status >= 400:
+                    raise ServiceCallFailed(
+                        f"{domain}.{service}: HTTP {response.status}", executed=None, code=f"HTTP {response.status}"
+                    )
+        except aiohttp.ClientConnectorError as err:
+            raise ServiceCallFailed(f"{domain}.{service}: {err!r}", executed=False, code="NOT_REACHABLE") from err
+        except TimeoutError as err:
+            raise ServiceCallFailed(f"{domain}.{service}: no answer in time", executed=None, code="TIMEOUT") from err
+        except aiohttp.ClientError as err:
+            raise ServiceCallFailed(f"{domain}.{service}: {err!r}", executed=None, code="CONNECTION_LOST") from err
 
     async def history(self, entity_id: str, start: datetime, end: datetime) -> list[tuple[datetime, str]]:
         """The entity's state at start and every change until end, oldest first (spec 6.3)."""

@@ -146,6 +146,19 @@ def test_zones_shift_only_in_operation_mode_on() -> None:
     assert result.notes["6.1.1"] == "Der Planer verschiebt Zonen nur in der Betriebsart Ein."
 
 
+def test_with_myvaillant_zones_in_auto_are_shifted_too() -> None:
+    zones = [
+        ZoneView(id="climate.zone_1", label="Zone 1", mode="auto", writable=True, auto_override=True),
+        ZoneView(id="climate.zone_2", label="Zone 2", mode="off", writable=True, auto_override=True),
+    ]
+
+    result = plan(surplus=flat(3000.0), device=replace(DEVICE, zones=zones))
+
+    assert {block.action for block in blocks(result, "climate.zone_1")} == {Action.RAISE}
+    assert blocks(result, "climate.zone_2") == []
+    assert result.notes["climate.zone_2"] == "Der Planer verschiebt Zonen nur in den Betriebsarten Ein und Auto."
+
+
 def test_zones_are_not_shifted_above_the_heating_limit() -> None:
     result = plan(surplus=flat(3000.0), outdoor=flat(17.0))
 

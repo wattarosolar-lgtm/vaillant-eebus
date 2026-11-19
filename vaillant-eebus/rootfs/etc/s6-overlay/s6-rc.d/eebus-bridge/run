@@ -10,6 +10,16 @@ readonly SERIAL_FILE="${DATA_DIR}/serial"
 # Must match BRIDGE_CREDENTIALS_DIR in ../backend/run and init-grpc-credentials.
 readonly GRPC_DIR="${DATA_DIR}/grpc"
 readonly CONFIG_FILE="/etc/eebus-bridge/config.yaml"
+readonly SETTINGS_FILE="/data/settings.json"
+
+# With the connection myVAILLANT the app does not use EEBUS: the bridge stays
+# idle and neither announces itself nor listens. The backend restarts this
+# service when the connection changes. A missing or unreadable file means EEBUS.
+connection="$(jq -r '.connection // "eebus"' "${SETTINGS_FILE}" 2>/dev/null || echo eebus)"
+if [ "${connection}" = "myvaillant" ]; then
+    bashio::log.info "Connection myVAILLANT: EEBUS bridge not started"
+    exec sleep infinity
+fi
 
 mkdir -p "${CERT_DIR}" "$(dirname "${CONFIG_FILE}")"
 

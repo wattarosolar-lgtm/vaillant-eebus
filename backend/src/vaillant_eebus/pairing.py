@@ -63,6 +63,10 @@ class ConnectionState(StrEnum):
     TRUST_REMOVED = "trust_removed"
     # The bridge gave up recovering the connection.
     FAILED = "failed"
+    # Connection myVAILLANT: no entities chosen yet.
+    NOT_CONFIGURED = "not_configured"
+    # Connection myVAILLANT: Home Assistant is not reachable (or the app runs outside it).
+    HA_UNAVAILABLE = "ha_unavailable"
 
 
 @dataclass(frozen=True, slots=True)

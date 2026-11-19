@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from vaillant_eebus.hems.config import HemsSettings, hems_from_json, hems_to_json
-from vaillant_eebus.ids import ENTITY_ID, ZONE_ID
+from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +26,15 @@ class OperatingMode(StrEnum):
     DEMO = "demo"
     # Reads and writes to the heat pump.
     LIVE = "live"
+
+
+class Connection(StrEnum):
+    """How the app reaches the heat pump."""
+
+    # Through the myVAILLANT integration's entities in Home Assistant (Vaillant cloud).
+    MYVAILLANT = "myvaillant"
+    # Locally over EEBUS with this app's bridge and a paired gateway.
+    EEBUS = "eebus"
 
 
 class ExportGroup(StrEnum):
@@ -54,6 +64,7 @@ DEFAULT_EXPORT = frozenset(
 )
 
 ROOM_NAME_MAX = 60
+MYVAILLANT_ZONES_MAX = 10
 # Heat sensors that are added up, e.g. heating and hot water of the myVAILLANT integration.
 HEAT_SENSORS_MAX = 4
 
@@ -70,7 +81,33 @@ class Room:
 
 
 @dataclass(frozen=True, slots=True)
+class MyVaillantEntities:
+    """The myVAILLANT integration's entities the app reads and controls."""
+
+    # Climate entities, one per heating zone; their IDs are the zones' IDs.
+    zones: tuple[str, ...] = ()
+    hot_water: str | None = None
+    outdoor_temperature: str | None = None
+    # Electrical power of the heat pump in W or kW; any power sensor, optional.
+    power: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.zones) or self.hot_water is not None
+
+    def all(self) -> frozenset[str]:
+        return frozenset(
+            entity
+            for entity in (*self.zones, self.hot_water, self.outdoor_temperature, self.power)
+            if entity is not None
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
+    # None until the user chose in the setup wizard; settings of older versions mean EEBUS.
+    connection: Connection | None = None
+    myvaillant: MyVaillantEntities = MyVaillantEntities()
     # SKI of the gateway the user paired, normalized to upper case.
     paired_ski: str | None = None
     # A new installation starts in demo; the app keeps the last chosen mode.
@@ -131,6 +168,8 @@ class SettingsStore:
             if not isinstance(mode, str):
                 raise ValueError("operating_mode is not a string")
             return Settings(
+                connection=_connection(data),
+                myvaillant=myvaillant_from_json(data.get("myvaillant")),
                 paired_ski=paired_ski,
                 operating_mode=OperatingMode(mode),
                 rooms=_rooms(data.get("rooms", [])),
@@ -167,6 +206,68 @@ def valid_room(room: Room) -> bool:
         and 0 < len(room.name.strip()) <= ROOM_NAME_MAX
         and (room.zone_id is None or ZONE_ID.match(room.zone_id) is not None)
     )
+
+
+def valid_myvaillant(entities: MyVaillantEntities) -> bool:
+    return (
+        len(entities.zones) <= MYVAILLANT_ZONES_MAX
+        and len(set(entities.zones)) == len(entities.zones)
+        and all(CLIMATE_ENTITY.match(zone) for zone in entities.zones)
+        and (entities.hot_water is None or WATER_HEATER_ENTITY.match(entities.hot_water) is not None)
+        and all(
+            entity is None or SENSOR_ENTITY.match(entity) is not None
+            for entity in (entities.outdoor_temperature, entities.power)
+        )
+    )
+
+
+def _connection(data: dict[str, Any]) -> Connection | None:
+    raw = data.get("connection", Connection.EEBUS.value)
+    if raw is None:
+        return None
+    if raw not in {connection.value for connection in Connection}:
+        _LOGGER.warning("Settings: unknown connection %r, using EEBUS", raw)
+        return Connection.EEBUS
+    return Connection(raw)
+
+
+def myvaillant_from_json(raw: Any) -> MyVaillantEntities:
+    """The saved myVAILLANT entities; invalid entries are dropped one by one."""
+    if raw is None:
+        return MyVaillantEntities()
+    if not isinstance(raw, dict):
+        _LOGGER.warning("Settings: myvaillant is not an object, ignored")
+        return MyVaillantEntities()
+    zones: list[str] = []
+    raw_zones = raw.get("zones", [])
+    for zone in raw_zones if isinstance(raw_zones, list) else []:
+        if isinstance(zone, str) and CLIMATE_ENTITY.match(zone) and zone not in zones:
+            zones.append(zone)
+        else:
+            _LOGGER.warning("Settings: invalid myVAILLANT zone %r ignored", zone)
+
+    def single(key: str, pattern: re.Pattern[str]) -> str | None:
+        value = raw.get(key)
+        if value is None or (isinstance(value, str) and pattern.match(value)):
+            return value
+        _LOGGER.warning("Settings: invalid myVAILLANT %s %r ignored", key, value)
+        return None
+
+    return MyVaillantEntities(
+        zones=tuple(zones[:MYVAILLANT_ZONES_MAX]),
+        hot_water=single("hot_water", WATER_HEATER_ENTITY),
+        outdoor_temperature=single("outdoor_temperature", SENSOR_ENTITY),
+        power=single("power", SENSOR_ENTITY),
+    )
+
+
+def myvaillant_to_json(entities: MyVaillantEntities) -> dict[str, Any]:
+    return {
+        "zones": list(entities.zones),
+        "hot_water": entities.hot_water,
+        "outdoor_temperature": entities.outdoor_temperature,
+        "power": entities.power,
+    }
 
 
 def _rooms(raw: Any) -> tuple[Room, ...]:
@@ -218,6 +319,8 @@ def _export(raw: Any) -> frozenset[ExportGroup]:
 
 def _to_json(settings: Settings) -> dict[str, Any]:
     return {
+        "connection": settings.connection.value if settings.connection is not None else None,
+        "myvaillant": myvaillant_to_json(settings.myvaillant),
         "paired_ski": settings.paired_ski,
         "operating_mode": settings.operating_mode.value,
         "rooms": [{"entity_id": room.entity_id, "name": room.name, "zone_id": room.zone_id} for room in settings.rooms],

@@ -32,8 +32,8 @@ from vaillant_eebus.hems.timeline import SLOT, horizon, local_day, local_midnigh
 from vaillant_eebus.hems.weather import OPEN_METEO_URL, WeatherForecasts
 from vaillant_eebus.home_assistant import POWER_SENSOR, HomeAssistant
 from vaillant_eebus.log_store import LogCategory, LogStore
-from vaillant_eebus.settings import ExportGroup, OperatingMode, SettingsStore
-from vaillant_eebus.state import HeatPumpState, StateService
+from vaillant_eebus.settings import Connection, ExportGroup, OperatingMode, SettingsStore
+from vaillant_eebus.state import HeatPumpState, StateHub
 from vaillant_eebus.write_gate import WriteGate
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ class HemsService:
     def __init__(
         self,
         settings: SettingsStore,
-        state: StateService,
+        state: StateHub,
         gate: WriteGate,
         energy: EnergyMeter,
         home_assistant: HomeAssistant,
@@ -346,7 +346,7 @@ class HemsService:
             now,
             plan_slots,
             hems,
-            _device_view(heat_pump),
+            _device_view(heat_pump, auto_override=self._gate.connection is Connection.MYVAILLANT),
             zone=self._zone,
             dhw_base=dhw_base,
             dhw_done=self.executor.charged_days(preview=hems.mode is PlannerMode.PREVIEW),
@@ -489,7 +489,7 @@ def _price_problems(hems: HemsSettings, prices: list[float | None]) -> list[str]
             return []
 
 
-def _device_view(heat_pump: HeatPumpState) -> DeviceView:
+def _device_view(heat_pump: HeatPumpState, *, auto_override: bool = False) -> DeviceView:
     water = heat_pump.hot_water
     return DeviceView(
         zones=[
@@ -498,6 +498,7 @@ def _device_view(heat_pump: HeatPumpState) -> DeviceView:
                 label=zone.label,
                 mode=zone.mode,
                 writable=zone.setpoint is not None and zone.setpoint.writable,
+                auto_override=auto_override,
             )
             for zone in heat_pump.zones
         ],

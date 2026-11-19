@@ -49,11 +49,20 @@ from vaillant_eebus.hems.config import (
 from vaillant_eebus.hems.service import HemsService, HemsStatus
 from vaillant_eebus.history import PowerHistory
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
-from vaillant_eebus.ids import ENTITY_ID, ZONE_ID
+from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore, csv_document
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
-from vaillant_eebus.settings import HEAT_SENSORS_MAX, ROOM_NAME_MAX, ExportGroup, OperatingMode, Room
-from vaillant_eebus.state import HeatPumpState, StateService
+from vaillant_eebus.settings import (
+    HEAT_SENSORS_MAX,
+    MYVAILLANT_ZONES_MAX,
+    ROOM_NAME_MAX,
+    Connection,
+    ExportGroup,
+    MyVaillantEntities,
+    OperatingMode,
+    Room,
+)
+from vaillant_eebus.state import HeatPumpState, StateHub
 from vaillant_eebus.write_gate import (
     ControlCompressor,
     PendingWrite,
@@ -65,6 +74,7 @@ from vaillant_eebus.write_gate import (
     SetZoneMode,
     SetZoneSetpoint,
     WriteGate,
+    WriteNotExecuted,
     WriteOutcomeUnknown,
     WriteRejected,
     WriteResult,
@@ -81,6 +91,7 @@ _BRIDGE_ERRORS: dict[grpc.StatusCode, tuple[int, str]] = {
     grpc.StatusCode.NOT_FOUND: (404, "Die EEBUS-Bridge kennt das gekoppelte Gateway nicht."),
 }
 _BRIDGE_ERROR_DEFAULT = (502, "Die EEBUS-Bridge hat einen Fehler gemeldet.")
+NO_PAIRING_MESSAGE = "Mit der Anbindung myVAILLANT gibt es keine Kopplung und keinen Diagnose-Dump."
 FOREIGN_BRIDGE_MESSAGE = (
     "Unter der Adresse dieser App antwortet eine fremde EEBUS-Bridge. Vermutlich läuft eine andere EEBUS-App; "
     "bitte diese stoppen und diese App neu starten."
@@ -137,8 +148,31 @@ class CompressorRequest(WriteRequest):
     start_time: AwareDatetime | None = None
 
 
-# The bridge's zone ID: the SPINE address of the zone's room entity, e.g. "5.1.1".
+# A zone's ID: the SPINE address of the zone's room entity (EEBUS, e.g. "5.1.1")
+# or its climate entity (myVAILLANT).
 ZoneId = Annotated[str, PathParam(pattern=ZONE_ID.pattern)]
+
+
+class MyVaillantModel(BaseModel):
+    zones: list[Annotated[str, Field(pattern=CLIMATE_ENTITY.pattern)]] = Field(
+        default=[], max_length=MYVAILLANT_ZONES_MAX
+    )
+    hot_water: str | None = Field(default=None, pattern=WATER_HEATER_ENTITY.pattern)
+    outdoor_temperature: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    power: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+
+    def entities(self) -> MyVaillantEntities:
+        return MyVaillantEntities(
+            zones=tuple(self.zones),
+            hot_water=self.hot_water,
+            outdoor_temperature=self.outdoor_temperature,
+            power=self.power,
+        )
+
+
+class ConnectionRequest(BaseModel):
+    connection: Connection
+    myvaillant: MyVaillantModel = MyVaillantModel()
 
 
 class RoomModel(BaseModel):
@@ -211,6 +245,20 @@ class Location:
 
 
 @dataclass(frozen=True, slots=True)
+class ConnectionStatus:
+    # None until chosen in the setup wizard (the app then works like EEBUS).
+    connection: Connection | None
+    # The connection the app works with right now; another one takes effect after the restart.
+    active: Connection
+    state: ConnectionState
+    myvaillant: MyVaillantEntities
+    # False outside Home Assistant: myVAILLANT cannot be used.
+    home_assistant_available: bool
+    # True when the app restarts to change the connection.
+    restarting: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class SettingsStatus:
     rooms: list[Room]
     heat_energy_entities: list[str]
@@ -241,6 +289,8 @@ class UiFiles(StaticFiles):
 @dataclass(frozen=True, slots=True)
 class ApiState:
     connection: ConnectionState
+    # EEBUS or myVAILLANT: where the values come from.
+    link: Connection
     mode: OperatingMode
     # Sent values the device has not reported yet.
     pending: list[PendingWrite]
@@ -264,7 +314,7 @@ class _Client(Protocol):
 
 async def state_events(
     client: _Client,
-    state: StateService,
+    state: StateHub,
     api_state: Callable[[HeatPumpState | None], Awaitable[ApiState]],
     *,
     keepalive: float = SSE_KEEPALIVE,
@@ -297,7 +347,7 @@ async def state_events(
 
 def create_app(
     pairing: PairingService,
-    state: StateService,
+    state: StateHub,
     gate: WriteGate,
     log: LogStore,
     energy: EnergyMeter,
@@ -307,9 +357,33 @@ def create_app(
     trusted_clients: frozenset[str],
     zone: tzinfo = UTC,
     hems: HemsService | None = None,
+    restart: Callable[[], None] | None = None,
 ) -> FastAPI:
-    """zone is Home Assistant's time zone: protocol days and downloaded times are local."""
+    """zone is Home Assistant's time zone: protocol days and downloaded times are local.
+    restart stops the backend so that s6 starts it again (to change the connection)."""
     app = FastAPI(title="Vaillant EEBUS", docs_url=None, redoc_url=None, openapi_url=None)
+    device = home_assistant.device
+    restarting = False
+
+    async def connection_state() -> ConnectionState:
+        if device is not None:
+            return device.connection_state()
+        return (await pairing.status()).state
+
+    def require_eebus() -> None:
+        if gate.connection is not Connection.EEBUS:
+            raise WriteRejected(409, NO_PAIRING_MESSAGE)
+
+    async def connection_status() -> ConnectionStatus:
+        current = home_assistant.settings
+        return ConnectionStatus(
+            connection=current.connection,
+            active=gate.connection,
+            state=await connection_state(),
+            myvaillant=current.myvaillant,
+            home_assistant_available=home_assistant.available,
+            restarting=restarting,
+        )
 
     def energy_management() -> HemsService:
         if hems is None:
@@ -320,7 +394,8 @@ def create_app(
         electricity = energy.today()
         values = home_assistant.snapshot()
         return ApiState(
-            connection=(await pairing.status()).state,
+            connection=await connection_state(),
+            link=gate.connection,
             mode=gate.mode,
             pending=gate.pending,
             heat_pump=heat_pump,
@@ -347,8 +422,45 @@ def create_app(
             return PlainTextResponse("Forbidden", status_code=403)
         return await call_next(request)
 
+    @app.get("/api/connection")
+    async def get_connection() -> ConnectionStatus:
+        return await connection_status()
+
+    @app.put("/api/connection")
+    async def put_connection(request: ConnectionRequest) -> ConnectionStatus:
+        """Choose EEBUS or myVAILLANT and the myVAILLANT entities; a new connection restarts the app."""
+        nonlocal restarting
+        entities = request.myvaillant.entities()
+        if len(set(entities.zones)) != len(entities.zones):
+            raise WriteRejected(422, "Jede Zone kann nur einmal gewählt werden.")
+        if request.connection is Connection.MYVAILLANT:
+            if not home_assistant.available:
+                raise WriteRejected(409, "myVAILLANT geht nur, wenn die App in Home Assistant läuft.")
+            if not entities.configured:
+                raise WriteRejected(422, "Bitte mindestens eine Zone oder das Warmwasser von myVAILLANT wählen.")
+        home_assistant.change_myvaillant(entities)
+        before = home_assistant.settings.connection
+        if request.connection is not gate.connection:
+            if hems is not None:
+                await hems.release("Wechsel der Anbindung")
+            if gate.mode is OperatingMode.LIVE:
+                # The new way is checked in demo mode first; live needs a new confirmation.
+                gate.set_mode(OperatingMode.DEMO, confirm=False)
+            home_assistant.change_connection(request.connection)
+            restarting = True
+            if restart is not None:
+                restart()
+        elif before is not request.connection:
+            home_assistant.change_connection(request.connection)
+        return await connection_status()
+
+    @app.get("/api/myvaillant/discover")
+    async def discover_myvaillant() -> MyVaillantEntities:
+        return await home_assistant.discover_myvaillant()
+
     @app.get("/api/pairing")
     async def get_pairing() -> PairingStatus:
+        require_eebus()
         return await pairing.status()
 
     @app.get("/api/state")
@@ -365,6 +477,7 @@ def create_app(
 
     @app.post("/api/pairing/register")
     async def register_gateway(request: RegisterRequest) -> PairingStatus:
+        require_eebus()
         return await pairing.pair(request.ski)
 
     @app.get("/api/mode")
@@ -442,7 +555,9 @@ def create_app(
 
     @app.get("/api/ha/entities")
     async def get_ha_entities(
-        kind: Literal["temperature", "energy", "power", "battery", "price", "pv_forecast", "weather"],
+        kind: Literal[
+            "temperature", "energy", "power", "battery", "price", "pv_forecast", "weather", "climate", "water_heater"
+        ],
         q: Annotated[str, Query(max_length=100)] = "",
     ) -> list[EntityChoice]:
         return await home_assistant.entities(kind, q)
@@ -509,6 +624,7 @@ def create_app(
 
     @app.get("/api/diagnostics/dump")
     async def download_dump() -> Response:
+        require_eebus()
         dump = await pairing.diagnostic_dump()
         return Response(
             content=dump.content,
@@ -525,13 +641,21 @@ def create_app(
 
     @app.exception_handler(WriteOutcomeUnknown)
     async def write_outcome_unknown(_request: Request, exc: Exception) -> JSONResponse:
-        code = exc.code.name if isinstance(exc, WriteOutcomeUnknown) else "UNKNOWN"
+        code = exc.code_name if isinstance(exc, WriteOutcomeUnknown) else "UNKNOWN"
         return JSONResponse(
             {
                 "detail": "Ob die Änderung bei der Wärmepumpe angekommen ist, ist unklar "
                 f"(Fehlercode {code}). Die App prüft, ob die Wärmepumpe den Wert meldet."
             },
             status_code=504,
+        )
+
+    @app.exception_handler(WriteNotExecuted)
+    async def write_not_executed(_request: Request, exc: Exception) -> JSONResponse:
+        code = exc.code if isinstance(exc, WriteNotExecuted) else "UNKNOWN"
+        return JSONResponse(
+            {"detail": f"Home Assistant hat den Befehl nicht ausgeführt ({code}); an der Wärmepumpe bleibt alles."},
+            status_code=502,
         )
 
     @app.exception_handler(WriteRejected)

@@ -6,6 +6,10 @@ weather.get_forecasts, authentication,
 subscribe_trigger for state changes, subscribe_events for
 homeassistant_started, and a restart that drops every connection and every
 state the app set (the history stays, as in the recorder).
+
+add_myvaillant() adds the entities of the myVAILLANT integration like the
+real installation (two zones, hot water, outdoor temperature, power); the
+services on them change the states as the integration does.
 """
 
 from __future__ import annotations
@@ -20,6 +24,15 @@ from typing import Any
 from aiohttp import WSMsgType, web
 
 TOKEN = "fake-supervisor-token"
+
+MV_ZONE_1 = "climate.zuhause_zone_1_climate"
+MV_ZONE_2 = "climate.zuhause_zone_2_climate"
+MV_HOT_WATER = "water_heater.zuhause_domestic_hot_water_0"
+MV_OUTDOOR = "sensor.zuhause_outdoor_temperature"
+MV_POWER = "sensor.zuhause_device_0_arotherm_split_plus_current_power"
+# The integration's default length of a quick veto.
+QUICK_VETO_HOURS = 3.0
+_DHW_OPERATIONS = ["Manual", "Time Controlled", "Off", "Cylinder Boost"]
 
 
 @dataclass
@@ -46,6 +59,10 @@ class FakeHomeAssistant:
         self.forecasts: dict[str, list[dict[str, Any]]] = {}
         # Every service call: (domain.service, body, query).
         self.service_calls: list[tuple[str, dict[str, Any], dict[str, str]]] = []
+        # domain.service -> HTTP status to answer instead of carrying the call out.
+        self.service_status: dict[str, int] = {}
+        # Climate entity -> the setpoint of its time program (shown again after a quick veto).
+        self.programs: dict[str, float] = {}
         self.connections = 0
         self.refuse_auth = False
         self._sockets: list[_Socket] = []
@@ -107,6 +124,56 @@ class FakeHomeAssistant:
             self._notify(entity_id, old, new)
         if old is None or old["state"] != state:
             self.history.setdefault(entity_id, []).append((at, state))
+
+    def add_myvaillant(self) -> None:
+        """The myVAILLANT integration's entities: zone 1 in auto, zone 2 in manual at 23 °C."""
+        zone = {
+            "hvac_modes": ["off", "heat_cool", "auto"],
+            "preset_modes": ["boost", "none", "away", "system_off", "ventilation_boost"],
+            "preset_mode": "none",
+            "min_temp": 7,
+            "max_temp": 35,
+            "target_temp_step": 0.5,
+            "time_program_heating": {"monday": []},
+            "quick_veto_start_date_time": None,
+            "quick_veto_end_date_time": None,
+            "holiday_start_date_time": None,
+            "holiday_end_date_time": None,
+        }
+        self.programs[MV_ZONE_1] = 21.5
+        self.set(
+            MV_ZONE_1,
+            "auto",
+            name="Zuhause Zone 1 (Circuit 0) Climate",
+            attributes={**zone, "temperature": 21.5, "current_temperature": 21.0},
+        )
+        self.set(
+            MV_ZONE_2,
+            "heat_cool",
+            name="Zuhause Zone 2 (Circuit 1) Climate",
+            attributes={**zone, "temperature": 23.0, "current_temperature": 22.4},
+        )
+        self.set(
+            MV_HOT_WATER,
+            "Time Controlled",
+            name="Zuhause Domestic Hot Water 0",
+            attributes={
+                "operation_list": list(_DHW_OPERATIONS),
+                "operation_mode": "Time Controlled",
+                "temperature": 50,
+                "current_temperature": 47.5,
+                "min_temp": 35,
+                "max_temp": 70,
+                "time_program_dhw": {"monday": []},
+            },
+        )
+        self.set(MV_OUTDOOR, "4.5", unit="°C", name="Zuhause Outdoor Temperature")
+        self.set(MV_POWER, "850", unit="W", name="Zuhause Device 0 aroTHERM Split plus Current Power")
+
+    def change(self, entity_id: str, state: str | None = None, **attributes: Any) -> None:
+        """Change an entity's state or some of its attributes, keeping the rest."""
+        old = self.states[entity_id]
+        self.set(entity_id, old["state"] if state is None else state, attributes={**old["attributes"], **attributes})
 
     def remove(self, entity_id: str) -> None:
         old = self.states.pop(entity_id, None)
@@ -209,6 +276,13 @@ class FakeHomeAssistant:
         service = f"{request.match_info['domain']}.{request.match_info['service']}"
         body = await request.json()
         self.service_calls.append((service, body, dict(request.query)))
+        if service in self.service_status:
+            return web.json_response({"message": "Failed"}, status=self.service_status[service])
+        if service in _DEVICE_SERVICES:
+            if body.get("entity_id") not in self.states:
+                return web.json_response({"message": "Entity not found"}, status=400)
+            self._device_service(service, body)
+            return web.json_response([])
         if service != "weather.get_forecasts" or "return_response" not in request.query:
             return web.json_response({"message": "Service does not support responses"}, status=400)
         entity_id = body.get("entity_id")
@@ -216,6 +290,46 @@ class FakeHomeAssistant:
             return web.json_response({"message": "Entity not found"}, status=400)
         return web.json_response(
             {"changed_states": [], "service_response": {entity_id: {"forecast": self.forecasts[entity_id]}}}
+        )
+
+    def _device_service(self, service: str, body: dict[str, Any]) -> None:
+        """What the myVAILLANT integration does with the call (its local data, refreshed later)."""
+        entity_id = body["entity_id"]
+        state = self.states[entity_id]["state"]
+        now = datetime.now(UTC)
+        match service:
+            case "climate.set_temperature" if state == "heat_cool":
+                self.change(entity_id, temperature=body["temperature"])
+            case "climate.set_temperature":
+                end = now + timedelta(hours=QUICK_VETO_HOURS)
+                self._quick_veto(entity_id, float(body["temperature"]), end)
+            case "mypyllant.set_quick_veto":
+                end = now + timedelta(hours=float(body.get("duration_hours") or QUICK_VETO_HOURS))
+                self._quick_veto(entity_id, float(body["temperature"]), end)
+            case "mypyllant.cancel_quick_veto":
+                self.change(
+                    entity_id,
+                    preset_mode="none",
+                    temperature=self.programs.get(entity_id, 20.0),
+                    quick_veto_start_date_time=None,
+                    quick_veto_end_date_time=None,
+                )
+            case "climate.set_hvac_mode":
+                self.change(entity_id, body["hvac_mode"], preset_mode="none", quick_veto_end_date_time=None)
+            case "water_heater.set_temperature":
+                self.change(entity_id, temperature=int(body["temperature"]))
+            case "water_heater.set_operation_mode":
+                operation = body["operation_mode"]
+                attributes = {} if operation == "Cylinder Boost" else {"operation_mode": operation}
+                self.change(entity_id, operation, **attributes)
+
+    def _quick_veto(self, entity_id: str, celsius: float, end: datetime) -> None:
+        self.change(
+            entity_id,
+            preset_mode="boost",
+            temperature=celsius,
+            quick_veto_start_date_time=datetime.now(UTC).isoformat(),
+            quick_veto_end_date_time=end.isoformat(),
         )
 
     # --- WebSocket ---------------------------------------------------------------
@@ -300,6 +414,18 @@ class FakeHomeAssistant:
         for socket in list(self._sockets):
             await socket.ws.close()
         self._sockets.clear()
+
+
+_DEVICE_SERVICES = frozenset(
+    {
+        "climate.set_temperature",
+        "climate.set_hvac_mode",
+        "water_heater.set_temperature",
+        "water_heater.set_operation_mode",
+        "mypyllant.set_quick_veto",
+        "mypyllant.cancel_quick_veto",
+    }
+)
 
 
 async def start_fake_home_assistant(**kwargs: Any) -> FakeHomeAssistant:

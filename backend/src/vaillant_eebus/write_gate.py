@@ -15,8 +15,12 @@ device reports (zone, writable flag, limits, step, offered modes). Then:
 
 A caller states the mode it showed the user; a command decided in demo is
 never sent because the mode changed in between. Every attempt is in the
-protocol before it is sent. No other module calls the bridge client's write
-methods; a test checks that.
+protocol before it is sent.
+
+Two ways lead to the heat pump: the EEBUS bridge, or with the connection
+myVAILLANT a Link that calls the integration's services in Home Assistant
+(myvaillant.py). No other module calls the bridge client's write methods or a
+link's send_command(); tests check that.
 """
 
 from __future__ import annotations
@@ -30,14 +34,16 @@ from collections.abc import Callable, Hashable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Protocol
 
 import grpc
 
 from vaillant_eebus.bridge_client import BridgeClient
+from vaillant_eebus.ha_client import ServiceCallFailed
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.pairing import NotPairedError, PairingService
-from vaillant_eebus.settings import OperatingMode, SettingsStore
-from vaillant_eebus.state import MODE_NAMES, HeatPumpState, HotWater, Setpoint, StateService, Zone
+from vaillant_eebus.settings import Connection, OperatingMode, SettingsStore
+from vaillant_eebus.state import MODE_NAMES, HeatPumpState, HotWater, Setpoint, StateHub, Zone
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +51,10 @@ _LOGGER = logging.getLogger(__name__)
 RATE_LIMIT_S = 5.0
 # A sent value counts as not confirmed when the device does not report it in time.
 CONFIRM_TIMEOUT_S = 30.0
+# Through the Vaillant cloud a value takes longer to come back.
+LINK_CONFIRM_TIMEOUT_S = 90.0
+# Hours a temporary override (quick veto) may last.
+OVERRIDE_HOURS = (1.0, 24.0)
 
 # Errors after which the value certainly did not reach the device: the bridge
 # refused the request before sending it, or the device answered with a
@@ -96,6 +106,22 @@ class SetZoneSetpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class SetZoneOverride:
+    """myVAILLANT, zone in auto: a temporary setpoint (quick veto) for some hours."""
+
+    zone_id: str
+    celsius: float
+    hours: float
+
+
+@dataclass(frozen=True, slots=True)
+class EndZoneOverride:
+    """myVAILLANT: end a zone's temporary override; the zone follows its time program again."""
+
+    zone_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class SetZoneMode:
     zone_id: str
     mode: str
@@ -139,6 +165,8 @@ class ControlCompressor:
 
 type Command = (
     SetZoneSetpoint
+    | SetZoneOverride
+    | EndZoneOverride
     | SetZoneMode
     | SetHotWaterSetpoint
     | SetHotWaterMode
@@ -177,9 +205,33 @@ class WriteOutcomeUnknown(Exception):
     The gate keeps following the value like any sent value.
     """
 
-    def __init__(self, code: grpc.StatusCode) -> None:
-        super().__init__(code.name)
+    def __init__(self, code: grpc.StatusCode | str) -> None:
         self.code = code
+        # e.g. "INTERNAL" (bridge) or "HTTP 500" (Home Assistant).
+        self.code_name = code if isinstance(code, str) else code.name
+        super().__init__(self.code_name)
+
+
+class WriteNotExecuted(Exception):
+    """The command certainly did not reach the heat pump (a link's error; the
+    bridge's errors stay gRPC errors)."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class Link(Protocol):
+    """A way to the heat pump other than the EEBUS bridge (myVAILLANT)."""
+
+    @property
+    def connection(self) -> Connection: ...
+
+    def check(self, command: Command, heat_pump: HeatPumpState) -> None:
+        """Raise WriteRejected if this way cannot carry the command."""
+
+    async def send_command(self, command: Command) -> None:
+        """Send the command; raises ServiceCallFailed."""
 
 
 class WriteRejected(Exception):
@@ -198,6 +250,8 @@ class _Observed:
     value: Hashable
     # German, e.g. "Zone 2: Solltemperatur 23,0 °C".
     text: str
+    # A zone in auto without an override: its setpoint follows the time program.
+    program: bool = False
 
 
 @dataclass(slots=True)
@@ -215,20 +269,25 @@ class WriteGate:
         self,
         bridge: BridgeClient,
         pairing: PairingService,
-        state: StateService,
+        state: StateHub,
         settings: SettingsStore,
         log: LogStore,
         *,
+        link: Link | None = None,
         rate_limit_s: float = RATE_LIMIT_S,
-        confirm_timeout_s: float = CONFIRM_TIMEOUT_S,
+        confirm_timeout_s: float | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        """Without link the gate writes over EEBUS through the bridge."""
         self._bridge = bridge
         self._pairing = pairing
+        self._link = link
         self._state = state
         self._settings = settings
         self._log = log
         self._rate_limit_s = rate_limit_s
+        if confirm_timeout_s is None:
+            confirm_timeout_s = CONFIRM_TIMEOUT_S if link is None else LINK_CONFIRM_TIMEOUT_S
         self._confirm_timeout_s = confirm_timeout_s
         self._clock = clock
         self._locks: dict[_Key, asyncio.Lock] = {}
@@ -243,6 +302,11 @@ class WriteGate:
     @property
     def mode(self) -> OperatingMode:
         return self._settings.current.operating_mode
+
+    @property
+    def connection(self) -> Connection:
+        """The way this gate writes; fixed while the app runs."""
+        return Connection.EEBUS if self._link is None else self._link.connection
 
     @property
     def pending(self) -> list[PendingWrite]:
@@ -284,10 +348,10 @@ class WriteGate:
         key = _key(command)
         async with self._locks.setdefault(key, asyncio.Lock()):
             ski = self._pairing.paired_ski
-            if ski is None:
+            if self._link is None and ski is None:
                 raise NotPairedError
             heat_pump = self._state.current
-            description = _describe(command, heat_pump)
+            description = _describe(command, heat_pump, self.connection)
             if source is Source.PLANNER and not preview:
                 description += " (Planer)"
             try:
@@ -300,7 +364,9 @@ class WriteGate:
                     )
                 if heat_pump is None or not heat_pump.available or not heat_pump.connected:
                     raise WriteRejected(409, "Die Wärmepumpe ist gerade nicht verbunden.")
-                _validate(command, heat_pump)
+                _validate(command, heat_pump, self.connection)
+                if self._link is not None:
+                    self._link.check(command, heat_pump)
             except WriteRejected as rejected:
                 if preview:
                     self._log.add(
@@ -343,14 +409,17 @@ class WriteGate:
         return WriteResult(sent=False, mode=OperatingMode.DEMO, message=message, would_send=_payload(command))
 
     async def _send(
-        self, command: Command, key: _Key, ski: str, heat_pump: HeatPumpState, description: str
+        self, command: Command, key: _Key, ski: str | None, heat_pump: HeatPumpState, description: str
     ) -> WriteResult:
         target = _target(command)
         current = _device_values(heat_pump).get(key)
         pending = self._pending.get(key)
-        if target is not None and (
-            (current is not None and current.value == target) or (pending is not None and pending.target == target)
-        ):
+        # An override also sets how long it lasts, which the device's value does not show.
+        overrides = isinstance(command, SetZoneOverride | EndZoneOverride)
+        in_place = (current is not None and current.value == target) or (
+            pending is not None and pending.target == target
+        )
+        if target is not None and not overrides and in_place:
             message = f"Nicht gesendet, bereits eingestellt: {description}"
             self._log.add(LogCategory.WRITE, message)
             return WriteResult(sent=False, mode=OperatingMode.LIVE, message=message)
@@ -371,7 +440,24 @@ class WriteGate:
         # of the app in the middle of a write leaves a trace.
         await self._log.record(LogCategory.WRITE, f"Wird gesendet: {description}")
         try:
-            await _call_bridge(self._bridge, ski, command)
+            if self._link is not None:
+                await self._link.send_command(command)
+            else:
+                assert ski is not None
+                await _call_bridge(self._bridge, ski, command)
+        except ServiceCallFailed as err:
+            if err.executed is False:
+                _LOGGER.warning("Write not executed (%s): %s", err, description)
+                self._log.add(LogCategory.WRITE, f"Nicht ausgeführt: {description} ({err.code})", problem=True)
+                raise WriteNotExecuted(err.code) from err
+            _LOGGER.warning("Write outcome unknown (%s): %s", err, description)
+            self._log.add(
+                LogCategory.WRITE,
+                f"Ergebnis unbekannt: {description} ({err.code}); die App prüft, ob die Wärmepumpe den Wert meldet.",
+                problem=True,
+            )
+            self._follow(command, key, target, description, now)
+            raise WriteOutcomeUnknown(err.code) from err
         except grpc.aio.AioRpcError as err:
             code = err.code()
             if code in _NOT_EXECUTED:
@@ -436,6 +522,10 @@ class WriteGate:
                         problem=True,
                     )
             elif previous is not None and previous.value != observed.value:
+                if self.connection is Connection.MYVAILLANT and previous.program and observed.program:
+                    # The time program moved on; nobody changed anything.
+                    self._last_values[key] = observed
+                    continue
                 self._log.add(
                     LogCategory.DEVICE, f"Am Gerät geändert: {observed.text} (vorher {_value_part(previous)})"
                 )
@@ -476,7 +566,7 @@ class WriteGate:
 
 def _key(command: Command) -> _Key:
     match command:
-        case SetZoneSetpoint(zone_id=zone_id):
+        case SetZoneSetpoint(zone_id=zone_id) | SetZoneOverride(zone_id=zone_id) | EndZoneOverride(zone_id=zone_id):
             return Control.ZONE_SETPOINT, zone_id
         case SetZoneMode(zone_id=zone_id):
             return Control.ZONE_MODE, zone_id
@@ -498,8 +588,11 @@ def _target(command: Command) -> Hashable | None:
     """The command's value in the comparable form of _device_values(); None if the
     device reports nothing to confirm it with."""
     match command:
-        case SetZoneSetpoint(celsius=celsius) | SetHotWaterSetpoint(celsius=celsius):
+        case SetZoneSetpoint(celsius=celsius) | SetZoneOverride(celsius=celsius) | SetHotWaterSetpoint(celsius=celsius):
             return round(celsius, 3)
+        case EndZoneOverride():
+            # The zone returns to its time program, whose value the app does not know beforehand.
+            return None
         case SetZoneMode(mode=mode) | SetHotWaterMode(mode=mode):
             return mode
         case SetHotWaterBoost(active=active):
@@ -520,6 +613,7 @@ def _device_values(heat_pump: HeatPumpState) -> dict[_Key, _Observed]:
             values[Control.ZONE_SETPOINT, zone.id] = _Observed(
                 round(zone.setpoint.value, 3),
                 f"{zone.label}: Solltemperatur {_celsius(zone.setpoint.value, zone.setpoint)}",
+                program=zone.mode == "auto" and not zone.override,
             )
         if zone.mode is not None:
             values[Control.ZONE_MODE, zone.id] = _Observed(
@@ -554,19 +648,39 @@ def _device_values(heat_pump: HeatPumpState) -> dict[_Key, _Observed]:
     return values
 
 
-def _validate(command: Command, heat_pump: HeatPumpState) -> None:
+def _validate(command: Command, heat_pump: HeatPumpState, connection: Connection) -> None:
+    myvaillant = connection is Connection.MYVAILLANT
     match command:
         case SetZoneSetpoint(zone_id=zone_id, celsius=celsius):
             zone = _zone(heat_pump, zone_id)
             # In auto the zone follows its time program, which is not exposed
             # over EEBUS; the setpoint only takes effect in "on" (field test 0.5.1).
-            if zone.mode == "auto":
+            # myVAILLANT starts a temporary override instead.
+            if zone.mode == "auto" and not myvaillant:
                 raise WriteRejected(
                     409,
                     f"Im Auto-Modus folgt {zone.label} dem Zeitprogramm; die Solltemperatur wirkt nur in der "
                     "Betriebsart Ein. Für einen Boost myVAILLANT oder Home Assistant nutzen.",
                 )
+            # myVAILLANT would start an override that heats the switched-off zone.
+            if zone.mode == "off" and myvaillant:
+                raise WriteRejected(
+                    409, f"{zone.label} ist ausgeschaltet; die Solltemperatur wirkt erst in Ein oder Auto."
+                )
             _check_setpoint(zone.setpoint, celsius, zone.label)
+        case SetZoneOverride(zone_id=zone_id, celsius=celsius, hours=hours):
+            if not myvaillant:
+                raise WriteRejected(409, "Eine zeitweise Übersteuerung gibt es nur mit der Anbindung myVAILLANT.")
+            zone = _zone(heat_pump, zone_id)
+            if zone.mode != "auto":
+                raise WriteRejected(409, f"{zone.label}: Eine zeitweise Übersteuerung gibt es nur im Auto-Betrieb.")
+            if not OVERRIDE_HOURS[0] <= hours <= OVERRIDE_HOURS[1]:
+                raise WriteRejected(422, "Eine Übersteuerung dauert 1 bis 24 Stunden.")
+            _check_setpoint(zone.setpoint, celsius, zone.label)
+        case EndZoneOverride(zone_id=zone_id):
+            if not myvaillant:
+                raise WriteRejected(409, "Eine zeitweise Übersteuerung gibt es nur mit der Anbindung myVAILLANT.")
+            _zone(heat_pump, zone_id)
         case SetZoneMode(zone_id=zone_id, mode=mode):
             zone = _zone(heat_pump, zone_id)
             _check_mode(zone.mode_writable, zone.available_modes, mode, zone.label)
@@ -579,6 +693,8 @@ def _validate(command: Command, heat_pump: HeatPumpState) -> None:
             water = _hot_water(heat_pump)
             if water.boost is None or not water.boost_writable:
                 raise WriteRejected(409, "Die Einmalladung ist am Gerät nicht schaltbar.")
+        case SetConsumptionLimit() | SetFailsafeLimit() | ControlCompressor() if myvaillant:
+            raise WriteRejected(409, "Leistungsdeckel, Failsafe und Verdichter gibt es nur mit der Anbindung EEBUS.")
         case SetConsumptionLimit(watts=watts, duration_s=duration_s):
             limit = heat_pump.consumption_limit
             if limit is None:
@@ -652,13 +768,23 @@ def _check_non_negative(watts: float, duration_s: int) -> None:
         raise WriteRejected(422, "Leistung und Dauer dürfen nicht negativ sein.")
 
 
-def _describe(command: Command, heat_pump: HeatPumpState | None) -> str:
+def _describe(command: Command, heat_pump: HeatPumpState | None, connection: Connection = Connection.EEBUS) -> str:
     """German description of the command, also for unknown zones and unknown state."""
     match command:
         case SetZoneSetpoint(zone_id=zone_id, celsius=celsius):
             zone = _find_zone(heat_pump, zone_id)
             label = zone.label if zone else f"Heizzone {zone_id}"
-            return f"{label}: Solltemperatur {_celsius(celsius, zone.setpoint if zone else None)}"
+            text = f"{label}: Solltemperatur {_celsius(celsius, zone.setpoint if zone else None)}"
+            if connection is Connection.MYVAILLANT and zone is not None and zone.mode == "auto":
+                text += " als zeitweise Übersteuerung"
+            return text
+        case SetZoneOverride(zone_id=zone_id, celsius=celsius, hours=hours):
+            zone = _find_zone(heat_pump, zone_id)
+            label = zone.label if zone else f"Heizzone {zone_id}"
+            return f"{label}: Übersteuerung {_celsius(celsius, zone.setpoint if zone else None)} für {_hours(hours)}"
+        case EndZoneOverride(zone_id=zone_id):
+            zone = _find_zone(heat_pump, zone_id)
+            return f"{zone.label if zone else f'Heizzone {zone_id}'}: Übersteuerung beenden"
         case SetZoneMode(zone_id=zone_id, mode=mode):
             zone = _find_zone(heat_pump, zone_id)
             return f"{zone.label if zone else f'Heizzone {zone_id}'}: Betriebsart {_mode_name(mode)}"
@@ -687,6 +813,10 @@ def _payload(command: Command) -> dict[str, JsonScalar]:
     match command:
         case SetZoneSetpoint(celsius=celsius) | SetHotWaterSetpoint(celsius=celsius):
             payload["value"] = celsius
+        case SetZoneOverride(celsius=celsius, hours=hours):
+            payload.update(value=celsius, hours=hours)
+        case EndZoneOverride():
+            payload["action"] = "end_override"
         case SetZoneMode(mode=mode) | SetHotWaterMode(mode=mode):
             payload["mode"] = mode
         case SetHotWaterBoost(active=active):
@@ -702,8 +832,10 @@ def _payload(command: Command) -> dict[str, JsonScalar]:
 
 def _primary_value(command: Command) -> float | str | bool:
     match command:
-        case SetZoneSetpoint(celsius=celsius) | SetHotWaterSetpoint(celsius=celsius):
+        case SetZoneSetpoint(celsius=celsius) | SetZoneOverride(celsius=celsius) | SetHotWaterSetpoint(celsius=celsius):
             return celsius
+        case EndZoneOverride():
+            return "end_override"
         case SetZoneMode(mode=mode) | SetHotWaterMode(mode=mode):
             return mode
         case SetHotWaterBoost(active=active):
@@ -732,6 +864,9 @@ async def _call_bridge(bridge: BridgeClient, ski: str, command: Command) -> None
             await bridge.write_failsafe_limit(ski, watts, duration_s)
         case ControlCompressor(action=action, start_time=start_time):
             await bridge.control_compressor(ski, action, start_time)
+        case SetZoneOverride() | EndZoneOverride():
+            # _validate() lets these through only with the connection myVAILLANT.
+            raise WriteRejected(409, "Eine zeitweise Übersteuerung gibt es nur mit der Anbindung myVAILLANT.")
 
 
 # --- German formatting for the protocol ------------------------------------------
@@ -744,6 +879,12 @@ def _number(value: float, setpoint: Setpoint | None) -> str:
 
 def _celsius(value: float, setpoint: Setpoint | None) -> str:
     return f"{_number(value, setpoint)} °C"
+
+
+def _hours(hours: float) -> str:
+    """German, e.g. "2 h", "1 h 15 min"."""
+    whole, minutes = divmod(round(hours * 60), 60)
+    return f"{whole} h {minutes} min" if minutes else f"{whole} h"
 
 
 def _watts(watts: float) -> str:

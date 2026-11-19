@@ -1,10 +1,11 @@
 """Current state of the heat pump.
 
-The bridge's device snapshot is the single source of truth. StateService
+With EEBUS the bridge's device snapshot is the single source of truth. StateService
 re-reads it after every state event of the bridge (bundled over a short delay)
 and at least once per refresh interval, and hands every new state to its
 listeners. Values the device does not report stay None ("nicht verfügbar"),
-they are never filled with substitutes.
+they are never filled with substitutes. With myVAILLANT the state comes from
+the integration's entities in Home Assistant (myvaillant.py).
 """
 
 from __future__ import annotations
@@ -121,6 +122,9 @@ class Zone:
     mode: str | None
     available_modes: list[str]
     mode_writable: bool
+    # myVAILLANT only: a temporary override (quick veto) runs, until this time if known.
+    override: bool = False
+    override_until: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,30 +337,21 @@ UNAVAILABLE = HeatPumpState(
 )
 
 
-class StateService:
-    """Keeps the heat pump state current and notifies listeners of every new state."""
+class StateHub:
+    """Holds the latest heat pump state and hands every new one to the listeners.
 
-    def __init__(
-        self,
-        bridge: BridgeClient,
-        pairing: PairingService,
-        *,
-        refresh_interval: float = 60.0,
-        debounce: float = 1.0,
-    ) -> None:
-        """refresh_interval also keeps the bridge's monitoring watchdog satisfied
-        (it expects a live monitoring read within minutes after connecting)."""
-        self._bridge = bridge
-        self._pairing = pairing
-        self._refresh_interval = refresh_interval
-        self._debounce = debounce
+    The source of the state is a subclass: StateService reads it from the EEBUS
+    bridge, MyVaillantState from the myVAILLANT integration in Home Assistant.
+    """
+
+    def __init__(self) -> None:
         self._state: HeatPumpState | None = None
         self._listeners: set[Callable[[HeatPumpState | None], None]] = set()
         self._dirty = asyncio.Event()
 
     @property
     def current(self) -> HeatPumpState | None:
-        """None until a gateway is paired and this app's own bridge answers."""
+        """None while the heat pump is not set up (no gateway paired, no myVAILLANT entities)."""
         return self._state
 
     @contextlib.asynccontextmanager
@@ -383,6 +378,34 @@ class StateService:
         """Hand the current state to all listeners again, e.g. after the operating
         mode changed, so open event streams send the new overall state."""
         self._publish(self._state)
+
+    async def run(self) -> None:
+        raise NotImplementedError
+
+    def _publish(self, state: HeatPumpState | None) -> None:
+        self._state = state
+        for deliver in list(self._listeners):
+            deliver(state)
+
+
+class StateService(StateHub):
+    """Keeps the heat pump state current from the EEBUS bridge's device snapshot."""
+
+    def __init__(
+        self,
+        bridge: BridgeClient,
+        pairing: PairingService,
+        *,
+        refresh_interval: float = 60.0,
+        debounce: float = 1.0,
+    ) -> None:
+        """refresh_interval also keeps the bridge's monitoring watchdog satisfied
+        (it expects a live monitoring read within minutes after connecting)."""
+        super().__init__()
+        self._bridge = bridge
+        self._pairing = pairing
+        self._refresh_interval = refresh_interval
+        self._debounce = debounce
 
     async def run(self) -> None:
         backoff = self._bridge.backoff.delays()
@@ -446,8 +469,3 @@ class StateService:
                 await asyncio.sleep(self._debounce)
             self._dirty.clear()
             await self.refresh(ski)
-
-    def _publish(self, state: HeatPumpState | None) -> None:
-        self._state = state
-        for deliver in list(self._listeners):
-            deliver(state)

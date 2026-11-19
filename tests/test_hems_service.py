@@ -334,18 +334,21 @@ async def test_without_a_location_open_meteo_is_not_asked(settings_store: Settin
     assert weather.problem == "Für Open-Meteo fehlt der Standort in den Einstellungen."
 
 
-def test_weather_get_forecasts_is_the_only_service_the_app_calls() -> None:
+def test_the_app_calls_only_the_weather_forecast_and_the_device_services() -> None:
     package = Path(ha_client_module.__file__).parent
-    services: set[str] = set()
+    services: dict[str, set[str]] = {}
     for source in package.rglob("*.py"):
         tree = ast.parse(source.read_text(encoding="utf-8"))
-        services |= {
+        found = {
             node.value
             for node in ast.walk(tree)
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and "/api/services" in node.value
         }
+        if found:
+            services[source.name] = found
 
-    assert services == {"/api/services/weather/get_forecasts"}
+    # "/api/services/" is the start of call_device_service()'s path, limited to DEVICE_SERVICES.
+    assert services == {"ha_client.py": {"/api/services/weather/get_forecasts", "/api/services/"}}
 
 
 # --- daily values -------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 name: Vaillant EEBUS
 version: "1.1.0"
 slug: vaillant_eebus
-description: Vaillant-Wärmepumpe lokal über EEBUS – ohne Cloud und ohne eBUS-Adapter.
+description: Vaillant-Wärmepumpe über myVAILLANT in Home Assistant oder lokal über EEBUS steuern.
 url: https://github.com/wattarosolar-lgtm/vaillant-eebus
 # Pre-built multi-arch image from GitHub Actions. The Supervisor never builds
 # this app itself: the Dockerfile needs the repository root as build context.
@@ -16,11 +16,14 @@ startup: services
 # setpoints it changed to their base values first (RELEASE_TIMEOUT in
 # hems/service.py), and s6 stops the bridge only after the backend.
 timeout: 30
-# Required: EEBUS discovery uses mDNS, and the gateway connects to port 4712.
+# Required for the connection EEBUS: discovery uses mDNS, and the gateway
+# connects to port 4712.
 host_network: true
 # SUPERVISOR_TOKEN for Home Assistant Core: read the chosen room sensors and
-# report the heat pump as sensors. The only service it calls is the read-only
-# weather.get_forecasts (energy management).
+# report the heat pump as sensors. Services: the read-only weather.get_forecasts
+# (energy management) and, with the connection myVAILLANT, the few services in
+# DEVICE_SERVICES (ha_client.py) on the chosen myVAILLANT entities, only
+# through the write gate.
 homeassistant_api: true
 # The UI behind the Home Assistant login. With host networking this port is
 # opened on the host; the backend binds it to the hassio network address only.

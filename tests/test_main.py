@@ -10,10 +10,11 @@ import httpx
 import pytest
 
 from tests.fake_bridge import FAKE_SKI, GATEWAY_SKI, FakeBridge
+from tests.fake_home_assistant import MV_HOT_WATER, MV_ZONE_1, MV_ZONE_2, TOKEN, FakeHomeAssistant
 from tests.support import FAST_BACKOFF, eventually, free_port
 from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.main import BackendConfig, run_backend
-from vaillant_eebus.settings import OperatingMode, Settings, SettingsStore
+from vaillant_eebus.settings import Connection, MyVaillantEntities, OperatingMode, Settings, SettingsStore
 
 
 def test_config_from_environment() -> None:
@@ -31,6 +32,7 @@ def test_config_from_environment() -> None:
             "BRIDGE_CREDENTIALS_DIR": "/data/eebus/grpc",
             "SHIP_PORT": "4712",
             "TZ": "Europe/Berlin",
+            "BRIDGE_SERVICE_DIR": "/run/service/eebus-bridge",
         }
     )
 
@@ -47,6 +49,7 @@ def test_config_from_environment() -> None:
         bridge_credentials_dir=Path("/data/eebus/grpc"),
         ship_port=4712,
         time_zone="Europe/Berlin",
+        bridge_service_dir=Path("/run/service/eebus-bridge"),
     )
 
 
@@ -150,3 +153,49 @@ async def test_the_chosen_mode_survives_a_restart_of_the_backend(fake_bridge: Fa
     assert [entry["message"] for entry in log["entries"]] == ["App gestartet im Live-Betrieb."]
     # Nothing is written on its own after a start in live mode.
     assert fake_bridge.device.write_calls == []
+
+
+async def test_with_myvaillant_the_backend_reads_home_assistant_and_restarts_for_eebus(
+    fake_bridge: FakeBridge, fake_ha: FakeHomeAssistant, tmp_path: Path
+) -> None:
+    fake_ha.add_myvaillant()
+    chosen = MyVaillantEntities(zones=(MV_ZONE_1, MV_ZONE_2), hot_water=MV_HOT_WATER)
+    SettingsStore(tmp_path).save(Settings(connection=Connection.MYVAILLANT, myvaillant=chosen, paired_ski=GATEWAY_SKI))
+    port = free_port()
+    config = BackendConfig(
+        data_dir=tmp_path,
+        http_host="127.0.0.1",
+        http_port=port,
+        trusted_clients=frozenset({"127.0.0.1"}),
+        ha_url=fake_ha.url,
+        ha_token=TOKEN,
+    )
+    async with BridgeClient(fake_bridge.address, FAST_BACKOFF) as bridge:
+        backend = asyncio.create_task(run_backend(config, bridge))
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+                state: dict[str, object] = {}
+
+                async def read_state() -> None:
+                    nonlocal state
+                    async with asyncio.timeout(10):
+                        while state.get("connection") != "connected":
+                            with contextlib.suppress(httpx.TransportError):
+                                state = (await http.get("/api/state")).json()
+                            await asyncio.sleep(0.05)
+
+                await read_state()
+                switched = (await http.put("/api/connection", json={"connection": "eebus"})).json()
+            async with asyncio.timeout(10):
+                restarting = await backend
+        finally:
+            backend.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await backend
+
+    assert state["link"] == "myvaillant"
+    assert switched["restarting"] is True
+    assert restarting is True
+    assert SettingsStore(tmp_path).load().connection is Connection.EEBUS
+    # The paired gateway stays with the bridge unregistered while myVAILLANT is used.
+    assert fake_bridge.device.register_calls == []

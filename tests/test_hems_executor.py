@@ -434,4 +434,4 @@ def test_the_planner_only_ever_gives_setpoints_and_the_one_time_charge() -> None
         used |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
 
     assert used & forbidden == set()
-    assert {"SetZoneSetpoint", "SetHotWaterSetpoint", "SetHotWaterBoost"} <= used
+    assert {"SetZoneSetpoint", "SetZoneOverride", "EndZoneOverride", "SetHotWaterSetpoint", "SetHotWaterBoost"} <= used

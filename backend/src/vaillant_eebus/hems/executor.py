@@ -12,8 +12,15 @@ Each control changes at most every 30 minutes; returning to the base value
 is never held back. Base values and the values the planner set survive a
 restart in /data/hems.json.
 
-Only zone setpoints, the hot water setpoint and the one-time charge are ever
-submitted (a test checks it).
+With the connection myVAILLANT a zone in auto follows its time program; there
+the planner starts a temporary override (quick veto) at the program's value
+plus the block's shift, lasting as long as the block, so it ends by itself even
+when the app is gone. It ends the override early when the block ends early
+(new plan, off, preview, demo, stop). An override it did not start, or one
+ended by someone else, pauses the zone until the block ends.
+
+Only zone setpoints and overrides, the hot water setpoint and the one-time
+charge are ever submitted (a test checks it).
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -35,15 +43,18 @@ from vaillant_eebus.hems.config import PlannerMode
 from vaillant_eebus.hems.planner import DHW, Action, Plan, block_at
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.pairing import NotPairedError
-from vaillant_eebus.settings import OperatingMode, SettingsStore
-from vaillant_eebus.state import HeatPumpState, Setpoint, StateService
+from vaillant_eebus.settings import Connection, OperatingMode, SettingsStore
+from vaillant_eebus.state import HeatPumpState, Setpoint, StateHub
 from vaillant_eebus.write_gate import (
     Command,
+    EndZoneOverride,
     SetHotWaterBoost,
     SetHotWaterSetpoint,
+    SetZoneOverride,
     SetZoneSetpoint,
     Source,
     WriteGate,
+    WriteNotExecuted,
     WriteOutcomeUnknown,
     WriteRejected,
     WriteResult,
@@ -57,13 +68,28 @@ REST = timedelta(minutes=30)
 URGENT_WAIT_S = 6.0
 # Days on which the hot water was charged extra, kept for the planner.
 KEEP_CHARGE_DAYS = 3
+# An override of the planner that runs at most this much longer than wanted is left to end by
+# itself; one that ends this close to its planned end ended by itself.
+OVERRIDE_MARGIN = timedelta(minutes=5)
+# A block lasting this much longer than the running override starts it anew.
+OVERRIDE_EXTEND = timedelta(minutes=15)
+# Overrides are given in quarter hours, at least one hour (the integration's minimum).
+OVERRIDE_STEP_H = 0.25
+OVERRIDE_MIN_H = 1.0
+# A failed end of an override is tried again after this long (every call goes to the cloud).
+END_RETRY = timedelta(minutes=5)
 
 
 @dataclass(slots=True)
 class _Control:
-    # Saved: the user's normal setpoint, and what the planner really set on the device.
+    # Saved: the user's normal setpoint and what the planner really set on the device.
     base: float | None = None
     applied: float | None = None
+    # Saved, zones in auto with myVAILLANT: the time program's value, and the planner's running
+    # override with its end. Kept apart from base and applied, which belong to the setpoint of "on".
+    program: float | None = None
+    override: float | None = None
+    override_until: datetime | None = None
     # In memory: the last value the planner decided on (sent or only previewed), when, and
     # what the device reported last.
     decided: float | None = None
@@ -71,6 +97,11 @@ class _Control:
     previewed: float | None = None
     previewed_at: datetime | None = None
     observed: float | None = None
+    # Zones in auto with myVAILLANT: the last value and whether an override ran.
+    observed_auto: tuple[float, bool] | None = None
+    observed_mode: str | None = None
+    # The zone is in auto and steered with overrides.
+    auto: bool = False
     # A manual change pauses the control until the block it fell into ends.
     paused_until: datetime | None = None
     # Start of the hot water block whose one-time charge was given, and of the one it was
@@ -85,8 +116,10 @@ class _Device:
 
     label: str
     setpoint: Setpoint
-    # Zones: the operation mode; the planner only acts in "on".
+    # Zones: the operation mode; the planner acts in "on" (and in "auto" with myVAILLANT).
     mode: str | None
+    # myVAILLANT: an override (quick veto) runs.
+    override: bool = False
 
 
 @dataclass(slots=True)
@@ -99,7 +132,7 @@ class Executor:
     def __init__(
         self,
         gate: WriteGate,
-        state: StateService,
+        state: StateHub,
         settings: SettingsStore,
         log: LogStore,
         data_dir: Path,
@@ -114,21 +147,33 @@ class Executor:
         self._path = data_dir / STATE_FILE
         self._zone = zone
         self._clock = clock
+        # Zones in auto get overrides; only the myVAILLANT integration offers them.
+        self._overrides = gate.connection is Connection.MYVAILLANT
         saved = self._load()
         self._controls = saved.controls
         self._charged = saved.charged
         self._previewed_charges: set[date] = set()
 
     def bases(self) -> dict[str, float]:
-        return {key: control.base for key, control in self._controls.items() if control.base is not None}
+        """The value each control returns to: for a zone in auto its time program's value."""
+        bases = {}
+        for key, control in self._controls.items():
+            base = control.program if control.auto else control.base
+            if base is not None:
+                bases[key] = base
+        return bases
 
     def shifted(self) -> dict[str, float]:
         """Controls the planner really changed and has not returned to the base value yet."""
-        return {
+        shifted = {
             key: control.applied
             for key, control in self._controls.items()
             if control.applied is not None and control.applied != control.base
         }
+        shifted.update(
+            {key: control.override for key, control in self._controls.items() if control.override is not None}
+        )
+        return shifted
 
     def charged_days(self, *, preview: bool) -> frozenset[date]:
         """Days on which the hot water was charged extra (in preview: also as a preview)."""
@@ -145,6 +190,9 @@ class Executor:
         self._observe(devices, mode, plan, now)
         for key, device in devices.items():
             control = self._controls[key]
+            if control.auto or control.override is not None:
+                await self._step_override(key, device, mode, plan, now)
+                continue
             if control.base is None:
                 continue
             if mode is PlannerMode.CONTROL:
@@ -169,12 +217,17 @@ class Executor:
         now = self._clock()
         devices = _devices(heat_pump)
         self._log.add(LogCategory.HEMS, f"Planer setzt die Grundwerte zurück: {reason}.")
-        bases = {key: self._controls[key].base for key in self.shifted()}
-        returns = [
-            self._apply(key, devices[key], base, now, urgent=True)
-            for key, base in bases.items()
-            if key in devices and base is not None
-        ]
+        returns = []
+        for key, control in self._controls.items():
+            device = devices.get(key)
+            if device is None:
+                continue
+            if control.override is not None and self._override_runs(control, now):
+                returns.append(self._end_override(key, now))
+            shifted = control.applied is not None and control.base is not None and control.applied != control.base
+            # A zone's setpoint works only in "on" (myVAILLANT: in auto it would start an override).
+            if shifted and control.base is not None and (key == DHW or device.mode == "on" or not self._overrides):
+                returns.append(self._apply(key, device, control.base, now, urgent=True))
         # All at the same time: when the app stops, there are only a few seconds.
         for outcome in await asyncio.gather(*returns, return_exceptions=True):
             if isinstance(outcome, Exception):
@@ -188,6 +241,14 @@ class Executor:
         for key, device in devices.items():
             value = device.setpoint.value
             control = self._controls.setdefault(key, _Control())
+            previous_mode, control.observed_mode = control.observed_mode, device.mode
+            if previous_mode is not None and previous_mode != device.mode:
+                # A decision for the other mode does not hold any more.
+                control.decided = None
+            control.auto = self._overrides and key != DHW and device.mode == "auto"
+            if control.auto or control.override is not None:
+                changed |= self._observe_override(key, device, mode, plan, now)
+                continue
             previous, control.observed = control.observed, value
             if control.base is None:
                 control.base = value
@@ -218,6 +279,161 @@ class Executor:
                 changed = True
         if changed:
             self._save()
+
+    @staticmethod
+    def _override_runs(control: _Control, now: datetime) -> bool:
+        """The planner's override still runs noticeably longer."""
+        return (
+            control.override is not None
+            and control.override_until is not None
+            and now < control.override_until - OVERRIDE_MARGIN
+        )
+
+    def _observe_override(self, key: str, device: _Device, mode: PlannerMode, plan: Plan | None, now: datetime) -> bool:
+        """Follow a zone in auto: its value without an override is the time program's; an
+        override is the planner's only while it runs with exactly the value the planner sent."""
+        control = self._controls[key]
+        value, active = device.setpoint.value, device.override
+        previous = control.observed_auto
+        if previous == (value, active):
+            return False
+        control.observed_auto = (value, active)
+        if not control.auto:
+            # The zone left auto; Vaillant ends an override with that.
+            control.override, control.override_until = None, None
+            return True
+        own = control.override is not None
+        if not active:
+            if own:
+                early = self._override_runs(control, now)
+                control.override, control.override_until = None, None
+                if early and previous is not None:
+                    self._overridden(key, device, mode, plan, now, "Übersteuerung von Hand beendet")
+            control.program = value
+            return True
+        if own and value == control.override:
+            return False
+        if own:
+            # Someone set another temperature on the planner's override: it is theirs now.
+            control.override, control.override_until = None, None
+        self._overridden(key, device, mode, plan, now, "von Hand übersteuert")
+        return True
+
+    def _overridden(
+        self, key: str, device: _Device, mode: PlannerMode, plan: Plan | None, now: datetime, what: str
+    ) -> None:
+        """Someone else steers the zone in auto: the planner waits until the block ends."""
+        control = self._controls[key]
+        block = block_at(plan.blocks, key, now) if plan is not None else None
+        control.paused_until = block.end if block is not None else None
+        control.decided = None
+        if mode is PlannerMode.CONTROL:
+            wait = "; der Planer wartet bis zum Blockende" if block is not None else ""
+            self._log.add(LogCategory.HEMS, f"Planer: {device.label} {what}{wait}.")
+
+    async def _step_override(
+        self, key: str, device: _Device, mode: PlannerMode, plan: Plan | None, now: datetime
+    ) -> None:
+        """Start, extend or end the planner's override of a zone in auto."""
+        control = self._controls[key]
+        if mode is not PlannerMode.CONTROL or not control.auto:
+            if self._override_runs(control, now):
+                await self._end_override(key, now)
+            if mode is PlannerMode.PREVIEW and control.auto:
+                wanted = self._wanted_override(key, device, plan, now)
+                if wanted is not None:
+                    await self._preview_override(key, wanted, now)
+            return
+        if control.paused_until is not None:
+            if now < control.paused_until:
+                return
+            control.paused_until = None
+        wanted = self._wanted_override(key, device, plan, now)
+        if wanted is None:
+            if self._override_runs(control, now):
+                await self._end_override(key, now)
+            return
+        celsius, end = wanted
+        if (
+            control.override == celsius
+            and control.override_until is not None
+            and end - control.override_until < OVERRIDE_EXTEND
+        ):
+            return
+        if control.decided_at is not None and now - control.decided_at < REST:
+            return
+        hours = _override_hours(now, end)
+        try:
+            result = await self._gate.submit(
+                SetZoneOverride(zone_id=key, celsius=celsius, hours=hours), source=Source.PLANNER
+            )
+        except WriteRejected as rejected:
+            if rejected.status != 429:
+                control.decided, control.decided_at = celsius, now
+            return
+        except WriteOutcomeUnknown:
+            control.override, control.override_until = celsius, now + timedelta(hours=hours)
+        except (WriteNotExecuted, grpc.aio.AioRpcError):
+            control.decided_at = now
+            return
+        except NotPairedError:
+            return
+        else:
+            if result.mode is OperatingMode.LIVE:
+                control.override, control.override_until = celsius, now + timedelta(hours=hours)
+        control.decided, control.decided_at = celsius, now
+        self._save()
+
+    def _wanted_override(
+        self, key: str, device: _Device, plan: Plan | None, now: datetime
+    ) -> tuple[float, datetime] | None:
+        """The override the plan wants now (temperature, end); None for none."""
+        control = self._controls[key]
+        block = block_at(plan.blocks, key, now) if plan is not None else None
+        if block is None or control.program is None:
+            return None
+        return _fit(control.program + (block.shift_k or 0.0), device.setpoint), block.end
+
+    async def _end_override(self, key: str, now: datetime) -> None:
+        """End the planner's override; the zone follows its time program again."""
+        control = self._controls[key]
+        if control.decided is None and control.decided_at is not None and now - control.decided_at < END_RETRY:
+            return
+        try:
+            result = await self._submit(EndZoneOverride(zone_id=key), urgent=True)
+        except WriteRejected as rejected:
+            if rejected.status == 429:
+                return
+            # Nothing to end any more (e.g. the zone left auto).
+            control.override, control.override_until = None, None
+        except WriteOutcomeUnknown:
+            # If it did not arrive, the override ends by itself at its end.
+            control.override, control.override_until = None, None
+        except (WriteNotExecuted, grpc.aio.AioRpcError):
+            control.decided, control.decided_at = None, now
+            return
+        except NotPairedError:
+            return
+        else:
+            if result.mode is OperatingMode.LIVE:
+                control.override, control.override_until = None, None
+        control.decided, control.decided_at = None, now
+        self._save()
+
+    async def _preview_override(self, key: str, wanted: tuple[float, datetime], now: datetime) -> None:
+        control = self._controls[key]
+        celsius, end = wanted
+        if celsius == control.previewed:
+            return
+        if control.previewed_at is not None and now - control.previewed_at < REST:
+            return
+        with contextlib.suppress(WriteRejected, NotPairedError):
+            await self._gate.submit(
+                SetZoneOverride(zone_id=key, celsius=celsius, hours=_override_hours(now, end)),
+                source=Source.PLANNER,
+                preview=True,
+            )
+        control.previewed, control.previewed_at = celsius, now
 
     def _follow(
         self, key: str, device: _Device, value: float, mode: PlannerMode, plan: Plan | None, now: datetime
@@ -361,7 +577,13 @@ class Executor:
         try:
             content = json.loads(self._path.read_text(encoding="utf-8"))
             controls = {
-                str(key): _Control(base=_float(entry.get("base")), applied=_float(entry.get("applied")))
+                str(key): _Control(
+                    base=_float(entry.get("base")),
+                    applied=_float(entry.get("applied")),
+                    program=_float(entry.get("program")),
+                    override=_float(entry.get("override")),
+                    override_until=_moment(entry.get("override_until")),
+                )
                 for key, entry in content["controls"].items()
             }
             charged = {date.fromisoformat(day) for day in content.get("charged", [])}
@@ -380,7 +602,13 @@ class Executor:
         content: dict[str, Any] = {
             "version": 1,
             "controls": {
-                key: {"base": control.base, "applied": control.applied}
+                key: {
+                    "base": control.base,
+                    "applied": control.applied,
+                    "program": control.program,
+                    "override": control.override,
+                    "override_until": control.override_until.isoformat() if control.override_until else None,
+                }
                 for key, control in sorted(self._controls.items())
             },
             "charged": [day.isoformat() for day in sorted(self._charged)],
@@ -397,7 +625,7 @@ def _devices(heat_pump: HeatPumpState) -> dict[str, _Device]:
     devices: dict[str, _Device] = {}
     for zone in heat_pump.zones:
         if zone.setpoint is not None:
-            devices[zone.id] = _Device(label=zone.label, setpoint=zone.setpoint, mode=zone.mode)
+            devices[zone.id] = _Device(label=zone.label, setpoint=zone.setpoint, mode=zone.mode, override=zone.override)
     water = heat_pump.hot_water
     if water is not None and water.setpoint is not None:
         devices[DHW] = _Device(label="Warmwasser", setpoint=water.setpoint, mode=water.mode)
@@ -422,6 +650,22 @@ def _fit(value: float, setpoint: Setpoint) -> float:
 def _celsius(value: float, setpoint: Setpoint) -> str:
     digits = 1 if 0 < setpoint.step < 1 else 0
     return f"{value:.{digits}f} °C".replace(".", ",")
+
+
+def _override_hours(now: datetime, end: datetime) -> float:
+    """The override's length up to end, in quarter hours, at least an hour."""
+    hours = (end - now).total_seconds() / 3600
+    return max(OVERRIDE_MIN_H, math.ceil(hours / OVERRIDE_STEP_H - 1e-9) * OVERRIDE_STEP_H)
+
+
+def _moment(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
 def _float(value: Any) -> float | None:
