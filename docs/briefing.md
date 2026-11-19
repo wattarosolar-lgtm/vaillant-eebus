@@ -1,12 +1,13 @@
-# Briefing: Vaillant EEBUS (Stand v1.1.0, Korrekturen für 1.1.1 auf `fix/pruefung-1.1.0`)
+# Briefing: Vaillant EEBUS (Stand v1.1.0; 1.2.0 mit Anbindung myVAILLANT auf `phase-9/myvaillant`)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
 
 ## 1. Worum es geht
 
-Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepumpe **lokal über EEBUS** anbindet –
-ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Oberfläche mit (Seitenleiste
+Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepumpe anbindet – seit 1.2.0 wahlweise über die
+**Entitäten der myVAILLANT-Integration** in Home Assistant (Vaillant-Cloud) oder **lokal über EEBUS** (ohne Cloud,
+ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
 - **Stand:** Version 1.1.0: die 7 Phasen der Spezifikation (1.0.0, an der Anlage abgenommen) und Phase 8, das
@@ -16,7 +17,9 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
   Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt). 0.6.0 bindet Home Assistant an (Abschnitt 5b), 0.6.1
   ordnet die Einstellungsseite neu und addiert mehrere Wärmesensoren. 1.0.0 schließt ab: Protokoll (Probleme,
   Datum, CSV), Verlauf 24 h, „Über die App“, TLS mit Token für die Bridge (Abschnitt 5c), Doku, Aufräumen. 1.1.0
-  bringt den Planer für Warmwasser und Heizen nach Preis, PV-Prognose und Wetter (Abschnitt 5d).
+  bringt den Planer für Warmwasser und Heizen nach Preis, PV-Prognose und Wetter (Abschnitt 5d). 1.2.0 (Phase 9,
+  noch nicht veröffentlicht) bringt die Anbindung myVAILLANT (Abschnitt 5e) und die Korrekturen aus der Prüfung von
+  1.1.0, die als 1.1.1 geplant waren.
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -31,6 +34,7 @@ ohne Vaillant-Cloud, ohne eBUS-Adapter, ohne MQTT. Die App bringt eine eigene Ob
 | 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärme heute), HA-Export als Sensoren | umgesetzt (0.6.0/0.6.1), weitgehend abgenommen (Prüfung von 0.6.1 offen) |
 | 7 | Einstellungs-/Protokollseite fertig, Verlauf 24 h, Absicherung der Bridge, Doku, Release | umgesetzt (1.0.0), an der Anlage abgenommen (21.10.2026) |
 | 8 | Energiemanagement: Planer für Warmwasser und Zonen, Tarife, PV-Überschuss, Wetter, Stufen Aus/Vorschau/Steuern | umgesetzt (1.1.0), Abnahme an der Anlage offen (erst Vorschau, dann Steuern) |
+| 9 | Anbindung myVAILLANT (Entitäten der Integration) neben EEBUS, wählbar; Planer im Auto-Betrieb über Quick-Veto | umgesetzt auf `phase-9/myvaillant` (1.2.0), Abnahme an der Anlage offen |
 
 ## 2. Repositories
 
@@ -66,6 +70,9 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
                                                        └─ liefert auch die Oberfläche (Svelte, statische Dateien)
 ```
 
+- **Anbindung myVAILLANT (1.2.0):** Das Backend liest den Zustand aus Entitäten der myVAILLANT-Integration über die
+  WebSocket-Verbindung zu Home Assistant und schreibt über Dienstaufrufe (Abschnitt 5e). Die Bridge läuft dann nicht:
+  Ihr s6-Dienst liest `connection` aus `/data/settings.json` und schläft.
 - `host_network: true` (mDNS, Port 4712). Folge: **alle Apps mit Host-Netzwerk teilen sich die Ports.** Deshalb
   eigener gRPC-Port 50471 (statt 50051) und eine Identitätsprüfung: Das Backend spricht nur mit einer Bridge, die
   die EEBUS-Seriennummer aus `/data/eebus/serial` meldet (`ServerInfo.device_serial`).
@@ -99,6 +106,7 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 
 | Modul | Aufgabe |
 |---|---|
+| `myvaillant.py` | Anbindung myVAILLANT (Abschnitt 5e): `MyVaillantState` (Zustand aus den gewählten Entitäten), `MyVaillantLink` (Befehle als Dienstaufrufe), `discover()` (Vorschlag der Entitäten) |
 | `main.py` | Konfiguration aus Umgebungsvariablen (`BRIDGE_ADDRESS`, `DATA_DIR`, `HTTP_HOST`, `HTTP_PORT`, `TRUSTED_CLIENTS`, `STATIC_DIR`, `BRIDGE_SERIAL_FILE`, `SHIP_PORT`, `TZ`, …; ungültige Ports → klare Fehlermeldung); startet uvicorn, `PairingService.run()`, `StateService.run()`, `WriteGate.run()` und `EnergyMeter.run()` in einer `asyncio.TaskGroup`, speichert danach den Energiezähler und schließt das Protokoll |
 | `bridge_auth.py` | Erzeugt einmalig selbstsigniertes Zertifikat (EC P-256, SAN `eebus-bridge` und `127.0.0.1`), Schlüssel und Token in `/data/eebus/grpc` (0600, alle drei zusammen über ein umbenanntes Verzeichnis); `BridgeCredentials.load()` für das Backend |
 | `bridge_client.py` | gRPC-Client (`grpc.aio`), mit Zugangsdaten TLS (vertraut nur diesem Zertifikat) und Bearer-Token, sonst Klartext (Fake-Bridge); `refused_tls()` erkennt einen fehlgeschlagenen TLS-Handshake (→ fremde Bridge): Server-Info, Gerätesuche, Kopplung, Gerätestatus, Snapshot, Ereignis-Streams, Struktur-Dump; **Schreibmethoden** (`WRITE_METHODS`: Zone-Soll/-Betriebsart mit `zone_id`, Warmwasser-Soll/-Betriebsart/Einmalladung, Leistungsdeckel, Failsafe, Verdichter-Flexibilität) mit 15 s Zeitlimit (die Bridge wartet bis zu 10 s auf das Gerät); Backoff, `RETRYABLE_CODES`, max. Nachrichtengröße 64 MB |
@@ -251,6 +259,40 @@ des Repos). Paket `backend/src/vaillant_eebus/hems/`:
   sie nicht als neuen Grundwert); bei „Steuern“ zusätzlich (c) App während eines Blocks stoppen → Grundwerte zurück
   (lokal ohne Docker nicht prüfbar).
 
+## 5e. Anbindung myVAILLANT (Phase 9, 1.2.0)
+
+Plan und Entscheidungen: `vaillant-eebus-notizen/plan-phase-9-myvaillant.md`. Grundlage ist der Quellcode der
+Integration `signalkraft/mypyllant-component` v0.9.19 (nicht gegen eine echte Installation geprüft).
+
+- **Einstellung** `settings.json`: `connection` (`myvaillant`, `eebus`; fehlt bei älteren Dateien → EEBUS, `null`
+  bei neuer Installation → Assistent fragt, Backend arbeitet bis dahin wie EEBUS) und `myvaillant` (Zonen =
+  Klima-Entitäten, Warmwasser, Außentemperatur, Leistung optional). Zonen-IDs sind dann die Entitäts-IDs
+  (`ZONE_ID` erlaubt beides).
+- **Lesen:** `StateHub` (in `state.py`) hält Zustand und Listener; `StateService` (EEBUS) und `MyVaillantState` sind
+  Unterklassen. `MyVaillantState` ist `HomeAssistantListener`, baut `HeatPumpState` bei jedem Zustand neu und
+  spätestens jede Minute (für den Energiezähler). `heat_cool` → „on“, `auto` → „auto“; Preset `boost` = Quick-Veto
+  (`Zone.override`, `override_until`). Warmwasser „Cylinder Boost“ verdeckt die Betriebsart; die App merkt sich die
+  letzte. Verbunden = alle gewählten Zonen und Warmwasser verfügbar; `captured_at` = ältestes `last_reported`.
+- **Schreiben:** `WriteGate(..., link=MyVaillantLink)`; ohne Link wie bisher über die Bridge. Gleiche Prüfungen,
+  Demo/Vorschau, 5-s-Grenze, Protokoll, Bestätigung (90 s statt 30 s). Unterschiede: Zonen-Soll im Auto-Betrieb
+  erlaubt (Quick-Veto der Integration), in „Aus“ abgelehnt; neue Befehle `SetZoneOverride` (Quick-Veto mit Dauer,
+  1–24 h, nur Auto) und `EndZoneOverride` für den Planer; Leistungsdeckel/Failsafe/Verdichter → 409. Fehler: HTTP
+  400/401/403/404/405 oder keine Verbindung → `WriteNotExecuted`; 5xx, Zeitüberschreitung, Abbruch → „Ergebnis
+  unbekannt“. `ha_client.call_device_service()` erlaubt genau `DEVICE_SERVICES` (6 Dienste) auf passenden
+  Entitäten; Strukturtests: nur `myvaillant.py` ruft es auf, nur `write_gate.py` ruft `send_command()`.
+- **Planer:** Zonen im Auto-Betrieb (nur myVAILLANT) bekommen je Block ein Quick-Veto = Programmwert ± Verschiebung,
+  Dauer = Block (Viertelstunden, mindestens 1 h), endet also von selbst. Getrennt von `base`/`applied` (Soll in „Ein“)
+  gemerkt: `program`, `override`, `override_until` (in `hems.json`). Früheres Blockende, Aus/Vorschau, Demo, Stopp →
+  `EndZoneOverride`, wenn es noch mehr als 5 min liefe. Fremdes Quick-Veto oder vorzeitig beendetes eigenes →
+  Pause bis Blockende. Programmwechsel im Block werden nicht nachgeführt.
+- **Umstellen:** `PUT api/connection` mit anderer Anbindung → `hems.release()`, Demo, speichern, `restart()` →
+  uvicorn endet, `run_backend()` gibt `True` zurück, `_main()` startet den Bridge-Dienst per `s6-svc -r` neu
+  (`BRIDGE_SERVICE_DIR`), der Prozess endet, s6 startet das Backend neu. Kopplung und Diagnose-Dump nur mit EEBUS
+  (sonst 409).
+- **Oberfläche:** Assistent mit Wahl der Anbindung (`Setup.svelte`, `MyVaillantChoice.svelte`, EEBUS-Schritte in
+  `EebusSetup.svelte`), Karte „Anbindung“ in den Einstellungen, Hinweise zum Quick-Veto auf der Übersicht, „Stand“
+  in der Kopfzeile.
+
 ## 6. Die echte Anlage (Feldbefunde)
 
 - Wärmepumpe: Vaillant aroTHERM split plus, VWL 75/8.2 AS 230V S2, über Vaillant-Gateway.
@@ -279,8 +321,9 @@ des Repos). Paket `backend/src/vaillant_eebus/hems/`:
 
 ## 7. Tests
 
-- Python: 240 Tests (`pytest`, 2 übersprungen ohne Zeitzonen-Datenbank unter Windows), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
-  Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
+- Python: 290 Tests (`pytest`, 2 übersprungen ohne Zeitzonen-Datenbank unter Windows), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+  Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`, mit `add_myvaillant()`: Entitäten und
+  Dienste der myVAILLANT-Integration wie im Quellcode der Integration). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
   Kein Test spricht mit echter Hardware.
 - Go (Fork): `go test -race ./...`; neue Tests u. a. `internal/grpc/hvac_zones_test.go`,
@@ -340,10 +383,16 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
 14. Die Prüfung von v1.1.0 (15 Funde) ist bewertet und auf `fix/pruefung-1.1.0` eingearbeitet: 1, 3, 7, 8, 10, 11
     behoben, 5 verbessert (dabei gefunden: ein zweiter Abbruch beim Herunterfahren hat das Zurücksetzen bisher
     abgebrochen). Ohne Änderung, mit Begründung: 2 (ein Absturz endet mit Exit-Code 1, s6 startet neu), 4, 6, 9,
-    13–15; 12 (Lücken > 3 min machen einen Tag im Energiezähler „lückenhaft“) kommt mit dem Modell in 1.2.0.
+    13–15; 12 (Lücken > 3 min machen einen Tag im Energiezähler „lückenhaft“) kommt mit dem Modell in 1.3.0.
 15. Energiemanagement, bewusst offen: Ein Zurücksetzen mit „Ergebnis unbekannt“, das nicht ankam, bleibt bis zum
     nächsten Block dieser Steuerung stehen (das Protokoll zeigt „Nicht übernommen“). Ist die Wärmepumpe beim Planen
     noch nicht verbunden (nach dem Start), plant der Planer spätestens zur nächsten Viertelstunde neu.
+16. Anbindung myVAILLANT (1.2.0), an der Anlage ungeprüft: Namen und Attribute der Entitäten, Verhalten von
+    `climate.set_temperature` im Auto-Betrieb (Quick-Veto mit der Dauer aus den Optionen), `mypyllant.set_quick_veto`
+    mit Dauer, Ende eines Quick-Veto (Preset zurück auf `none`), Warmwasser „Cylinder Boost“, Fehlercodes der
+    REST-Dienstaufrufe bei Cloud-Fehlern, Kontingent der Cloud. Die Werte sind so alt wie das Abfrageintervall der
+    Integration (Vorgabe 30 min); die Bestätigung eines Werts kommt aus der lokalen Aktualisierung der Integration
+    direkt nach dem Befehl.
 
 ## 10. Wo eine Prüfung am meisten bringt
 
@@ -351,6 +400,10 @@ Zu prüfen ist `main` = `caa7a20` (Tag `v1.1.0`). Neu seit 1.0.0: `git diff 1e59
 Oberfläche `cea2f3a`, Doku `caa7a20`). Der Schwerpunkt liegt auf dem Energiemanagement, weil es von selbst an die
 Wärmepumpe schreibt.
 
+0a. **Anbindung myVAILLANT (1.2.0)** (`myvaillant.py`, `write_gate.py` mit `Link`, `ha_client.call_device_service`,
+   `hems/executor.py` Quick-Veto-Pfad, `main.py` Neustart, `api.py` `api/connection`): Kann ein anderer Dienst oder
+   eine andere Entität erreicht werden? Hält der Demo-Betrieb? Stimmt die Erkennung eigener und fremder Quick-Vetos
+   bei veralteten Werten der Cloud? Kommt jedes Quick-Veto des Planers zu Ende (Blockende, Stopp, Umstellen)?
 0. **Energiemanagement** (`backend/src/vaillant_eebus/hems/`, Ergänzungen in `write_gate.py`, `api.py`,
    `home_assistant.py`, `ha_client.py`, `ha_export.py`, `main.py`):
    - `executor.py`: Kann der Planer etwas anderes als Zonen-Soll, Warmwasser-Soll und Einmalladung senden? Kann

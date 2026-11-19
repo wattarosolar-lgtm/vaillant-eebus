@@ -1,8 +1,28 @@
 # Changelog
 
-## 1.1.1 (noch nicht veröffentlicht)
+## 1.2.0 (noch nicht veröffentlicht)
 
-Korrekturen am Energiemanagement aus einer Prüfung des Codes:
+**Anbindung über myVAILLANT:** Die App erreicht die Wärmepumpe jetzt wahlweise über die Entitäten der
+myVAILLANT-Integration in Home Assistant oder wie bisher lokal über EEBUS.
+
+- **Einrichtungsassistent** fragt zuerst nach der Anbindung (myVAILLANT vorausgewählt) und schlägt die Entitäten
+  der Integration vor: Zonen, Warmwasser, Außentemperatur und optional die Leistung. Bestehende Installationen
+  bleiben bei EEBUS, bis sie umgestellt werden.
+- **Einstellungen → Anbindung:** Entitäten ändern und auf den anderen Weg umstellen. Beim Umstellen setzt der Planer
+  seine Werte zurück, die App wechselt in den Demo-Betrieb und startet neu. Mit myVAILLANT startet die
+  EEBUS-Bridge nicht.
+- **Auto-Betrieb:** Mit myVAILLANT ist die Solltemperatur einer Zone im Auto-Betrieb frei; eine Änderung startet
+  eine zeitweise Übersteuerung (Quick-Veto). Die Übersicht zeigt „Zeitweise übersteuert bis …“ und in der Kopfzeile,
+  wie alt die Werte sind.
+- **Energiemanagement:** Mit myVAILLANT verschiebt der Planer Zonen auch im Auto-Betrieb, mit einer Übersteuerung,
+  die genau so lange dauert wie der Block und daher von selbst endet. Eine Übersteuerung von Hand pausiert die Zone
+  bis zum Blockende.
+- **Sicherheit wie bisher:** Gesendet wird nur über die Schreibsperre (Demo-Betrieb, Prüfung gegen die Werte der
+  Anlage, höchstens alle 5 Sekunden je Einstellung, Protokoll). Die App ruft nur sechs fest erlaubte Dienste auf
+  und nur für die gewählten myVAILLANT-Entitäten. Leistungsdeckel, Failsafe und Verdichter gibt es nur mit EEBUS.
+- Anleitung: Abschnitte Anbindung, Einrichtung mit myVAILLANT, Anbindung wechseln.
+
+Korrekturen am Energiemanagement aus einer Prüfung des Codes (vorher als 1.1.1 geplant):
 
 - **Einmalladung:** Wird mitten in einem Warmwasser-Block von Vorschau auf Steuern umgestellt, startet der Planer
   jetzt auch die Einmalladung; bisher ging nur die Solltemperatur hinaus.

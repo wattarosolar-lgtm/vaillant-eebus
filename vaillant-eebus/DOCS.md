@@ -1,12 +1,13 @@
 # Vaillant EEBUS
 
-Bindet eine Vaillant-Wärmepumpe **lokal über EEBUS** an Home Assistant an – ohne Vaillant-Cloud,
-ohne eBUS-Adapter und ohne MQTT.
+Bindet eine Vaillant-Wärmepumpe an Home Assistant an – über die **myVAILLANT-Integration** in Home Assistant oder
+**lokal über EEBUS** (ohne Vaillant-Cloud, ohne eBUS-Adapter und ohne MQTT).
 
 ## Was die App kann
 
-Die App koppelt sich mit dem Gateway Ihrer Wärmepumpe und zeigt deren Werte live in einer eigenen Oberfläche in
-der Seitenleiste von Home Assistant, jede Heizzone einzeln, mit dem Verlauf der Leistung über 24 Stunden. Sie ändert
+Die App liest die Werte Ihrer Wärmepumpe – über die Entitäten der myVAILLANT-Integration oder direkt vom Gateway über
+EEBUS (siehe „Anbindung“) – und zeigt sie live in einer eigenen Oberfläche in der Seitenleiste von Home Assistant,
+jede Heizzone einzeln, mit dem Verlauf der Leistung über 24 Stunden. Sie ändert
 Solltemperaturen, Betriebsarten und die Einmalladung des Warmwassers. Die Raumtemperatur jeder Zone kommt aus
 Temperatursensoren in Home Assistant, und die App meldet die Werte der Wärmepumpe als Sensoren an Home Assistant.
 Ein Protokoll hält jede Änderung und jedes Verbindungsereignis fest. Seit Version 1.1.0 plant ein
@@ -19,11 +20,13 @@ Nach der Installation läuft die App im **Demo-Betrieb** und sendet nichts an di
 ## Voraussetzungen
 
 - Vaillant-Wärmepumpe mit Vaillant-Gateway (VR921 oder VR940f) und der myVAILLANT-App.
-- Home Assistant OS oder Supervised (die App braucht das Host-Netzwerk für die EEBUS-Suche per mDNS).
-- Gateway und Home Assistant im selben Netzwerk.
-- **Das Gateway erlaubt nur eine aktive EEBUS-Verbindung.** Ist bereits ein anderer EEBUS-Partner
-  gekoppelt (z. B. ein Energiemanager, das Add-on „EEBUS Bridge“ oder eine andere EEBUS-App), kommt keine
-  Verbindung zustande. Andere EEBUS-Apps bitte stoppen; sie belegen außerdem dieselben Ports.
+- Home Assistant OS oder Supervised.
+- **Mit der Anbindung myVAILLANT:** die Integration **myVAILLANT** (über HACS, `signalkraft/mypyllant-component`,
+  ab Version 0.9.19), eingerichtet und mit verfügbaren Entitäten für Zonen und Warmwasser.
+- **Mit der Anbindung EEBUS:** Gateway und Home Assistant im selben Netzwerk (die App sucht per mDNS und braucht
+  dafür das Host-Netzwerk). **Das Gateway erlaubt nur eine aktive EEBUS-Verbindung.** Ist bereits ein anderer
+  EEBUS-Partner gekoppelt (z. B. ein Energiemanager, das Add-on „EEBUS Bridge“ oder eine andere EEBUS-App), kommt
+  keine Verbindung zustande. Andere EEBUS-Apps bitte stoppen; sie belegen außerdem dieselben Ports.
 
 ## Installation
 
@@ -35,23 +38,68 @@ Nach der Installation läuft die App im **Demo-Betrieb** und sendet nichts an di
 4. Nach der Installation **Starten** und auf derselben Seite **In der Seitenleiste anzeigen** einschalten. Mit dem
    **Watchdog** startet Home Assistant die App neu, falls sie abstürzt.
 5. In der Seitenleiste **Wärmepumpe** öffnen (oder **Benutzeroberfläche öffnen** wählen). Der
-   Einrichtungsassistent führt durch die Kopplung (nächster Abschnitt).
+   Einrichtungsassistent führt durch die Einrichtung (nächster Abschnitt).
+
+## Anbindung
+
+Die App erreicht die Wärmepumpe auf einem von zwei Wegen. Der Einrichtungsassistent fragt zuerst danach;
+**myVAILLANT** ist vorausgewählt. Installationen bis Version 1.1 nutzen EEBUS, bis Sie umstellen.
+
+| | myVAILLANT in Home Assistant | EEBUS im Heimnetz |
+|---|---|---|
+| Weg | Entitäten der myVAILLANT-Integration, über die Vaillant-Cloud | direkt zum Gateway, ohne Cloud |
+| Werte | so alt wie die letzte Abfrage der Integration (Voreinstellung 30 Minuten) | jede Minute und bei jeder Änderung |
+| Zone im Auto-Betrieb | Soll-Änderung wirkt als **zeitweise Übersteuerung** (Quick-Veto) | Solltemperatur gesperrt |
+| Leistung und „Energie heute“ | nur mit einem Leistungssensor (optional) | von der Wärmepumpe gemeldet |
+| Leistungsdeckel, Failsafe, Verdichter | nicht verfügbar | über die API |
+| Kopplung, Diagnose-Dump | nicht nötig bzw. nicht verfügbar | ja |
 
 ## Einrichtung
 
-1. **Gateway auswählen:** Die App sucht im Netzwerk nach EEBUS-Geräten. Wählen Sie das Gateway Ihrer
+### Mit myVAILLANT
+
+1. **Anbindung wählen:** „myVAILLANT in Home Assistant“ und **Weiter**.
+2. **Entitäten prüfen:** Die App sucht die Entitäten der myVAILLANT-Integration und schlägt vor: je Heizzone die
+   Klima-Entität (`climate.…_zone_…`), die Warmwasser-Entität (`water_heater.…`), die Außentemperatur und – wenn die
+   Integration sie liefert – die aktuelle Leistung („Current Power“). Ergänzen oder entfernen Sie Einträge bei
+   Bedarf; als Leistung geht auch ein anderer Sensor in W oder kW, etwa ein Zähler vor der Wärmepumpe.
+   **Übernehmen** speichert die Auswahl; die App startet dafür einmal neu.
+3. Unter **Einstellungen** die Räume für die Zonen wählen (siehe „Home Assistant“).
+
+Die Integration fragt die Vaillant-Cloud von sich aus nur in ihrem Intervall ab (Option „Sekunden zwischen
+Updates“, Voreinstellung 1800). Nach jedem Befehl der App liest sie die Werte nach wenigen Sekunden neu. Vaillant
+begrenzt die Zahl der Abrufe; stellen Sie das Intervall nicht zu kurz ein (unter etwa 5 Minuten sperrt die Cloud
+zeitweise). Wie alt die Werte sind, zeigt die Kopfzeile der Übersicht („Stand 14:05“).
+
+### Mit EEBUS
+
+1. **Anbindung wählen:** „EEBUS im Heimnetz“ und **Weiter**.
+2. **Gateway auswählen:** Die App sucht im Netzwerk nach EEBUS-Geräten. Wählen Sie das Gateway Ihrer
    Wärmepumpe (VR921 oder VR940f).
-2. **In der myVAILLANT-App bestätigen:** *Einstellungen → Netzwerk → EEBUS*, dort diese App auf
+3. **In der myVAILLANT-App bestätigen:** *Einstellungen → Netzwerk → EEBUS*, dort diese App auf
    **Vertrauenswürdig** setzen. Der Assistent zeigt die Kennung (SKI) der App zum Vergleich.
-3. Sobald die Verbindung steht, zeigt der Assistent **Verbunden**. Laden Sie dann den **Diagnose-Dump** herunter
+4. Sobald die Verbindung steht, zeigt der Assistent **Verbunden**. Laden Sie dann den **Diagnose-Dump** herunter
    und heben Sie ihn auf; er hilft bei Fragen zur Anlage.
-4. Unter **Einstellungen** die Räume für die Zonen wählen (siehe „Home Assistant“).
+5. Unter **Einstellungen** die Räume für die Zonen wählen (siehe „Home Assistant“).
 
 Das gekoppelte Gateway steht in `/data/settings.json`. Die App meldet es nach jedem Neustart selbst wieder an.
 
 Nach einem Start oder Update der App lehnt das Gateway die ersten Verbindungsversuche oft ab. Bis die Werte
 erscheinen, können einige Minuten vergehen. Das Log fasst die Versuche zusammen und nennt die Dauer, sobald die
 Verbindung steht.
+
+### Anbindung wechseln
+
+Unter **Einstellungen → Anbindung** stellen Sie auf den anderen Weg um (mit Bestätigung). Dabei
+
+- setzt der Planer seine verschobenen Werte über den bisherigen Weg zurück,
+- wechselt die App in den **Demo-Betrieb**; den neuen Weg schalten Sie bewusst wieder auf Live,
+- startet die App neu; die Seite lädt danach von selbst neu.
+
+Mit myVAILLANT ruht die EEBUS-Bridge der App: Sie startet nicht und verbindet sich nicht mit dem Gateway. Die
+Kopplung bleibt gespeichert; beim Zurückwechseln verbindet sich die App ohne neue Kopplung. Die Zonen haben je
+Anbindung eigene Kennungen: Ordnen Sie die Raumsensoren nach dem Wechsel einmal den Zonen zu. Die Zuordnung für den
+anderen Weg bleibt gespeichert.
 
 ## Update
 
@@ -68,7 +116,8 @@ trägt den Namen, den sie in der Anlage hat (z. B. „Zone 1“ und „Zone 2“
 Temperaturen. Oben sieht man, ob das Gateway verbunden ist, ob die Wärmepumpe ihren Heartbeat sendet, ihren
 Betriebszustand, die Außentemperatur und ob der Verdichter läuft (ab 100 W Leistungsaufnahme).
 
-Die Werte aktualisieren sich von selbst, sobald die Wärmepumpe etwas meldet, spätestens nach einer Minute.
+Die Werte aktualisieren sich von selbst, sobald die Wärmepumpe etwas meldet: mit EEBUS spätestens nach einer
+Minute, mit myVAILLANT so oft, wie die Integration die Cloud abfragt („Stand“ in der Kopfzeile).
 
 **Bedienen:** Die Solltemperatur stellen Sie ein, indem Sie den Knopf auf dem Bogen ziehen (mit Maus oder
 Finger), mit **−** und **+** darunter oder mit den Pfeiltasten, wenn der Bogen ausgewählt ist. Darunter wählen Sie
@@ -76,8 +125,14 @@ die Betriebsart (**Aus**, **Auto**, **Ein**; **Eco** nur, wenn die Anlage es anb
 einmal, kurz nachdem Sie losgelassen oder aufgehört haben zu klicken. Beim Warmwasser schaltet **Einmalladung** den
 Speicher einmal auf. Bereich, Schrittweite und Betriebsarten kommen immer von der Anlage.
 
-**Zonen im Auto-Betrieb:** Im Auto-Betrieb heizt die Zone nach dem Zeitprogramm des Reglers. Dessen Temperatur
-meldet das Gateway über EEBUS nicht, und eine über EEBUS gesendete Solltemperatur wirkt dort nicht. Das
+**Zonen im Auto-Betrieb mit myVAILLANT:** Das Rundinstrument zeigt die Temperatur, die das Zeitprogramm gerade
+vorgibt. Ändern Sie sie, startet die Integration eine **zeitweise Übersteuerung** (Quick-Veto) für die Dauer, die in
+ihren Optionen steht (meist 3 Stunden); danach gilt wieder das Zeitprogramm. Während sie läuft, steht unter der Zone
+„Zeitweise übersteuert bis …“. In der Betriebsart **Ein** ändert die App die feste Solltemperatur der Zone. In
+**Aus** nimmt sie keine Solltemperatur an, weil eine Übersteuerung die Zone dann heizen würde.
+
+**Zonen im Auto-Betrieb mit EEBUS:** Im Auto-Betrieb heizt die Zone nach dem Zeitprogramm des Reglers. Dessen
+Temperatur meldet das Gateway über EEBUS nicht, und eine über EEBUS gesendete Solltemperatur wirkt dort nicht. Das
 Rundinstrument zeigt die Solltemperatur, die das Gateway meldet; sie gilt nur in der Betriebsart **Ein** und kann
 von dem Wert abweichen, den myVAILLANT für das laufende Zeitfenster zeigt. Im Auto-Betrieb ist sie gesperrt
 (Regler und −/+). Für eine zeitweise höhere oder niedrigere Temperatur (Boost) nutzen Sie die myVAILLANT-App oder
@@ -100,7 +155,8 @@ eine Lücke. Nach der Installation füllt sich der Verlauf erst nach und nach.
 
 **Energie heute (berechnet):** Die Wärmepumpe meldet über EEBUS keine Energiezähler, nur ihre aktuelle
 Leistungsaufnahme. Die App rechnet daraus den Stromverbrauch seit Mitternacht (Zeitzone von Home Assistant). Das
-ist eine Schätzung. Lief die App nicht oder war die Wärmepumpe nicht erreichbar, steht „(lückenhaft)“ dahinter;
+ist eine Schätzung. Mit myVAILLANT nimmt sie dafür den gewählten Leistungssensor; ohne ihn steht hier „nicht
+verfügbar“. Lief die App nicht oder war die Wärmepumpe nicht erreichbar, steht „(lückenhaft)“ dahinter;
 die fehlende Zeit wird nicht geschätzt. Das gilt auch für den ersten Tag nach der Installation.
 
 **Wärme heute und Arbeitszahl heute:** Haben Sie in den Einstellungen Sensoren mit der heute erzeugten Wärme
@@ -138,11 +194,14 @@ startet die App sicherheitshalber im Demo-Betrieb.
 
 ## Home Assistant
 
-Die App liest Werte aus Home Assistant und meldet ihre eigenen Werte dorthin. Sie ändert keine anderen Geräte
-oder Entitäten. Der einzige Dienst, den sie aufruft, ist `weather.get_forecasts` für die Temperaturprognose des
-Energiemanagements; er liest nur. Ist Home Assistant kurz nicht erreichbar (etwa bei einem Neustart),
-laufen Übersicht und Steuerung der Wärmepumpe weiter; die Werte aus Home Assistant stehen solange als „nicht
-verfügbar“ da. Ob die App gerade mit Home Assistant verbunden ist, zeigt die Seite **Einstellungen** neben der
+Die App liest Werte aus Home Assistant und meldet ihre eigenen Werte dorthin. Sie ruft diese Dienste auf:
+`weather.get_forecasts` für die Temperaturprognose des Energiemanagements (liest nur) und – nur mit der Anbindung
+myVAILLANT und nur für die gewählten myVAILLANT-Entitäten – `climate.set_temperature`, `climate.set_hvac_mode`,
+`water_heater.set_temperature`, `water_heater.set_operation_mode`, `mypyllant.set_quick_veto` und
+`mypyllant.cancel_quick_veto`. Diese gehen wie jede Änderung durch die Schreibsperre (Demo-Betrieb, Prüfung,
+Protokoll). Andere Geräte oder Entitäten ändert die App nicht. Ist Home Assistant kurz nicht erreichbar (etwa bei
+einem Neustart), laufen mit EEBUS Übersicht und Steuerung der Wärmepumpe weiter; die Werte aus Home Assistant
+stehen solange als „nicht verfügbar“ da. Mit myVAILLANT ist die Wärmepumpe so lange nicht erreichbar. Ob die App gerade mit Home Assistant verbunden ist, zeigt die Seite **Einstellungen** neben der
 Überschrift „Home Assistant“.
 
 Eingerichtet wird alles unter **Einstellungen**, gespeichert mit **Speichern**:
@@ -199,7 +258,8 @@ alle 15 Minuten neu, außerdem sobald neue Strompreise oder eine neue PV-Prognos
   Strom, der mindestens 5 ct/kWh unter dem Tagesmittel liegt. Dann hebt er die Solltemperatur auf den Höchstwert
   (Voreinstellung 60 °C) und startet die Einmalladung. Danach kehrt er zum Grundwert zurück. Er senkt das
   Warmwasser nie unter den Grundwert.
-- **Zonen**, nur in der Betriebsart **Ein** und nur unter der Heizgrenze (Voreinstellung 15 °C außen): Vorheizen um
+- **Zonen**, in der Betriebsart **Ein** (mit myVAILLANT auch im **Auto-Betrieb**, siehe unten) und nur unter der
+  Heizgrenze (Voreinstellung 15 °C außen): Vorheizen um
   die eingestellte Verschiebung (Voreinstellung +1 K), solange mindestens 1 kW PV-Überschuss erwartet wird, oder
   bei Strom mindestens 5 ct/kWh unter dem Tagesmittel (höchstens die 4 günstigsten Stunden am Tag). Absenken
   (Voreinstellung −1 K) nur bei Strom mindestens 5 ct/kWh über dem Tagesmittel, höchstens 3 Stunden am Tag; bei
@@ -208,6 +268,12 @@ alle 15 Minuten neu, außerdem sobald neue Strompreise oder eine neue PV-Prognos
   üblichen Hausverbrauch ohne Wärmepumpe lernt der Planer aus den letzten sieben Tagen in Home Assistant. Im Winter
   nimmt der Akku den Überschuss meist selbst auf; bei einem Festpreis tut der Planer dann wenig – das ist gewollt.
 - Warmwasser und Vorheizen können sich überschneiden; die Wärmepumpe lädt dann zuerst das Warmwasser.
+- **Zonen im Auto-Betrieb (nur myVAILLANT):** Für einen Block startet der Planer eine zeitweise Übersteuerung mit der
+  Temperatur des Zeitprogramms plus bzw. minus der Verschiebung, genau so lang wie der Block (mindestens eine
+  Stunde). Sie endet von selbst, auch wenn die App nicht mehr läuft. Endet der Block früher (neuer Plan, Aus,
+  Vorschau, Demo-Betrieb, App beendet), beendet der Planer sie. Starten oder beenden Sie selbst eine Übersteuerung,
+  lässt er die Zone bis zum Ende des Blocks in Ruhe. Wechselt das Zeitprogramm mitten im Block die Temperatur, gilt
+  bis zum Blockende der Wert vom Blockbeginn.
 
 **Grundwert:** Für jede Zone und das Warmwasser merkt sich der Planer den normalen Wert, beim Einschalten den
 aktuellen. Ändern Sie eine Solltemperatur selbst – in dieser App, in myVAILLANT oder am Gerät, auch während die
@@ -219,7 +285,7 @@ Wechsel in den Demo-Betrieb und wenn die App beendet wird (dafür hat er bis zu 
 neue Plan nicht mehr vorsieht, setzt er ihn ebenfalls zurück.
 
 **Was der Planer nie tut:** Betriebsarten umschalten, den Leistungsdeckel oder den Verdichter steuern, den Akku
-steuern oder Werte an die Wärmepumpe melden. Im Auto-Betrieb einer Zone verschiebt er nichts.
+steuern oder Werte an die Wärmepumpe melden. Mit EEBUS verschiebt er im Auto-Betrieb einer Zone nichts.
 
 **Einrichten** unter Einstellungen → Energiemanagement, gespeichert mit **Speichern**:
 
@@ -280,7 +346,8 @@ Messwerte stehen nicht im Protokoll. Es behält die letzten 10.000 Einträge.
 
 ## Diagnose-Dump
 
-Der Dump (Einstellungen → Diagnose) beschreibt die vollständige EEBUS-Struktur der Anlage: Zonen, Messwerte,
+Nur mit der Anbindung EEBUS. Der Dump (Einstellungen → Diagnose) beschreibt die vollständige EEBUS-Struktur der
+Anlage: Zonen, Messwerte,
 Sollwerte mit Grenzen und angebotene Betriebsarten. Die App schickt dafür nur Leseanfragen an das Gateway.
 Der Dump enthält Modell- und Seriennummern Ihrer Geräte; die SKI des Gateways ist gekürzt.
 
@@ -306,6 +373,14 @@ Der Dump enthält Modell- und Seriennummern Ihrer Geräte; die SKI des Gateways 
 - **Der Planer plant nichts:** Die Karte „Energiemanagement“ nennt fehlende Daten (Preis, PV-Prognose,
   Hausverbrauch, Akku, Temperaturprognose) und je Steuerung den Grund, etwa „nur in der Betriebsart Ein“ oder „über
   der Heizgrenze“. Für den Hausverbrauch braucht der Planer dessen Verlauf in Home Assistant.
+- **myVAILLANT: Werte ändern sich nur selten:** Die Integration fragt die Cloud nur in ihrem Intervall ab (siehe
+  „Einrichtung mit myVAILLANT“). „Stand“ in der Kopfzeile zeigt die letzte Abfrage.
+- **myVAILLANT: „Nicht ausgeführt (HTTP …)“ oder „Ergebnis unbekannt (HTTP 500)“ im Protokoll:** Home Assistant oder
+  die Integration hat den Befehl abgelehnt bzw. die Cloud hat einen Fehler gemeldet. Im Log von Home Assistant
+  nach „myVAILLANT“ suchen; steht dort „Quota Exceeded“, ist das Abrufkontingent der Cloud erschöpft.
+- **myVAILLANT: „Home Assistant nicht erreichbar“ oder „Getrennt“:** Mit myVAILLANT kommen alle Werte über Home
+  Assistant. „Getrennt“ heißt: Mindestens eine gewählte Zone oder das Warmwasser ist in Home Assistant „nicht
+  verfügbar“.
 - **Für eine Fehlermeldung:** Die Log-Stufe in den Optionen der App auf `debug` stellen, den Fehler nachstellen
   und das Log der App, den Diagnose-Dump und das Protokoll (CSV) einer Meldung unter
   <https://github.com/wattarosolar-lgtm/vaillant-eebus/issues> beifügen. Danach die Log-Stufe wieder auf `info`
@@ -313,8 +388,8 @@ Der Dump enthält Modell- und Seriennummern Ihrer Geräte; die SKI des Gateways 
 
 ## Deinstallieren
 
-1. In der myVAILLANT-App unter *Einstellungen → Netzwerk → EEBUS* diese App entfernen, damit das Gateway frei ist
-   für einen anderen EEBUS-Partner.
+1. Nur wenn die App je mit EEBUS gekoppelt war: In der myVAILLANT-App unter *Einstellungen → Netzwerk → EEBUS*
+   diese App entfernen, damit das Gateway frei ist für einen anderen EEBUS-Partner.
 2. In Home Assistant unter Einstellungen → Apps die App öffnen und **Deinstallieren** wählen.
 
 Das Deinstallieren löscht alle Daten der App (siehe „Daten und Sicherung“): Kopplung, Protokoll, Energiewerte und
@@ -323,8 +398,8 @@ gekoppelt werden. Die Sensoren `sensor.vaillant_eebus_…` verschwinden mit dem 
 
 ## Daten und Sicherung
 
-Die App speichert ihre EEBUS-Identität in `/data/eebus` (Zertifikat und Seriennummer), das gekoppelte Gateway,
-den gewählten Betrieb, die Räume, die Export-Auswahl und die Einstellungen des Energiemanagements in
+Die App speichert ihre EEBUS-Identität in `/data/eebus` (Zertifikat und Seriennummer), die Anbindung, die
+gewählten myVAILLANT-Entitäten, das gekoppelte Gateway, den gewählten Betrieb, die Räume, die Export-Auswahl und die Einstellungen des Energiemanagements in
 `/data/settings.json`, das Protokoll in `/data/app.db`, den berechneten Energieverbrauch je Tag (400 Tage) in
 `/data/energy.json`, die Grundwerte des Planers in `/data/hems.json` und seine Tageswerte (400 Tage) in
 `/data/hems_days.json`. Diese Dateien sind Teil der
