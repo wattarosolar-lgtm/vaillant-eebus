@@ -8,11 +8,20 @@
 
   const heatPump = $derived(live.connection === 'connected' && live.heat_pump?.available ? live.heat_pump : null);
   const outdoor = $derived(temperature(heatPump?.measurements['outdoor_temperature']));
+  // myVAILLANT: the values are as old as the integration's last poll of the cloud.
+  const reportedAt = $derived(
+    live.link === 'myvaillant' && heatPump?.captured_at
+      ? new Date(heatPump.captured_at).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+      : null,
+  );
 </script>
 
 <div class="status" aria-label="Status der Wärmepumpe">
   <StatusPill connection={live.connection} />
   {#if heatPump}
+    {#if reportedAt}
+      <span class="pill neutral" title="Letzte Abfrage der myVAILLANT-Integration">Stand {reportedAt}</span>
+    {/if}
     {#if heatPump.heartbeat_ok !== null}
       <span class="pill" class:ok={heatPump.heartbeat_ok} class:warn={!heatPump.heartbeat_ok}>
         {heatPump.heartbeat_ok ? 'Heartbeat OK' : 'Heartbeat fehlt'}

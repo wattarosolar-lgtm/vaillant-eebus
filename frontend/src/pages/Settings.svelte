@@ -2,29 +2,129 @@
   import DumpButton from '../components/DumpButton.svelte';
   import HemsSettings from '../components/HemsSettings.svelte';
   import HomeAssistantSettings from '../components/HomeAssistantSettings.svelte';
+  import MyVaillantChoice from '../components/MyVaillantChoice.svelte';
   import StatusPill from '../components/StatusPill.svelte';
-  import { PROJECT_LINKS, gatewayName, groupedSki, skiEnding } from '../lib/texts';
-  import type { HomeAssistantState, PairingStatus } from '../lib/types';
+  import { ApiError, saveConnection } from '../lib/api';
+  import { CONNECTION_NAMES, PROJECT_LINKS, gatewayName, groupedSki, skiEnding } from '../lib/texts';
+  import type { Connection, ConnectionStatus, HomeAssistantState, MyVaillantEntities, PairingStatus } from '../lib/types';
 
   let {
+    connection,
     status,
     zones,
     homeAssistant,
     onRepair,
+    onConnection,
+    onRestart,
   }: {
-    status: PairingStatus;
+    connection: ConnectionStatus;
+    /** EEBUS only: the pairing; null with myVAILLANT. */
+    status: PairingStatus | null;
     /** Zones the heat pump reports, for assigning rooms. */
     zones: { id: string; label: string }[];
     /** Live state of the connection to Home Assistant; null until the first update. */
     homeAssistant: HomeAssistantState | null;
     onRepair: () => void;
+    onConnection: (status: ConnectionStatus) => void;
+    /** The app restarts to work with this connection. */
+    onRestart: (to: Connection) => void;
   } = $props();
 
-  const gateway = $derived(status.paired);
+  const gateway = $derived(status?.paired ?? null);
+  const other = $derived<Connection>(connection.active === 'myvaillant' ? 'eebus' : 'myvaillant');
+  // Switching asks first; to myVAILLANT it needs the entities.
+  let switching = $state(false);
+  let busy = $state(false);
+  let error = $state<string | null>(null);
+  let saved = $state(false);
+
+  async function save(to: Connection, entities: MyVaillantEntities): Promise<void> {
+    busy = true;
+    error = null;
+    saved = false;
+    try {
+      const next = await saveConnection(to, entities);
+      onConnection(next);
+      if (next.restarting) {
+        onRestart(to);
+      } else {
+        saved = true;
+      }
+    } catch (err) {
+      error = err instanceof ApiError ? err.message : 'Die Anbindung konnte nicht gespeichert werden.';
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <div class="page">
+  <section class="card" aria-labelledby="connection-title">
+    <div class="head">
+      <h2 id="connection-title">Anbindung</h2>
+      <StatusPill connection={connection.state} />
+    </div>
+    <p class="secondary">
+      Die App erreicht die Wärmepumpe über <strong>{CONNECTION_NAMES[connection.active]}</strong>.
+      {#if connection.active === 'myvaillant'}
+        Die Werte kommen aus der Vaillant-Cloud und sind so alt wie die letzte Abfrage der Integration (in deren Optionen
+        einstellbar; zu kurze Abstände sperrt die Cloud zeitweise).
+      {/if}
+    </p>
+    {#if error}
+      <p class="banner error" role="alert">{error}</p>
+    {/if}
+    {#if connection.active === 'myvaillant' && !switching}
+      <MyVaillantChoice
+        initial={connection.myvaillant}
+        available={connection.home_assistant_available}
+        {busy}
+        submitLabel="Entitäten speichern"
+        onSubmit={(entities) => void save('myvaillant', entities)}
+      />
+      {#if saved}
+        <p class="hint" role="status">Gespeichert.</p>
+      {/if}
+    {/if}
+    {#if switching}
+      <div class="switch" role="group" aria-label="Anbindung wechseln">
+        <p>
+          Auf <strong>{CONNECTION_NAMES[other]}</strong> umstellen? Der Planer setzt seine Werte zurück, die App wechselt in
+          den Demo-Betrieb und startet neu. Raumsensoren ordnen Sie danach den Zonen neu zu.
+        </p>
+        {#if other === 'myvaillant'}
+          <MyVaillantChoice
+            initial={connection.myvaillant}
+            available={connection.home_assistant_available}
+            {busy}
+            submitLabel="Auf myVAILLANT umstellen"
+            onSubmit={(entities) => void save('myvaillant', entities)}
+          />
+        {:else}
+          <div>
+            <button
+              type="button"
+              class="button primary"
+              disabled={busy}
+              onclick={() => void save('eebus', connection.myvaillant)}>Auf EEBUS umstellen</button
+            >
+          </div>
+        {/if}
+        <div>
+          <button type="button" class="button" onclick={() => (switching = false)}>Abbrechen</button>
+        </div>
+      </div>
+    {:else}
+      <div>
+        <button type="button" class="button" onclick={() => (switching = true)}
+          >Auf {other === 'myvaillant' ? 'myVAILLANT' : 'EEBUS'} umstellen …</button
+        >
+      </div>
+    {/if}
+  </section>
+
   <div class="grid">
+    {#if status}
     <section class="card" aria-labelledby="pairing-title">
       <div class="head">
         <h2 id="pairing-title">Kopplung</h2>
@@ -64,12 +164,15 @@
       {/if}
       <DumpButton enabled={status.state === 'connected'} />
     </section>
+    {/if}
 
     <section class="card" aria-labelledby="about-title">
       <h2 id="about-title">Über die App</h2>
       <dl class="facts">
-        <div><dt>Version der App</dt><dd>{status.app_version}</dd></div>
-        <div><dt>Version der EEBUS-Bridge</dt><dd>{status.bridge.build || '—'}</dd></div>
+        <div><dt>Version der App</dt><dd>{connection.app_version}</dd></div>
+        {#if status}
+          <div><dt>Version der EEBUS-Bridge</dt><dd>{status.bridge.build || '—'}</dd></div>
+        {/if}
       </dl>
       <ul class="links">
         {#each PROJECT_LINKS as link (link.href)}
@@ -102,6 +205,15 @@
     grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     gap: 24px;
     align-items: start;
+  }
+
+  .switch {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
   }
 
   .head {

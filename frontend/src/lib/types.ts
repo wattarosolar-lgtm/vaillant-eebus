@@ -9,7 +9,35 @@ export type ConnectionState =
   | 'disconnected'
   | 'connected'
   | 'trust_removed'
-  | 'failed';
+  | 'failed'
+  // Connection myVAILLANT: no entities chosen yet, or Home Assistant not reachable.
+  | 'not_configured'
+  | 'ha_unavailable';
+
+/** How the app reaches the heat pump. */
+export type Connection = 'myvaillant' | 'eebus';
+
+/** The myVAILLANT integration's entities the app reads and controls. */
+export interface MyVaillantEntities {
+  /** Climate entities, one per zone; their IDs are the zones' IDs. */
+  zones: string[];
+  hot_water: string | null;
+  outdoor_temperature: string | null;
+  power: string | null;
+}
+
+export interface ConnectionStatus {
+  /** Null until chosen in the setup wizard. */
+  connection: Connection | null;
+  /** The connection the app works with right now. */
+  active: Connection;
+  state: ConnectionState;
+  myvaillant: MyVaillantEntities;
+  home_assistant_available: boolean;
+  app_version: string;
+  /** The app restarts to change the connection. */
+  restarting: boolean;
+}
 
 export interface Gateway {
   ski: string;
@@ -62,6 +90,9 @@ export interface Zone {
   mode: string | null;
   available_modes: string[];
   mode_writable: boolean;
+  /** myVAILLANT: a temporary override (quick veto) runs, until this time if known. */
+  override: boolean;
+  override_until: string | null;
 }
 
 export interface HotWater {
@@ -160,6 +191,8 @@ export interface HomeAssistantState {
 
 export interface ApiState {
   connection: ConnectionState;
+  /** Where the values come from. */
+  link: Connection;
   mode: OperatingMode;
   pending: PendingWrite[];
   heat_pump: HeatPumpState | null;
@@ -238,7 +271,16 @@ export interface LogPage {
 }
 
 /** What Home Assistant entities are offered for: rooms, heat, and the planner's inputs. */
-export type EntityKind = 'temperature' | 'energy' | 'power' | 'battery' | 'price' | 'pv_forecast' | 'weather';
+export type EntityKind =
+  | 'temperature'
+  | 'energy'
+  | 'power'
+  | 'battery'
+  | 'price'
+  | 'pv_forecast'
+  | 'weather'
+  | 'climate'
+  | 'water_heater';
 
 // --- energy management (hems/) ---------------------------------------------------
 

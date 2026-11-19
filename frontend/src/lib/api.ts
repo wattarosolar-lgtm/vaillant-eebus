@@ -4,6 +4,8 @@
 import type {
   ApiState,
   AppSettings,
+  Connection,
+  ConnectionStatus,
   EntityChoice,
   EntityKind,
   ExportGroup,
@@ -11,6 +13,7 @@ import type {
   HemsStatus,
   LogFilter,
   LogPage,
+  MyVaillantEntities,
   OperatingMode,
   PairingStatus,
   PlannerMode,
@@ -53,6 +56,25 @@ async function send(path: string, init?: RequestInit): Promise<Response> {
     throw await errorFrom(response);
   }
   return response;
+}
+
+export async function getConnection(): Promise<ConnectionStatus> {
+  return (await send('api/connection')).json() as Promise<ConnectionStatus>;
+}
+
+/** Saves the connection and the myVAILLANT entities; a new connection restarts the app (restarting). */
+export async function saveConnection(connection: Connection, myvaillant: MyVaillantEntities): Promise<ConnectionStatus> {
+  const response = await send('api/connection', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ connection, myvaillant }),
+  });
+  return response.json() as Promise<ConnectionStatus>;
+}
+
+/** The myVAILLANT integration's entities found in Home Assistant, as a suggestion. */
+export async function discoverMyVaillant(): Promise<MyVaillantEntities> {
+  return (await send('api/myvaillant/discover')).json() as Promise<MyVaillantEntities>;
 }
 
 export async function getPairing(): Promise<PairingStatus> {

@@ -19,8 +19,8 @@
     timeOfDay,
     watts,
   } from '../lib/format';
-  import { AUTO_MODE_SETPOINT_LOCKED, BRIDGE_PROBLEMS, VALUE_STATUS_LABELS } from '../lib/texts';
-  import type { ApiState, Control, Reading, RoomReading } from '../lib/types';
+  import { AUTO_MODE_OVERRIDE, AUTO_MODE_SETPOINT_LOCKED, BRIDGE_PROBLEMS, VALUE_STATUS_LABELS } from '../lib/texts';
+  import type { ApiState, Control, Reading, RoomReading, Zone } from '../lib/types';
 
   let { live, streamOpen }: { live: ApiState | null; streamOpen: boolean } = $props();
 
@@ -42,6 +42,21 @@
   }
 
   const homeAssistant = $derived(live?.home_assistant ?? null);
+  const myVaillant = $derived(live?.link === 'myvaillant');
+
+  /** myVAILLANT: a running override, or what a change does in auto. */
+  function zoneNote(zone: Zone): string | null {
+    if (!myVaillant) {
+      return null;
+    }
+    if (zone.override) {
+      const until = zone.override_until
+        ? new Date(zone.override_until).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+        : null;
+      return until ? `Zeitweise übersteuert bis ${until} Uhr.` : 'Zeitweise übersteuert.';
+    }
+    return zone.mode === 'auto' ? AUTO_MODE_OVERRIDE : null;
+  }
 
   function rooms(count: number): string {
     return count === 1 ? '1 Raum' : `${count} Räumen`;
@@ -118,10 +133,14 @@
 
 {#if live === null}
   <p class="secondary" role="status">Werte werden geladen …</p>
-{:else if live.connection === 'not_paired'}
+{:else if live.connection === 'not_paired' || live.connection === 'not_configured'}
   <section class="card">
-    <h2>Noch kein Gateway gekoppelt</h2>
-    <p class="secondary">Koppeln Sie zuerst das Gateway Ihrer Wärmepumpe.</p>
+    <h2>Noch nicht eingerichtet</h2>
+    <p class="secondary">
+      {live.connection === 'not_paired'
+        ? 'Koppeln Sie zuerst das Gateway Ihrer Wärmepumpe.'
+        : 'Wählen Sie zuerst die Entitäten der myVAILLANT-Integration.'}
+    </p>
     <div><a class="button primary link-button" href="#/einrichtung">Zur Einrichtung</a></div>
   </section>
 {:else if !BRIDGE_PROBLEMS[live.connection]}
@@ -135,7 +154,9 @@
       </p>
     {:else if heatPump && !heatPump.connected}
       <p class="banner warn" role="status">
-        Das Gateway ist gerade getrennt. Sobald es wieder verbunden ist, erscheinen die Werte.
+        {myVaillant
+          ? 'Die myVAILLANT-Integration meldet gerade keine Werte. Sobald ihre Entitäten wieder verfügbar sind, erscheinen sie.'
+          : 'Das Gateway ist gerade getrennt. Sobald es wieder verbunden ist, erscheinen die Werte.'}
       </p>
     {:else if heatPump === null}
       <p class="secondary" role="status">Werte werden geladen …</p>
@@ -147,6 +168,7 @@
           <!-- The room temperature is the average of the zone's rooms in Home
                Assistant; the gateway's own value is unreliable (field finding). -->
           {@const room = zoneRoom(zone.id)}
+          {@const note = zoneNote(zone)}
           <Dial
             title={zone.label}
             label="Raumtemperatur"
@@ -159,12 +181,16 @@
             appMode={live.mode}
             pendingSetpoint={pending('zone_setpoint', zone.id) as number | null}
             pendingMode={pending('zone_mode', zone.id) as string | null}
-            setpointLocked={zone.mode === 'auto' ? AUTO_MODE_SETPOINT_LOCKED : null}
+            setpointLocked={zone.mode === 'auto' && !myVaillant ? AUTO_MODE_SETPOINT_LOCKED : null}
             sendSetpoint={(value, shown) => setZoneSetpoint(zone.id, value, shown)}
             sendMode={(mode, shown) => setZoneMode(zone.id, mode, shown)}
             color="var(--heat)"
             textColor="var(--heat-text)"
-          />
+          >
+            {#if note}
+              <p class="hint">{note}</p>
+            {/if}
+          </Dial>
         {/each}
         {#if values.hot_water}
           <Dial

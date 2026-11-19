@@ -573,6 +573,7 @@ async def test_discover_and_connection_over_the_api(http: httpx.AsyncClient) -> 
         "outdoor_temperature": MV_OUTDOOR,
         "power": MV_POWER,
     }
+    assert status["app_version"] == "0.2.0-test"
     assert (status["connection"], status["active"], status["state"], status["restarting"]) == (
         "myvaillant",
         "myvaillant",

@@ -20,7 +20,24 @@ export const STATE_LABELS: Record<ConnectionState, { label: string; tone: Tone }
   connected: { label: 'Verbunden', tone: 'ok' },
   trust_removed: { label: 'Vertrauen entzogen', tone: 'error' },
   failed: { label: 'Verbindung gestört', tone: 'error' },
+  not_configured: { label: 'Nicht eingerichtet', tone: 'neutral' },
+  ha_unavailable: { label: 'Home Assistant nicht erreichbar', tone: 'error' },
 };
+
+export const CONNECTION_NAMES = {
+  myvaillant: 'myVAILLANT in Home Assistant',
+  eebus: 'EEBUS im Heimnetz',
+} as const;
+
+/** The subtitle of the page per connection. */
+export const CONNECTION_SUBTITLES = {
+  myvaillant: 'Vaillant · über myVAILLANT',
+  eebus: 'Vaillant · lokal über EEBUS',
+} as const;
+
+/** myVAILLANT, zone in auto: what a change of the setpoint does. */
+export const AUTO_MODE_OVERRIDE =
+  'Im Auto-Betrieb startet eine Änderung eine zeitweise Übersteuerung (Dauer laut myVAILLANT-Integration, meist 3 Stunden).';
 
 const OTHER_EEBUS_APP =
   'Vermutlich läuft noch eine andere EEBUS-App oder das Add-on „EEBUS Bridge“. Bitte unter Einstellungen → Apps stoppen und den Autostart ausschalten.';
@@ -31,6 +48,8 @@ export const BRIDGE_PROBLEMS: Partial<Record<ConnectionState, string>> = {
     'Die EEBUS-Bridge der App ist gerade nicht erreichbar. Sie wird automatisch neu gestartet; hält der Zustand an, bitte das Log der App prüfen.',
   ship_port_in_use: `Die EEBUS-Bridge der App kann nicht starten, weil der EEBUS-Port 4712 schon belegt ist. ${OTHER_EEBUS_APP} Die Bridge startet danach von selbst.`,
   foreign_bridge: `Unter der Adresse dieser App antwortet eine fremde EEBUS-Bridge. ${OTHER_EEBUS_APP} Danach diese App neu starten.`,
+  ha_unavailable:
+    'Home Assistant ist gerade nicht erreichbar. Mit der Anbindung myVAILLANT kommen alle Werte über Home Assistant; die App versucht es weiter.',
 };
 
 /** Operation modes in the order of the design's segment buttons. */

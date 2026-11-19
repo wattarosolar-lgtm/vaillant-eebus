@@ -5,9 +5,9 @@
   import ModeBanner from './components/ModeBanner.svelte';
   import ModeSwitch from './components/ModeSwitch.svelte';
   import StatusPill from './components/StatusPill.svelte';
-  import { ApiError, getPairing, setOperatingMode, subscribeState } from './lib/api';
-  import { BRIDGE_PROBLEMS } from './lib/texts';
-  import type { ApiState, OperatingMode, PairingStatus } from './lib/types';
+  import { ApiError, getConnection, getPairing, setOperatingMode, subscribeState } from './lib/api';
+  import { BRIDGE_PROBLEMS, CONNECTION_SUBTITLES } from './lib/texts';
+  import type { ApiState, Connection, ConnectionStatus, OperatingMode, PairingStatus } from './lib/types';
   import Log from './pages/Log.svelte';
   import Overview from './pages/Overview.svelte';
   import Settings from './pages/Settings.svelte';
@@ -16,12 +16,17 @@
   type Route = 'uebersicht' | 'einstellungen' | 'protokoll' | 'einrichtung';
   const ROUTES: Route[] = ['uebersicht', 'einstellungen', 'protokoll', 'einrichtung'];
 
-  // The pairing status drives setup and settings; the heat pump values arrive
-  // live over server-sent events. While connected the pairing rarely changes.
+  // The connection (and with EEBUS the pairing) drives setup and settings; the heat
+  // pump values arrive live over server-sent events. While connected they rarely change.
   const PAIRING_POLL_MS = 3000;
   const PAIRING_POLL_CONNECTED_MS = 30000;
+  // While the app restarts for another connection: how often to ask, and for how long.
+  const RESTART_POLL_MS = 1500;
+  const RESTART_GIVE_UP_MS = 90000;
 
+  let connection = $state<ConnectionStatus | null>(null);
   let pairing = $state<PairingStatus | null>(null);
+  let restarting = $state<Connection | null>(null);
   let live = $state<ApiState | null>(null);
   let streamOpen = $state(true);
   let loadError = $state<string | null>(null);
@@ -63,31 +68,67 @@
     window.location.hash = `#/${target}`;
   }
 
-  async function refreshPairing(): Promise<void> {
+  async function refreshStatus(): Promise<void> {
+    if (restarting !== null) {
+      return;
+    }
     try {
-      pairing = await getPairing();
+      const next = await getConnection();
+      pairing = next.active === 'eebus' ? await getPairing() : null;
+      connection = next;
       loadError = null;
     } catch (err) {
       loadError = err instanceof ApiError ? err.message : 'Der Status der App konnte nicht geladen werden.';
     }
   }
 
-  // Start page: the setup wizard without a paired gateway, the overview otherwise.
+  /** The app restarts with another connection: wait until it answers with it, then load it anew. */
+  async function awaitRestart(to: Connection): Promise<void> {
+    restarting = to;
+    const until = Date.now() + RESTART_GIVE_UP_MS;
+    while (Date.now() < until) {
+      await new Promise((resolve) => window.setTimeout(resolve, RESTART_POLL_MS));
+      try {
+        const next = await getConnection();
+        if (next.active === to && !next.restarting) {
+          // The start page follows from the new state: the overview, or the setup to pair a gateway.
+          window.location.hash = '';
+          window.location.reload();
+          return;
+        }
+      } catch {
+        // The backend is restarting; ask again.
+      }
+    }
+    restarting = null;
+    loadError = 'Die App ist nach dem Umstellen nicht wieder erreichbar. Bitte die App in Home Assistant neu starten.';
+  }
+
+  /** Setup is done: a connection is chosen and the heat pump is set up for it. */
+  const ready = $derived(
+    connection !== null &&
+      connection.connection !== null &&
+      (connection.active === 'myvaillant'
+        ? connection.myvaillant.zones.length > 0 || connection.myvaillant.hot_water !== null
+        : pairing?.paired != null),
+  );
+
+  // Start page: the setup wizard until setup is done, the overview otherwise.
   // Switching the route keeps the wizard open after pairing until the user leaves it.
   $effect(() => {
-    if (pairing !== null && route === '') {
-      navigate(pairing.paired === null ? 'einrichtung' : 'uebersicht');
+    if (connection !== null && (connection.active === 'myvaillant' || pairing !== null) && route === '') {
+      navigate(ready ? 'uebersicht' : 'einrichtung');
     }
   });
 
-  const connection = $derived(live?.connection ?? pairing?.state ?? null);
-  const problem = $derived(connection ? BRIDGE_PROBLEMS[connection] : undefined);
+  const linkState = $derived(live?.connection ?? connection?.state ?? null);
+  const problem = $derived(linkState ? BRIDGE_PROBLEMS[linkState] : undefined);
 
   onMount(() => {
     let timer: number | undefined;
     const poll = async (): Promise<void> => {
-      await refreshPairing();
-      const connected = pairing?.state === 'connected' && route !== 'einrichtung';
+      await refreshStatus();
+      const connected = connection?.state === 'connected' && route !== 'einrichtung';
       timer = window.setTimeout(() => void poll(), connected ? PAIRING_POLL_CONNECTED_MS : PAIRING_POLL_MS);
     };
     void poll();
@@ -115,21 +156,21 @@
   <header>
     <div class="title">
       <h1>Wärmepumpe</h1>
-      <p class="secondary">Vaillant · lokal über EEBUS</p>
+      <p class="secondary">{CONNECTION_SUBTITLES[connection?.active ?? 'eebus']}</p>
     </div>
     {#if route === 'uebersicht' && live}
       <div class="header-right">
-        {#if pairing?.paired}
+        {#if ready}
           <ModeSwitch mode={live.mode} disabled={modeBusy} onRequest={requestMode} />
         {/if}
         <HeaderStatus {live} />
       </div>
-    {:else if connection}
-      <StatusPill {connection} />
+    {:else if linkState}
+      <StatusPill connection={linkState} />
     {/if}
   </header>
 
-  {#if pairing?.paired && route !== 'einrichtung'}
+  {#if ready && route !== 'einrichtung'}
     <nav aria-label="Seiten">
       <a href="#/uebersicht" aria-current={route === 'uebersicht' ? 'page' : undefined}>Übersicht</a>
       <a href="#/protokoll" aria-current={route === 'protokoll' ? 'page' : undefined}>Protokoll</a>
@@ -137,7 +178,7 @@
     </nav>
   {/if}
 
-  {#if route === 'uebersicht' && live && pairing?.paired}
+  {#if route === 'uebersicht' && live && ready}
     <ModeBanner
       mode={live.mode}
       confirming={confirmingLive}
@@ -148,25 +189,44 @@
     />
   {/if}
 
-  {#if loadError}
+  {#if restarting}
+    <p class="banner info" role="status">
+      Die App startet mit der neuen Anbindung neu. Die Seite lädt gleich von selbst neu …
+    </p>
+  {:else if loadError}
     <p class="banner error" role="alert">{loadError}</p>
   {:else if problem}
     <p class="banner error" role="alert">{problem}</p>
   {/if}
 
   <main>
-    {#if pairing === null}
+    {#if restarting}
+      <!-- Nothing to use until the app answers again. -->
+    {:else if connection === null}
       {#if !loadError}
         <p class="secondary" role="status">Status wird geladen …</p>
       {/if}
     {:else if route === 'einrichtung'}
-      <Setup status={pairing} onChange={(next) => (pairing = next)} onFinish={() => navigate('uebersicht')} />
+      <Setup
+        {connection}
+        {pairing}
+        onConnection={(next) => (connection = next)}
+        onPairing={(next) => (pairing = next)}
+        onRestart={(to) => void awaitRestart(to)}
+        onFinish={() => {
+          void refreshStatus();
+          navigate('uebersicht');
+        }}
+      />
     {:else if route === 'einstellungen'}
       <Settings
+        {connection}
         status={pairing}
         zones={live?.heat_pump?.zones ?? []}
         homeAssistant={live?.home_assistant ?? null}
         onRepair={() => navigate('einrichtung')}
+        onConnection={(next) => (connection = next)}
+        onRestart={(to) => void awaitRestart(to)}
       />
     {:else if route === 'protokoll'}
       <Log />

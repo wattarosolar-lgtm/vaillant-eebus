@@ -151,6 +151,10 @@ class PairingService:
         self._connection_log = ConnectionLog(log=log)
 
     @property
+    def app_version(self) -> str:
+        return self._app_version
+
+    @property
     def paired_ski(self) -> str | None:
         return self._store.current.paired_ski
 

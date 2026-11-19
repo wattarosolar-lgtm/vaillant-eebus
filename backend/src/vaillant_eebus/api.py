@@ -254,6 +254,7 @@ class ConnectionStatus:
     myvaillant: MyVaillantEntities
     # False outside Home Assistant: myVAILLANT cannot be used.
     home_assistant_available: bool
+    app_version: str
     # True when the app restarts to change the connection.
     restarting: bool = False
 
@@ -382,6 +383,7 @@ def create_app(
             state=await connection_state(),
             myvaillant=current.myvaillant,
             home_assistant_available=home_assistant.available,
+            app_version=pairing.app_version,
             restarting=restarting,
         )
 
