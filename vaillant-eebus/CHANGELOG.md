@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.0 (noch nicht veröffentlicht)
+## 1.2.0
 
 **Anbindung über myVAILLANT:** Die App erreicht die Wärmepumpe jetzt wahlweise über die Entitäten der
 myVAILLANT-Integration in Home Assistant oder wie bisher lokal über EEBUS.

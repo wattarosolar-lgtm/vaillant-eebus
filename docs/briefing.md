@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.1.0; 1.2.0 mit Anbindung myVAILLANT auf `phase-9/myvaillant`)
+# Briefing: Vaillant EEBUS (Stand v1.2.0)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -10,15 +10,16 @@ Eine **Home-Assistant-App** (früher „Add-on“), die eine Vaillant-Wärmepump
 ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberfläche mit (Seitenleiste
 „Wärmepumpe“ in Home Assistant, über Ingress).
 
-- **Stand:** Version 1.1.0: die 7 Phasen der Spezifikation (1.0.0, an der Anlage abgenommen) und Phase 8, das
-  Energiemanagement (HEMS, Abschnitt 5d; Abnahme an der Anlage offen). 0.5.1 enthält
+- **Stand:** Version 1.2.0: die 7 Phasen der Spezifikation (1.0.0, an der Anlage abgenommen), Phase 8, das
+  Energiemanagement (HEMS, Abschnitt 5d), und Phase 9, die Anbindung myVAILLANT (Abschnitt 5e); Abnahme beider an
+  der Anlage offen. 0.5.1 enthält
   die Korrekturen aus dem Fehlertest vor dem Live-Test (Abschnitt 5a), 0.5.2 die aus der ersten Abnahme an der
   Anlage (ziehbarer Regler, Sperre im Auto-Betrieb, ruhigere Bedienung, „Energie heute“), 0.5.3 zeigt im
   Auto-Betrieb wieder Sollwert und Bogen (weiter gesperrt). 0.6.0 bindet Home Assistant an (Abschnitt 5b), 0.6.1
   ordnet die Einstellungsseite neu und addiert mehrere Wärmesensoren. 1.0.0 schließt ab: Protokoll (Probleme,
   Datum, CSV), Verlauf 24 h, „Über die App“, TLS mit Token für die Bridge (Abschnitt 5c), Doku, Aufräumen. 1.1.0
-  bringt den Planer für Warmwasser und Heizen nach Preis, PV-Prognose und Wetter (Abschnitt 5d). 1.2.0 (Phase 9,
-  noch nicht veröffentlicht) bringt die Anbindung myVAILLANT (Abschnitt 5e) und die Korrekturen aus der Prüfung von
+  bringt den Planer für Warmwasser und Heizen nach Preis, PV-Prognose und Wetter (Abschnitt 5d). 1.2.0 (Phase 9)
+  bringt die Anbindung myVAILLANT (Abschnitt 5e) und die Korrekturen aus der Prüfung von
   1.1.0, die als 1.1.1 geplant waren.
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
@@ -34,7 +35,7 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
 | 6 | HA-Import (Raumtemperatur je Zone als Mittelwert gewählter HA-Sensoren, Wärme heute), HA-Export als Sensoren | umgesetzt (0.6.0/0.6.1), weitgehend abgenommen (Prüfung von 0.6.1 offen) |
 | 7 | Einstellungs-/Protokollseite fertig, Verlauf 24 h, Absicherung der Bridge, Doku, Release | umgesetzt (1.0.0), an der Anlage abgenommen (21.10.2026) |
 | 8 | Energiemanagement: Planer für Warmwasser und Zonen, Tarife, PV-Überschuss, Wetter, Stufen Aus/Vorschau/Steuern | umgesetzt (1.1.0), Abnahme an der Anlage offen (erst Vorschau, dann Steuern) |
-| 9 | Anbindung myVAILLANT (Entitäten der Integration) neben EEBUS, wählbar; Planer im Auto-Betrieb über Quick-Veto | umgesetzt auf `phase-9/myvaillant` (1.2.0), Abnahme an der Anlage offen |
+| 9 | Anbindung myVAILLANT (Entitäten der Integration) neben EEBUS, wählbar; Planer im Auto-Betrieb über Quick-Veto | umgesetzt (1.2.0), Abnahme an der Anlage offen |
 
 ## 2. Repositories
 
