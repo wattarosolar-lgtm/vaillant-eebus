@@ -78,6 +78,9 @@ class Room:
     name: str
     # The zone whose average includes this room; None shows the room without a zone.
     zone_id: str | None = None
+    # The room's zone with the other connection (EEBUS or myVAILLANT), whose zones have
+    # other IDs; it comes back when the user switches back.
+    other_zone_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +207,7 @@ def valid_room(room: Room) -> bool:
     return (
         ENTITY_ID.match(room.entity_id) is not None
         and 0 < len(room.name.strip()) <= ROOM_NAME_MAX
-        and (room.zone_id is None or ZONE_ID.match(room.zone_id) is not None)
+        and all(zone is None or ZONE_ID.match(zone) is not None for zone in (room.zone_id, room.other_zone_id))
     )
 
 
@@ -278,9 +281,14 @@ def _rooms(raw: Any) -> tuple[Room, ...]:
     for item in raw:
         room = None
         if isinstance(item, dict):
-            entity_id, name, zone_id = item.get("entity_id"), item.get("name"), item.get("zone_id")
-            if isinstance(entity_id, str) and isinstance(name, str) and (zone_id is None or isinstance(zone_id, str)):
-                room = Room(entity_id=entity_id, name=name, zone_id=zone_id)
+            entity_id, name = item.get("entity_id"), item.get("name")
+            zone_id, other_zone_id = item.get("zone_id"), item.get("other_zone_id")
+            if (
+                isinstance(entity_id, str)
+                and isinstance(name, str)
+                and all(zone is None or isinstance(zone, str) for zone in (zone_id, other_zone_id))
+            ):
+                room = Room(entity_id=entity_id, name=name, zone_id=zone_id, other_zone_id=other_zone_id)
         if room is None or not valid_room(room):
             _LOGGER.warning("Settings: invalid room %r ignored", item)
             continue
@@ -323,7 +331,15 @@ def _to_json(settings: Settings) -> dict[str, Any]:
         "myvaillant": myvaillant_to_json(settings.myvaillant),
         "paired_ski": settings.paired_ski,
         "operating_mode": settings.operating_mode.value,
-        "rooms": [{"entity_id": room.entity_id, "name": room.name, "zone_id": room.zone_id} for room in settings.rooms],
+        "rooms": [
+            {
+                "entity_id": room.entity_id,
+                "name": room.name,
+                "zone_id": room.zone_id,
+                "other_zone_id": room.other_zone_id,
+            }
+            for room in settings.rooms
+        ],
         "heat_energy_entities": list(settings.heat_energy_entities),
         "export": sorted(group.value for group in settings.export),
         "hems": hems_to_json(settings.hems),

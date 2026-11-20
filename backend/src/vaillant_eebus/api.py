@@ -49,7 +49,7 @@ from vaillant_eebus.hems.config import (
 from vaillant_eebus.hems.service import HemsService, HemsStatus
 from vaillant_eebus.history import PowerHistory
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
-from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID
+from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID, is_own_entity
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore, csv_document
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
 from vaillant_eebus.settings import (
@@ -65,6 +65,7 @@ from vaillant_eebus.settings import (
 from vaillant_eebus.state import HeatPumpState, StateHub
 from vaillant_eebus.write_gate import (
     ControlCompressor,
+    EndZoneOverride,
     PendingWrite,
     SetConsumptionLimit,
     SetFailsafeLimit,
@@ -261,7 +262,8 @@ class ConnectionStatus:
 
 @dataclass(frozen=True, slots=True)
 class SettingsStatus:
-    rooms: list[Room]
+    # Each room's zone for the current connection (the other one's stays in the backend).
+    rooms: list[RoomModel]
     heat_energy_entities: list[str]
     export: list[ExportGroup]
     # Entity IDs the app currently reports to Home Assistant.
@@ -409,7 +411,7 @@ def create_app(
     def settings_status() -> SettingsStatus:
         current = home_assistant.settings
         return SettingsStatus(
-            rooms=list(current.rooms),
+            rooms=[RoomModel(entity_id=room.entity_id, name=room.name, zone_id=room.zone_id) for room in current.rooms],
             heat_energy_entities=list(current.heat_energy_entities),
             export=sorted(current.export),
             exported=home_assistant.exported(),
@@ -435,6 +437,12 @@ def create_app(
         entities = request.myvaillant.entities()
         if len(set(entities.zones)) != len(entities.zones):
             raise WriteRejected(422, "Jede Zone kann nur einmal gewählt werden.")
+        if any(entity and is_own_entity(entity) for entity in (entities.outdoor_temperature, entities.power)):
+            raise WriteRejected(
+                422,
+                "Die eigenen Sensoren der App (sensor.vaillant_eebus_…) können keine Quelle sein; ihr Wert käme nur "
+                "von der App selbst zurück. Bitte den Sensor der myVAILLANT-Integration wählen.",
+            )
         if request.connection is Connection.MYVAILLANT:
             if not home_assistant.available:
                 raise WriteRejected(409, "myVAILLANT geht nur, wenn die App in Home Assistant läuft.")
@@ -448,6 +456,15 @@ def create_app(
             if gate.mode is OperatingMode.LIVE:
                 # The new way is checked in demo mode first; live needs a new confirmation.
                 gate.set_mode(OperatingMode.DEMO, confirm=False)
+            # The zones have other IDs on the new way: the rooms take theirs along.
+            current = state.current
+            old_labels = {zone.id: zone.label for zone in current.zones} if current is not None else {}
+            new_labels = (
+                await home_assistant.myvaillant_zone_labels(entities.zones)
+                if request.connection is Connection.MYVAILLANT
+                else {}
+            )
+            home_assistant.switch_rooms(old_labels, new_labels)
             home_assistant.change_connection(request.connection)
             restarting = True
             if restart is not None:
@@ -501,6 +518,12 @@ def create_app(
     @app.post("/api/zones/{zone_id}/mode")
     async def set_zone_mode(zone_id: ZoneId, request: OperationModeRequest) -> WriteResult:
         command = SetZoneMode(zone_id=zone_id, mode=request.mode)
+        return await gate.submit(command, expected_mode=request.operating_mode)
+
+    @app.post("/api/zones/{zone_id}/override/end")
+    async def end_zone_override(zone_id: ZoneId, request: WriteRequest) -> WriteResult:
+        """myVAILLANT: end the zone's temporary override (quick veto); it follows its time program again."""
+        command = EndZoneOverride(zone_id=zone_id)
         return await gate.submit(command, expected_mode=request.operating_mode)
 
     @app.post("/api/dhw/setpoint")

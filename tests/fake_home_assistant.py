@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -63,6 +64,10 @@ class FakeHomeAssistant:
         self.service_status: dict[str, int] = {}
         # Climate entity -> the setpoint of its time program (shown again after a quick veto).
         self.programs: dict[str, float] = {}
+        # Seconds the Vaillant cloud lags behind: set, a device service shows the new value at
+        # once, falls back to the old one before it returns (the integration's refresh still
+        # gets the cloud's old data) and shows the new one again after this long.
+        self.cloud_lag: float | None = None
         self.connections = 0
         self.refuse_auth = False
         self._sockets: list[_Socket] = []
@@ -279,9 +284,16 @@ class FakeHomeAssistant:
         if service in self.service_status:
             return web.json_response({"message": "Failed"}, status=self.service_status[service])
         if service in _DEVICE_SERVICES:
-            if body.get("entity_id") not in self.states:
+            entity_id = body.get("entity_id")
+            if entity_id not in self.states:
                 return web.json_response({"message": "Entity not found"}, status=400)
+            before = copy.deepcopy(self.states[entity_id])
             self._device_service(service, body)
+            if self.cloud_lag is not None:
+                after = copy.deepcopy(self.states[entity_id])
+                await asyncio.sleep(0.05)
+                self._restore(entity_id, before)
+                asyncio.get_running_loop().call_later(self.cloud_lag, self._restore, entity_id, after)
             return web.json_response([])
         if service != "weather.get_forecasts" or "return_response" not in request.query:
             return web.json_response({"message": "Service does not support responses"}, status=400)
@@ -322,6 +334,9 @@ class FakeHomeAssistant:
                 operation = body["operation_mode"]
                 attributes = {} if operation == "Cylinder Boost" else {"operation_mode": operation}
                 self.change(entity_id, operation, **attributes)
+
+    def _restore(self, entity_id: str, saved: dict[str, Any]) -> None:
+        self.set(entity_id, saved["state"], attributes=saved["attributes"])
 
     def _quick_veto(self, entity_id: str, celsius: float, end: datetime) -> None:
         self.change(

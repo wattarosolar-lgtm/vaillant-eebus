@@ -37,9 +37,10 @@ from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.myvaillant import MyVaillantLink, MyVaillantState, discover, zone_label
 from vaillant_eebus.pairing import ConnectionState, PairingService
-from vaillant_eebus.settings import Connection, MyVaillantEntities, OperatingMode, SettingsStore
+from vaillant_eebus.settings import Connection, MyVaillantEntities, OperatingMode, Room, SettingsStore
 from vaillant_eebus.state import StateService
 from vaillant_eebus.write_gate import (
+    Control,
     EndZoneOverride,
     SetConsumptionLimit,
     SetHotWaterBoost,
@@ -168,6 +169,19 @@ def test_discover_suggests_the_integrations_entities() -> None:
     assert discover(states) == CHOSEN
 
 
+def test_discover_skips_the_apps_own_sensors() -> None:
+    # 1.2.0 suggested its own sensor: sorted by ID it comes first, and read back it never changes.
+    states = [
+        _entity(MV_OUTDOOR, "4.5", unit_of_measurement="°C"),
+        _entity("sensor.vaillant_eebus_outdoor_temperature", "12.5", unit_of_measurement="°C"),
+        _entity("sensor.vaillant_eebus_current_power", "850", unit_of_measurement="W"),
+    ]
+
+    found = discover(states)
+
+    assert (found.outdoor_temperature, found.power) == (MV_OUTDOOR, None)
+
+
 def test_zone_names_are_shortened() -> None:
     assert zone_label(_entity(MV_ZONE_1, friendly_name="Zuhause Zone 1 (Circuit 0) Climate"), 1) == "Zone 1"
     assert zone_label(_entity(MV_ZONE_1, friendly_name="Wohnen"), 1) == "Wohnen"
@@ -251,6 +265,24 @@ async def test_an_unavailable_zone_means_not_connected(device: MyVaillantState, 
 
     await eventually(lambda: device.connection_state() is ConnectionState.DISCONNECTED)
     assert device.current is not None and device.current.zones[0].setpoint is None
+
+
+async def test_a_switched_off_zone_has_no_setpoint(device: MyVaillantState, fake_ha: FakeHomeAssistant) -> None:
+    # Vaillant reports 0 while the zone is off.
+    fake_ha.change(MV_ZONE_2, "off", temperature=0.0)
+
+    await eventually(lambda: device.current is not None and device.current.zones[1].mode == "off")
+    assert device.current is not None and device.current.zones[1].setpoint is None
+
+
+async def test_the_setback_keeps_the_last_setpoint(device: MyVaillantState, fake_ha: FakeHomeAssistant) -> None:
+    # The integration's preset "eco": time program, no special function, setpoint 0.
+    fake_ha.change(MV_ZONE_1, preset_mode="eco", temperature=0.0)
+
+    await eventually(lambda: device.current is not None and device.current.zones[0].setback)
+    zone = device.current.zones[0] if device.current else None
+    assert zone is not None and zone.mode == "auto" and not zone.override
+    assert zone.setpoint is not None and zone.setpoint.value == 21.5
 
 
 def test_without_chosen_entities_there_is_no_heat_pump(settings_store: SettingsStore) -> None:
@@ -413,6 +445,7 @@ async def test_a_refused_call_did_not_arrive(live: WriteGate, fake_ha: FakeHomeA
         await live.submit(SetZoneSetpoint(zone_id=MV_ZONE_2, celsius=22.0))
 
     assert live.pending == []
+    assert not live.settling(Control.ZONE_SETPOINT, MV_ZONE_2)
     assert "Nicht ausgeführt: Zone 2: Solltemperatur 22,0 °C (HTTP 400)" in await messages(log_store)
 
 
@@ -440,6 +473,136 @@ async def test_the_entity_confirms_a_sent_value(live: WriteGate, log_store: LogS
             await follower
 
     assert "Bestätigt vom Gerät: Zone 2: Solltemperatur 22,5 °C" in await messages(log_store)
+
+
+def clocked_gate(
+    bridge_client: BridgeClient,
+    pairing: PairingService,
+    device: MyVaillantState,
+    settings: SettingsStore,
+    log: LogStore,
+    ha: HomeAssistantClient,
+) -> WriteGate:
+    """A live gate on the real clock: confirmation times stay as in the app."""
+    gate = WriteGate(bridge_client, pairing, device, settings, log, link=MyVaillantLink(ha, device, settings))
+    gate.set_mode(OperatingMode.LIVE, confirm=True)
+    return gate
+
+
+@contextlib.asynccontextmanager
+async def following(gate: WriteGate, device: MyVaillantState) -> AsyncIterator[None]:
+    """The gate's loop runs, as in the app, and has learned the device's values."""
+    follower = asyncio.create_task(gate.run())
+    try:
+        await asyncio.sleep(0.05)
+        device.republish()
+        await asyncio.sleep(0.05)
+        yield
+    finally:
+        follower.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await follower
+
+
+async def test_the_clouds_lag_is_no_change_at_the_device(
+    bridge_client: BridgeClient,
+    pairing: PairingService,
+    device: MyVaillantState,
+    chosen: SettingsStore,
+    log_store: LogStore,
+    ha: HomeAssistantClient,
+    fake_ha: FakeHomeAssistant,
+) -> None:
+    # The integration shows 22,5 at once, falls back to the cloud's 23,0 and shows 22,5 again later.
+    fake_ha.cloud_lag = 0.3
+    gate = clocked_gate(bridge_client, pairing, device, chosen, log_store, ha)
+    async with following(gate, device):
+        await gate.submit(SetZoneSetpoint(zone_id=MV_ZONE_2, celsius=22.5))
+        assert gate.settling(Control.ZONE_SETPOINT, MV_ZONE_2)
+        await wait_logged(log_store, "Bestätigt vom Gerät: Zone 2: Solltemperatur 22,5 °C")
+        # The cloud catches up; until then (and a little longer) the old value is no change.
+        await eventually(lambda: fake_ha.states[MV_ZONE_2]["attributes"]["temperature"] == 22.5)
+        await asyncio.sleep(0.05)
+        assert gate.settling(Control.ZONE_SETPOINT, MV_ZONE_2) and gate.pending == []
+
+    logged = await messages(log_store)
+    assert not [message for message in logged if message.startswith("Am Gerät geändert")]
+    assert logged.count("Bestätigt vom Gerät: Zone 2: Solltemperatur 22,5 °C") == 1
+
+
+async def test_an_ended_override_is_confirmed_by_the_time_program(
+    bridge_client: BridgeClient,
+    pairing: PairingService,
+    device: MyVaillantState,
+    chosen: SettingsStore,
+    log_store: LogStore,
+    ha: HomeAssistantClient,
+    fake_ha: FakeHomeAssistant,
+) -> None:
+    end = datetime.now(UTC) + timedelta(hours=3)
+    fake_ha.change(MV_ZONE_1, preset_mode="boost", temperature=23.0, quick_veto_end_date_time=end.isoformat())
+    await eventually(lambda: overridden(device))
+    fake_ha.cloud_lag = 0.3
+    gate = clocked_gate(bridge_client, pairing, device, chosen, log_store, ha)
+    async with following(gate, device):
+        await gate.submit(EndZoneOverride(zone_id=MV_ZONE_1))
+        assert [write.value for write in gate.pending] in ([], ["end_override"])
+        await wait_logged(log_store, "Bestätigt vom Gerät: Zone 1: Solltemperatur 21,5 °C (Zeitprogramm)")
+        await eventually(lambda: fake_ha.states[MV_ZONE_1]["attributes"]["preset_mode"] == "none")
+        await asyncio.sleep(0.05)
+
+    assert not [message for message in await messages(log_store) if message.startswith("Am Gerät geändert")]
+
+
+async def test_a_value_being_sent_shows_while_the_call_runs(
+    bridge_client: BridgeClient,
+    pairing: PairingService,
+    device: MyVaillantState,
+    chosen: SettingsStore,
+    log_store: LogStore,
+    ha: HomeAssistantClient,
+    fake_ha: FakeHomeAssistant,
+) -> None:
+    fake_ha.cloud_lag = 0.3
+    gate = clocked_gate(bridge_client, pairing, device, chosen, log_store, ha)
+    shown: list[list[float | str | bool]] = []
+
+    async def watch() -> None:
+        while True:
+            shown.append([write.value for write in gate.pending])
+            await asyncio.sleep(0.01)
+
+    watcher = asyncio.create_task(watch())
+    try:
+        await gate.submit(SetZoneSetpoint(zone_id=MV_ZONE_2, celsius=22.5))
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+
+    # From before the call returned on, the value stays pending until the device confirms it.
+    assert [22.5] in shown
+    assert [] not in shown[shown.index([22.5]) :]
+    assert [write.value for write in gate.pending] == [22.5]
+
+
+async def test_an_outside_change_while_a_value_settles_is_reported_after_it(
+    bridge_client: BridgeClient,
+    pairing: PairingService,
+    device: MyVaillantState,
+    chosen: SettingsStore,
+    log_store: LogStore,
+    ha: HomeAssistantClient,
+    fake_ha: FakeHomeAssistant,
+) -> None:
+    gate = clocked_gate(bridge_client, pairing, device, chosen, log_store, ha)
+    async with following(gate, device):
+        await gate.submit(SetZoneSetpoint(zone_id=MV_ZONE_2, celsius=22.5))
+        await wait_logged(log_store, "Bestätigt vom Gerät: Zone 2: Solltemperatur 22,5 °C")
+        fake_ha.change(MV_ZONE_2, temperature=21.0)
+        await wait_logged(
+            log_store, "Am Gerät geändert: Zone 2: Solltemperatur 21,0 °C (vorher Solltemperatur 22,5 °C)"
+        )
 
 
 async def test_the_time_program_moving_on_is_no_change_at_the_device(
@@ -616,6 +779,87 @@ async def test_myvaillant_needs_a_zone_or_the_hot_water(http: httpx.AsyncClient)
     assert response.status_code == 422
 
 
+async def test_the_apps_own_sensors_are_no_source(http: httpx.AsyncClient) -> None:
+    for chosen_sensors in (
+        {"outdoor_temperature": "sensor.vaillant_eebus_outdoor_temperature"},
+        {"power": "sensor.vaillant_eebus_power"},
+    ):
+        response = await http.put(
+            "/api/connection",
+            json={"connection": "myvaillant", "myvaillant": {"zones": [MV_ZONE_1], **chosen_sensors}},
+        )
+
+        assert response.status_code == 422
+
+
+async def test_an_own_sensor_chosen_before_is_dropped_at_the_start(
+    chosen: SettingsStore, device: MyVaillantState, ha: HomeAssistantClient, log_store: LogStore, tmp_path: Path
+) -> None:
+    own = "sensor.vaillant_eebus_outdoor_temperature"
+    chosen.update(lambda settings: replace(settings, myvaillant=replace(CHOSEN, outdoor_temperature=own)))
+
+    HomeAssistant(chosen, device, EnergyMeter(device, tmp_path), log_store, ha)
+
+    assert chosen.current.myvaillant == replace(CHOSEN, outdoor_temperature=None)
+    entries = (await log_store.page()).entries
+    assert any(entry.problem and entry.message.startswith(f"myVAILLANT: {own} entfernt") for entry in entries)
+
+
+async def test_an_override_ends_over_the_api(
+    http: httpx.AsyncClient, device: MyVaillantState, fake_ha: FakeHomeAssistant, log_store: LogStore
+) -> None:
+    end = datetime.now(UTC) + timedelta(hours=3)
+    fake_ha.change(MV_ZONE_1, preset_mode="boost", temperature=23.0, quick_veto_end_date_time=end.isoformat())
+    await eventually(lambda: overridden(device))
+    path = f"/api/zones/{MV_ZONE_1}/override/end"
+
+    demo = await http.post(path, json={"operating_mode": "demo"})
+    await http.post("/api/mode", json={"mode": "live", "confirm": True})
+    live = await http.post(path, json={"operating_mode": "live"})
+
+    assert demo.status_code == 200 and demo.json()["sent"] is False
+    assert "Würde senden: Zone 1: Übersteuerung beenden" in await messages(log_store)
+    assert live.status_code == 200 and live.json()["sent"] is True
+    assert device_calls(fake_ha) == [("mypyllant.cancel_quick_veto", {"entity_id": MV_ZONE_1})]
+    await eventually(lambda: not overridden(device))
+
+
+async def test_rooms_take_their_zone_along_when_the_connection_changes(
+    chosen: SettingsStore, device: MyVaillantState, ha: HomeAssistantClient, log_store: LogStore, tmp_path: Path
+) -> None:
+    home_assistant = HomeAssistant(chosen, device, EnergyMeter(device, tmp_path), log_store, ha)
+    rooms = (
+        Room(entity_id="sensor.wohnzimmer", name="Wohnzimmer", zone_id="5.1.1"),
+        Room(entity_id="sensor.bad", name="Bad", zone_id="6.1.1"),
+        Room(entity_id="sensor.keller", name="Keller"),
+    )
+    chosen.update(lambda settings: replace(settings, rooms=rooms))
+
+    # EEBUS -> myVAILLANT: the zones are found by their names.
+    labels = await home_assistant.myvaillant_zone_labels([MV_ZONE_1, MV_ZONE_2])
+    home_assistant.switch_rooms({"5.1.1": "Zone 1", "6.1.1": "Zone 2"}, labels)
+    assert labels == {MV_ZONE_1: "Zone 1", MV_ZONE_2: "Zone 2"}
+    assert [(room.zone_id, room.other_zone_id) for room in chosen.current.rooms] == [
+        (MV_ZONE_1, "5.1.1"),
+        (MV_ZONE_2, "6.1.1"),
+        (None, None),
+    ]
+    assert "Räume für die neue Anbindung: Wohnzimmer (Zone 1), Bad (Zone 2), Keller (keine Zone)" in await messages(
+        log_store
+    )
+
+    # The UI changes the zones of myVAILLANT only; back on EEBUS its own zones return.
+    edited = (replace(rooms[0], zone_id=MV_ZONE_2), replace(rooms[1], zone_id=MV_ZONE_2), rooms[2])
+    home_assistant.change(edited, (), chosen.current.export)
+    home_assistant.switch_rooms(labels, {})
+    assert [(room.zone_id, room.other_zone_id) for room in chosen.current.rooms] == [
+        ("5.1.1", MV_ZONE_2),
+        ("6.1.1", MV_ZONE_2),
+        (None, None),
+    ]
+    assert SettingsStore(chosen.path.parent).load().rooms == chosen.current.rooms
+
+
 async def test_switching_to_myvaillant_outside_home_assistant_is_refused(
     client_eebus: httpx.AsyncClient,
 ) -> None:
@@ -693,11 +937,18 @@ def raise_plan(clock: Clock, zone: str = MV_ZONE_1, hours: float = 2.0) -> Plan:
 
 
 @pytest.fixture
-def planner(
+async def planner(
     live: WriteGate, device: MyVaillantState, chosen: SettingsStore, log_store: LogStore, tmp_path: Path, clock: Clock
-) -> Executor:
+) -> AsyncIterator[Executor]:
     control_mode(chosen, PlannerMode.CONTROL)
-    return Executor(live, device, chosen, log_store, tmp_path, clock=clock)
+    # As in the app, the gate confirms sent values; until then the planner leaves the control alone.
+    follower = asyncio.create_task(live.run())
+    try:
+        yield Executor(live, device, chosen, log_store, tmp_path, clock=clock)
+    finally:
+        follower.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await follower
 
 
 def overridden(device: MyVaillantState) -> bool:
@@ -788,6 +1039,48 @@ async def test_ending_the_planners_override_by_hand_pauses_the_zone(
     assert "Planer: Zone 1 Übersteuerung von Hand beendet; der Planer wartet bis zum Blockende." in await messages(
         log_store
     )
+
+
+async def test_the_clouds_lag_does_not_pause_the_planner(
+    bridge_client: BridgeClient,
+    pairing: PairingService,
+    device: MyVaillantState,
+    chosen: SettingsStore,
+    log_store: LogStore,
+    ha: HomeAssistantClient,
+    fake_ha: FakeHomeAssistant,
+    clock: Clock,
+    tmp_path: Path,
+) -> None:
+    # Right after the quick veto the cloud still reports the time program: no override.
+    fake_ha.cloud_lag = 0.3
+    control_mode(chosen, PlannerMode.CONTROL)
+    gate = clocked_gate(bridge_client, pairing, device, chosen, log_store, ha)
+    planner = Executor(gate, device, chosen, log_store, tmp_path, clock=clock)
+    plan = raise_plan(clock)
+    async with following(gate, device):
+        await planner.step(plan)
+        await eventually(lambda: not overridden(device))
+        await planner.step(plan)
+        await eventually(lambda: overridden(device))
+        await wait_logged(log_store, "Bestätigt vom Gerät: Zone 1: Solltemperatur 22,5 °C")
+        await planner.step(plan)
+
+    assert [service for service, _body in device_calls(fake_ha)] == ["mypyllant.set_quick_veto"]
+    assert planner.shifted() == {MV_ZONE_1: 22.5}
+    assert not [message for message in await messages(log_store) if "von Hand" in message]
+
+
+async def test_the_planner_leaves_a_zone_in_its_setback_alone(
+    planner: Executor, device: MyVaillantState, fake_ha: FakeHomeAssistant, clock: Clock
+) -> None:
+    # The time program's value is unknown while Vaillant reports the setback.
+    fake_ha.change(MV_ZONE_1, preset_mode="eco", temperature=0.0)
+    await eventually(lambda: device.current is not None and device.current.zones[0].setback)
+
+    await planner.step(raise_plan(clock))
+
+    assert device_calls(fake_ha) == []
 
 
 async def test_preview_names_the_override_and_sends_nothing(

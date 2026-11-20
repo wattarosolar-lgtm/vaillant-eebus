@@ -53,8 +53,13 @@ RATE_LIMIT_S = 5.0
 CONFIRM_TIMEOUT_S = 30.0
 # Through the Vaillant cloud a value takes longer to come back.
 LINK_CONFIRM_TIMEOUT_S = 90.0
+# After a value sent over myVAILLANT was confirmed, the integration's refresh may still bring
+# the cloud's old value for a moment; for this long that is no change at the device.
+LINK_SETTLE_S = 20.0
 # Hours a temporary override (quick veto) may last.
 OVERRIDE_HOURS = (1.0, 24.0)
+# What ending an override sets: the zone follows its time program again.
+TIME_PROGRAM = "time_program"
 
 # Errors after which the value certainly did not reach the device: the bridge
 # refused the request before sending it, or the device answered with a
@@ -259,6 +264,12 @@ class _Pending:
     write: PendingWrite
     target: Hashable
     sent_at: float
+    # The device's value before the command; myVAILLANT may fall back to it for a moment.
+    before: Hashable | None = None
+    # myVAILLANT: the service call has not returned yet.
+    in_flight: bool = False
+    # myVAILLANT: when the device reported the value; kept LINK_SETTLE_S longer.
+    confirmed_at: float | None = None
 
 
 type _Key = tuple[Control, str | None]
@@ -310,7 +321,26 @@ class WriteGate:
 
     @property
     def pending(self) -> list[PendingWrite]:
-        return [pending.write for pending in self._pending.values()]
+        # A confirmed value counts again while the cloud shows its old one for a moment.
+        # Ending an override shows as "end_override".
+        return [
+            pending.write
+            for key, pending in self._pending.items()
+            if pending.confirmed_at is None or not self._shows(key, pending.target)
+        ]
+
+    def _shows(self, key: _Key, target: Hashable) -> bool:
+        observed = self._last_values.get(key)
+        return observed is not None and _reached(target, observed)
+
+    def settling(self, control: Control, zone_id: str | None = None) -> bool:
+        """A value sent over myVAILLANT is not confirmed yet.
+
+        The integration shows a sent value at once and may then fall back to the
+        cloud's old value for a moment, so until the value is confirmed (or not
+        confirmed in time) the device's value says nothing about outside changes.
+        """
+        return self._link is not None and (control, zone_id) in self._pending
 
     def set_mode(self, mode: OperatingMode, *, confirm: bool) -> OperatingMode:
         """Switch between demo and live; live needs the user's explicit confirmation."""
@@ -435,10 +465,22 @@ class WriteGate:
             self._log.add(LogCategory.WRITE, f"Abgelehnt: {description}. Zu schnell nacheinander.", problem=True)
             raise WriteRejected(429, message, retry_after=wait)
         self._last_sent[key] = now
+        before = current.value if current is not None else None
 
         # In the database before the bridge sees the command, so even a crash
         # of the app in the middle of a write leaves a trace.
         await self._log.record(LogCategory.WRITE, f"Wird gesendet: {description}")
+        if self._link is not None:
+            # The myVAILLANT integration shows the new value while the call still
+            # runs: known beforehand, it is not mistaken for an outside change.
+            self._pending[key] = _Pending(
+                write=_pending_write(command, key, description),
+                target=target,
+                sent_at=now,
+                before=before,
+                in_flight=True,
+            )
+            self._state.republish()
         try:
             if self._link is not None:
                 await self._link.send_command(command)
@@ -447,6 +489,7 @@ class WriteGate:
                 await _call_bridge(self._bridge, ski, command)
         except ServiceCallFailed as err:
             if err.executed is False:
+                self._drop_in_flight(key)
                 _LOGGER.warning("Write not executed (%s): %s", err, description)
                 self._log.add(LogCategory.WRITE, f"Nicht ausgeführt: {description} ({err.code})", problem=True)
                 raise WriteNotExecuted(err.code) from err
@@ -456,7 +499,7 @@ class WriteGate:
                 f"Ergebnis unbekannt: {description} ({err.code}); die App prüft, ob die Wärmepumpe den Wert meldet.",
                 problem=True,
             )
-            self._follow(command, key, target, description, now)
+            self._follow(command, key, target, description, now, before=before)
             raise WriteOutcomeUnknown(err.code) from err
         except grpc.aio.AioRpcError as err:
             code = err.code()
@@ -475,29 +518,45 @@ class WriteGate:
             )
             self._follow(command, key, target, description, now)
             raise WriteOutcomeUnknown(code) from err
+        except BaseException:
+            # Refused before sending, or the app stops: nothing left to follow.
+            self._drop_in_flight(key)
+            raise
         _LOGGER.info("Sent: %s", description)
         message = f"Gesendet: {description}"
         self._log.add(LogCategory.WRITE, message)
-        self._follow(command, key, target, description, now)
+        self._follow(command, key, target, description, now, before=before)
         return WriteResult(sent=True, mode=OperatingMode.LIVE, message=message)
 
-    def _follow(self, command: Command, key: _Key, target: Hashable | None, description: str, sent_at: float) -> None:
+    def _follow(
+        self,
+        command: Command,
+        key: _Key,
+        target: Hashable | None,
+        description: str,
+        sent_at: float,
+        *,
+        before: Hashable | None = None,
+    ) -> None:
         """Watch for the device to report a sent value."""
         self._unresolved.pop(key, None)
         if target is not None:
             self._pending[key] = _Pending(
-                write=PendingWrite(
-                    control=key[0],
-                    zone_id=key[1],
-                    value=_primary_value(command),
-                    message=description,
-                    since=datetime.now(UTC),
-                ),
+                write=_pending_write(command, key, description),
                 target=target,
                 sent_at=sent_at,
+                before=before,
             )
             self._state.republish()
+        else:
+            self._drop_in_flight(key)
         self._state.refresh_now()
+
+    def _drop_in_flight(self, key: _Key) -> None:
+        pending = self._pending.get(key)
+        if pending is not None and pending.in_flight:
+            del self._pending[key]
+            self._state.republish()
 
     def _observe(self, heat_pump: HeatPumpState | None) -> None:
         self._device_reachable = heat_pump is not None and heat_pump.available and heat_pump.connected
@@ -506,14 +565,28 @@ class WriteGate:
         changed = False
         for key, observed in _device_values(heat_pump).items():
             pending = self._pending.get(key)
+            if pending is not None and pending.in_flight:
+                # myVAILLANT shows the value being sent at once and may fall back to the
+                # cloud's old value; what counts is the state once the call returned.
+                self._last_values[key] = observed
+                continue
             unresolved = self._unresolved.pop(key, None)
             previous = self._last_values.get(key)
-            if pending is not None and observed.value == pending.target:
-                del self._pending[key]
-                changed = True
-                self._log.add(LogCategory.WRITE, f"Bestätigt vom Gerät: {observed.text}")
+            if pending is not None and _reached(pending.target, observed):
+                if pending.confirmed_at is None:
+                    changed = True
+                    text = f"{observed.text} (Zeitprogramm)" if pending.target == TIME_PROGRAM else observed.text
+                    self._log.add(LogCategory.WRITE, f"Bestätigt vom Gerät: {text}")
+                    if self._link is not None:
+                        # The cloud may still send its old value for a moment; see _observe below.
+                        pending.confirmed_at = self._clock()
+                    else:
+                        del self._pending[key]
+                elif previous is None or not _reached(pending.target, previous):
+                    # Back after the cloud's old value: no longer shown as pending.
+                    changed = True
             elif unresolved is not None:
-                if observed.value == unresolved.target:
+                if _reached(unresolved.target, observed):
                     self._log.add(LogCategory.WRITE, f"Nachträglich bestätigt vom Gerät: {observed.text}")
                 else:
                     self._log.add(
@@ -526,6 +599,16 @@ class WriteGate:
                     # The time program moved on; nobody changed anything.
                     self._last_values[key] = observed
                     continue
+                if self._link is not None and pending is not None and observed.value == pending.before:
+                    # The cloud still reports the value from before the command (also just after it
+                    # was confirmed: the integration's refresh may arrive after the call's answer).
+                    self._last_values[key] = observed
+                    # A confirmed value shows as pending again meanwhile.
+                    changed = changed or pending.confirmed_at is not None
+                    continue
+                if pending is not None and pending.confirmed_at is not None:
+                    # A real change after the confirmation ends the wait for the cloud.
+                    del self._pending[key]
                 self._log.add(
                     LogCategory.DEVICE, f"Am Gerät geändert: {observed.text} (vorher {_value_part(previous)})"
                 )
@@ -533,15 +616,38 @@ class WriteGate:
         if changed:
             self._state.republish()
 
-    def _seconds_to_next_expiry(self) -> float | None:
-        if not self._pending:
+    def _deadline(self, pending: _Pending) -> float | None:
+        """When a followed value stops being followed; None while its call still runs."""
+        if pending.in_flight:
             return None
-        oldest = min(pending.sent_at for pending in self._pending.values())
-        return max(0.0, oldest + self._confirm_timeout_s - self._clock())
+        if pending.confirmed_at is not None:
+            return pending.confirmed_at + LINK_SETTLE_S
+        return pending.sent_at + self._confirm_timeout_s
+
+    def _seconds_to_next_expiry(self) -> float | None:
+        deadlines = [
+            deadline for pending in self._pending.values() if (deadline := self._deadline(pending)) is not None
+        ]
+        if not deadlines:
+            return None
+        return max(0.0, min(deadlines) - self._clock())
 
     def _expire(self) -> None:
         now = self._clock()
-        expired = [key for key, pending in self._pending.items() if now - pending.sent_at >= self._confirm_timeout_s]
+        settled = [
+            key
+            for key, pending in self._pending.items()
+            if pending.confirmed_at is not None and now >= pending.confirmed_at + LINK_SETTLE_S
+        ]
+        for key in settled:
+            del self._pending[key]
+        expired = [
+            key
+            for key, pending in self._pending.items()
+            if not pending.in_flight
+            and pending.confirmed_at is None
+            and now - pending.sent_at >= self._confirm_timeout_s
+        ]
         for key in expired:
             pending = self._pending.pop(key)
             timed_out = f"Nicht bestätigt nach {self._confirm_timeout_s:.0f} s: {pending.write.message}"
@@ -592,7 +698,7 @@ def _target(command: Command) -> Hashable | None:
             return round(celsius, 3)
         case EndZoneOverride():
             # The zone returns to its time program, whose value the app does not know beforehand.
-            return None
+            return TIME_PROGRAM
         case SetZoneMode(mode=mode) | SetHotWaterMode(mode=mode):
             return mode
         case SetHotWaterBoost(active=active):
@@ -603,6 +709,11 @@ def _target(command: Command) -> Hashable | None:
             return round(watts, 3), duration_s
         case ControlCompressor():
             return None
+
+
+def _reached(target: Hashable, observed: _Observed) -> bool:
+    """The device reports the value a command set: equal, or for an ended override the time program."""
+    return observed.program if target == TIME_PROGRAM else observed.value == target
 
 
 def _device_values(heat_pump: HeatPumpState) -> dict[_Key, _Observed]:
@@ -828,6 +939,16 @@ def _payload(command: Command) -> dict[str, JsonScalar]:
         case ControlCompressor(action=action, start_time=start_time):
             payload.update(action=action, start_time=start_time.isoformat() if start_time else None)
     return payload
+
+
+def _pending_write(command: Command, key: _Key, description: str) -> PendingWrite:
+    return PendingWrite(
+        control=key[0],
+        zone_id=key[1],
+        value=_primary_value(command),
+        message=description,
+        since=datetime.now(UTC),
+    )
 
 
 def _primary_value(command: Command) -> float | str | bool:

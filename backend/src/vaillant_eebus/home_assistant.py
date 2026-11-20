@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
@@ -18,8 +18,9 @@ from vaillant_eebus.ha_export import PREFIX, HomeAssistantExport
 from vaillant_eebus.ha_import import HeatToday, HomeAssistantImport, HomeAssistantState, ValueStatus
 from vaillant_eebus.hems.inputs import HemsEntities
 from vaillant_eebus.history import HistoryGap, PowerHistory, bucket_means, first_bucket
+from vaillant_eebus.ids import is_own_entity
 from vaillant_eebus.log_store import LogCategory, LogStore
-from vaillant_eebus.myvaillant import MyVaillantState, discover
+from vaillant_eebus.myvaillant import MyVaillantState, discover, zone_label
 from vaillant_eebus.settings import Connection, ExportGroup, MyVaillantEntities, Room, Settings, SettingsStore
 from vaillant_eebus.state import StateHub
 
@@ -77,6 +78,10 @@ def _is_kind(entity: EntityState, kind: str) -> bool:
     return entity.attributes.get("unit_of_measurement") in _KIND_UNITS[kind]
 
 
+def _unless_own(entity_id: str | None) -> str | None:
+    return None if entity_id is not None and is_own_entity(entity_id) else entity_id
+
+
 def performance_today(heat: HeatToday | None, electricity: EnergyToday | None) -> float | None:
     """Heat divided by electrical energy of the day (Arbeitszahl).
 
@@ -121,6 +126,7 @@ class HomeAssistant:
                 client.add_listener(self.device)
             if self.exporter is not None:
                 client.add_listener(self.exporter)
+        self._drop_own_sources()
         self.watch()
 
     @property
@@ -219,6 +225,75 @@ class HomeAssistant:
         self.watch()
         return after
 
+    async def myvaillant_zone_labels(self, zones: Sequence[str]) -> dict[str, str]:
+        """The names the app gives the chosen myVAILLANT zones, e.g. "Zone 1"."""
+        if self._client is None:
+            return {}
+        try:
+            states = {state.entity_id: state for state in await self._client.states()}
+        except HomeAssistantUnavailable as err:
+            _LOGGER.warning("Reading the myVAILLANT zones' names failed: %s", err)
+            return {}
+        return {zone: zone_label(states.get(zone), position) for position, zone in enumerate(zones, start=1)}
+
+    def switch_rooms(self, old_labels: Mapping[str, str], new_labels: Mapping[str, str]) -> None:
+        """Before the connection changes: each room takes its zone for the new connection.
+
+        The zones have other IDs with EEBUS and myVAILLANT. A room keeps its zone for
+        the old connection and gets back the one it had with the new connection; a room
+        assigned only with the old one gets the zone of the same name (e.g. "Zone 1").
+        """
+        by_label: dict[str, list[str]] = {}
+        for zone_id, label in new_labels.items():
+            by_label.setdefault(label, []).append(zone_id)
+
+        def switched(room: Room) -> Room:
+            zone_id = room.other_zone_id
+            if zone_id is None and room.zone_id is not None:
+                same = by_label.get(old_labels.get(room.zone_id, ""), [])
+                zone_id = same[0] if len(same) == 1 else None
+            return replace(room, zone_id=zone_id, other_zone_id=room.zone_id)
+
+        after = self._settings.update(
+            lambda settings: replace(settings, rooms=tuple(switched(room) for room in settings.rooms))
+        )
+        if after.rooms:
+            described = ", ".join(
+                f"{room.name} ({new_labels.get(room.zone_id, room.zone_id) if room.zone_id else 'keine Zone'})"
+                for room in after.rooms
+            )
+            self._log.add(LogCategory.SETTINGS, f"Räume für die neue Anbindung: {described}")
+
+    def _drop_own_sources(self) -> None:
+        """Forget one of the app's own sensors chosen as a myVAILLANT source.
+
+        Version 1.2.0 suggested sensor.vaillant_eebus_outdoor_temperature: the app
+        then read back what it reported itself, and the value never changed.
+        """
+        chosen = self._settings.current.myvaillant
+        own = [entity for entity in (chosen.outdoor_temperature, chosen.power) if entity and is_own_entity(entity)]
+        if not own:
+            return
+        self._settings.update(
+            lambda settings: replace(
+                settings,
+                myvaillant=replace(
+                    settings.myvaillant,
+                    outdoor_temperature=_unless_own(settings.myvaillant.outdoor_temperature),
+                    power=_unless_own(settings.myvaillant.power),
+                ),
+            )
+        )
+        _LOGGER.warning("Dropped the app's own sensors as myVAILLANT sources: %s", ", ".join(own))
+        self._log.add(
+            LogCategory.SETTINGS,
+            f"myVAILLANT: {', '.join(own)} entfernt. Das ist ein eigener Sensor der App, sein Wert käme nur von "
+            "ihr selbst zurück. Bitte unter Einstellungen → Anbindung den Sensor der myVAILLANT-Integration wählen.",
+            problem=True,
+        )
+        if self.device is not None:
+            self.device.settings_changed()
+
     def change_connection(self, connection: Connection) -> Settings:
         """Save the chosen connection; a new one takes effect when the app has restarted."""
         before = self._settings.current.connection
@@ -257,6 +332,9 @@ class HomeAssistant:
     ) -> Settings:
         """Save the user's Home Assistant choices and follow them at once."""
         before = self._settings.current
+        # The UI edits the zones of the current connection; each room keeps its zone for the other one.
+        others = {room.entity_id: room.other_zone_id for room in before.rooms}
+        rooms = tuple(replace(room, other_zone_id=others.get(room.entity_id)) for room in rooms)
         after = self._settings.update(
             lambda settings: replace(settings, rooms=rooms, heat_energy_entities=heat_energy_entities, export=export)
         )

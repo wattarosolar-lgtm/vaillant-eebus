@@ -125,6 +125,9 @@ class Zone:
     # myVAILLANT only: a temporary override (quick veto) runs, until this time if known.
     override: bool = False
     override_until: datetime | None = None
+    # myVAILLANT only: the time program's setback ("eco") runs; the setpoint is the last one
+    # known before it, Vaillant reports none meanwhile.
+    setback: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,15 +30,14 @@ from typing import Any
 import aiohttp
 
 from vaillant_eebus.bridge_client import Backoff
-from vaillant_eebus.ids import CLIMATE_ENTITY, WATER_HEATER_ENTITY
+from vaillant_eebus.ids import CLIMATE_ENTITY, OWN_ENTITY, WATER_HEATER_ENTITY
 from vaillant_eebus.log_store import LogCategory, LogStore
 
 _LOGGER = logging.getLogger(__name__)
 
 # Home Assistant Core behind the Supervisor's proxy; the token comes from SUPERVISOR_TOKEN.
 SUPERVISOR_CORE_URL = "http://supervisor/core"
-# The only entities this app ever writes.
-OWN_ENTITY = re.compile(r"^(sensor|binary_sensor)\.vaillant_eebus_[a-z0-9_]+$")
+# The only entities this app ever writes are OWN_ENTITY (ids.py).
 # Entities whose forecast the app may ask for.
 WEATHER_ENTITY = re.compile(r"^weather\.[a-z0-9_]+$")
 # The services that control the heat pump through the myVAILLANT integration,

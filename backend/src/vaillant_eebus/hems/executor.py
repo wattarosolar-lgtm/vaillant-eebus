@@ -47,6 +47,7 @@ from vaillant_eebus.settings import Connection, OperatingMode, SettingsStore
 from vaillant_eebus.state import HeatPumpState, Setpoint, StateHub
 from vaillant_eebus.write_gate import (
     Command,
+    Control,
     EndZoneOverride,
     SetHotWaterBoost,
     SetHotWaterSetpoint,
@@ -241,6 +242,10 @@ class Executor:
         for key, device in devices.items():
             value = device.setpoint.value
             control = self._controls.setdefault(key, _Control())
+            if self._gate.settling(*_gate_key(key)):
+                # myVAILLANT: a value just sent is not confirmed yet, and the integration may
+                # still fall back to the old one for a moment - that is no manual change.
+                continue
             previous_mode, control.observed_mode = control.observed_mode, device.mode
             if previous_mode is not None and previous_mode != device.mode:
                 # A decision for the other mode does not hold any more.
@@ -624,12 +629,18 @@ class Executor:
 def _devices(heat_pump: HeatPumpState) -> dict[str, _Device]:
     devices: dict[str, _Device] = {}
     for zone in heat_pump.zones:
-        if zone.setpoint is not None:
+        # In the setback (myVAILLANT "eco") the time program's value is unknown: nothing to shift.
+        if zone.setpoint is not None and not zone.setback:
             devices[zone.id] = _Device(label=zone.label, setpoint=zone.setpoint, mode=zone.mode, override=zone.override)
     water = heat_pump.hot_water
     if water is not None and water.setpoint is not None:
         devices[DHW] = _Device(label="Warmwasser", setpoint=water.setpoint, mode=water.mode)
     return devices
+
+
+def _gate_key(key: str) -> tuple[Control, str | None]:
+    """The write gate's control for one of the planner's controls."""
+    return (Control.DHW_SETPOINT, None) if key == DHW else (Control.ZONE_SETPOINT, key)
 
 
 def _setpoint(key: str, celsius: float) -> Command:

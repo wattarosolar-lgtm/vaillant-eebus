@@ -12,7 +12,8 @@ What the integration offers (source of v0.9.19):
 
 - climate: hvac_mode "off", "heat_cool" (Vaillant's manual mode, the app's
   "on") and "auto" (time program); preset "boost" is a quick veto, the
-  attribute quick_veto_end_date_time says until when. set_temperature sets the
+  attribute quick_veto_end_date_time says until when; preset "eco" is the time
+  program's setback, with setpoint 0 (as while the zone is off). set_temperature sets the
   manual setpoint in heat_cool and otherwise starts a quick veto with the
   integration's default duration; mypyllant.set_quick_veto takes the duration
   in hours (at least 1), mypyllant.cancel_quick_veto ends it.
@@ -35,6 +36,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from vaillant_eebus.ha_client import EntityState, HomeAssistantClient, HomeAssistantListener
+from vaillant_eebus.ids import is_own_entity
 from vaillant_eebus.pairing import ConnectionState
 from vaillant_eebus.settings import MYVAILLANT_ZONES_MAX, Connection, MyVaillantEntities, SettingsStore
 from vaillant_eebus.state import (
@@ -101,8 +103,10 @@ def is_water_heater(entity: EntityState) -> bool:
 
 
 def _is_outdoor(entity: EntityState) -> bool:
+    # The app's own sensor.vaillant_eebus_outdoor_temperature would feed its own value back.
     return (
         entity.entity_id.startswith("sensor.")
+        and not is_own_entity(entity.entity_id)
         and entity.attributes.get("unit_of_measurement") == "°C"
         and any(name in entity.entity_id for name in _OUTDOOR_NAMES)
     )
@@ -111,6 +115,7 @@ def _is_outdoor(entity: EntityState) -> bool:
 def _is_power(entity: EntityState) -> bool:
     return (
         entity.entity_id.startswith("sensor.")
+        and not is_own_entity(entity.entity_id)
         and entity.attributes.get("unit_of_measurement") in ("W", "kW")
         and any(name in entity.entity_id for name in _POWER_NAMES)
     )
@@ -154,6 +159,8 @@ class MyVaillantState(StateHub, HomeAssistantListener):
         self._ha_connected = False
         # The hot water's mode, kept while a one-time charge hides it.
         self._dhw_mode: str | None = None
+        # Each zone's last setpoint outside the setback, which reports none.
+        self._setpoints: dict[str, float] = {}
         self._rebuild()
 
     @property
@@ -265,6 +272,15 @@ class MyVaillantState(StateHub, HomeAssistantListener):
         target = _number(attributes.get("temperature"))
         if target is None:
             target = _number(attributes.get("target_temp_low"))
+        # The integration's preset "eco": time program, no special function, setpoint 0.
+        setback = attributes.get("preset_mode") == "eco" and mode == "auto"
+        if target is not None and target < ZONE_LIMITS[0]:
+            # Vaillant reports 0 while the zone is off or in its setback: there is no
+            # setpoint then. In the setback a change still starts an override, from the
+            # last value known.
+            target = self._setpoints.get(entity_id) if setback else None
+        elif target is not None and not setback:
+            self._setpoints[entity_id] = target
         setpoint = None
         if target is not None:
             setpoint = Setpoint(
@@ -290,6 +306,7 @@ class MyVaillantState(StateHub, HomeAssistantListener):
             mode_writable=mode is not None and bool(available),
             override=override,
             override_until=_time(attributes.get("quick_veto_end_date_time")) if override else None,
+            setback=setback,
         )
 
     def _hot_water(self, entity_id: str) -> HotWater:
