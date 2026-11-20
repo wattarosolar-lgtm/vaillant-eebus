@@ -62,7 +62,8 @@ Die App erreicht die Wärmepumpe auf einem von zwei Wegen. Der Einrichtungsassis
 2. **Entitäten prüfen:** Die App sucht die Entitäten der myVAILLANT-Integration und schlägt vor: je Heizzone die
    Klima-Entität (`climate.…_zone_…`), die Warmwasser-Entität (`water_heater.…`), die Außentemperatur und – wenn die
    Integration sie liefert – die aktuelle Leistung („Current Power“). Ergänzen oder entfernen Sie Einträge bei
-   Bedarf; als Leistung geht auch ein anderer Sensor in W oder kW, etwa ein Zähler vor der Wärmepumpe.
+   Bedarf; als Leistung geht auch ein anderer Sensor in W oder kW, etwa ein Zähler vor der Wärmepumpe. Die eigenen
+   Sensoren der App (`sensor.vaillant_eebus_…`) sind keine Quelle: Ihr Wert käme nur von der App selbst zurück.
    **Übernehmen** speichert die Auswahl; die App startet dafür einmal neu.
 3. Unter **Einstellungen** die Räume für die Zonen wählen (siehe „Home Assistant“).
 
@@ -97,16 +98,25 @@ Unter **Einstellungen → Anbindung** stellen Sie auf den anderen Weg um (mit Be
 - startet die App neu; die Seite lädt danach von selbst neu.
 
 Mit myVAILLANT ruht die EEBUS-Bridge der App: Sie startet nicht und verbindet sich nicht mit dem Gateway. Die
-Kopplung bleibt gespeichert; beim Zurückwechseln verbindet sich die App ohne neue Kopplung. Die Zonen haben je
-Anbindung eigene Kennungen: Ordnen Sie die Raumsensoren nach dem Wechsel einmal den Zonen zu. Die Zuordnung für den
-anderen Weg bleibt gespeichert.
+Kopplung bleibt gespeichert; beim Zurückwechseln verbindet sich die App ohne neue Kopplung.
+
+Die Zonen haben je Anbindung eigene Kennungen. Die Räume nehmen ihre Zone mit: Beim ersten Wechsel ordnet die App
+jeden Raum der Zone mit demselben Namen zu („Zone 1“ zu „Zone 1“), danach merkt sie sich die Zuordnung je
+Anbindung. Prüfen Sie die Räume nach dem Wechsel einmal unter Einstellungen; eine Zone, die es mit der neuen
+Anbindung nicht gibt, steht dort als „Zone nicht mehr vorhanden“.
 
 ## Update
 
 Home Assistant meldet eine neue Version unter **Einstellungen → Apps** und auf der Seite der App; dort steht auch,
 was sich geändert hat. Ein Update behält Kopplung, Betrieb (Demo oder Live), Räume, Export-Auswahl, Protokoll und
-Energiewerte sowie die Einstellungen und Grundwerte des Energiemanagements. Nach dem Update baut die App die
-Verbindung zum Gateway neu auf (siehe oben, das kann einige Minuten dauern).
+Energiewerte sowie die Einstellungen und Grundwerte des Energiemanagements. Mit EEBUS baut die App nach dem Update
+die Verbindung zum Gateway neu auf (siehe oben, das kann einige Minuten dauern); mit myVAILLANT sind die Werte da,
+sobald die App wieder mit Home Assistant verbunden ist.
+
+**Hinweis zu 1.2.0 → 1.2.1:** Version 1.2.0 hat mit myVAILLANT als Außentemperatur versehentlich den eigenen Sensor
+der App vorgeschlagen; der Wert blieb dann stehen. Version 1.2.1 entfernt diese Auswahl beim Start und vermerkt es
+im Protokoll. Wählen Sie danach unter Einstellungen → Anbindung den Sensor der Integration (etwa „Outdoor
+Temperature“) und übernehmen Sie.
 
 ## Übersicht
 
@@ -128,8 +138,15 @@ Speicher einmal auf. Bereich, Schrittweite und Betriebsarten kommen immer von de
 **Zonen im Auto-Betrieb mit myVAILLANT:** Das Rundinstrument zeigt die Temperatur, die das Zeitprogramm gerade
 vorgibt. Ändern Sie sie, startet die Integration eine **zeitweise Übersteuerung** (Quick-Veto) für die Dauer, die in
 ihren Optionen steht (meist 3 Stunden); danach gilt wieder das Zeitprogramm. Während sie läuft, steht unter der Zone
-„Zeitweise übersteuert bis …“. In der Betriebsart **Ein** ändert die App die feste Solltemperatur der Zone. In
-**Aus** nimmt sie keine Solltemperatur an, weil eine Übersteuerung die Zone dann heizen würde.
+„Zeitweise übersteuert bis …“, und **Übersteuerung beenden** beendet sie vorzeitig (im Demo-Betrieb nur als
+Vorschau). Meldet die Integration die Absenkung des Zeitprogramms („eco“, ohne Solltemperatur), steht das unter der
+Zone; angezeigt ist dann die letzte Solltemperatur davor, und eine Änderung startet ebenfalls eine Übersteuerung. In
+der Betriebsart **Ein** ändert die App die feste Solltemperatur der Zone. In **Aus** zeigt und nimmt sie keine
+Solltemperatur an, weil eine Übersteuerung die Zone dann heizen würde.
+
+**Werte über die Cloud:** Mit myVAILLANT zeigt die Integration einen gesendeten Wert oft sofort, fällt kurz auf den
+alten Wert der Cloud zurück und meldet erst danach den neuen. Die App zeigt in dieser Zeit den gesendeten Wert blass
+und trägt den kurzen Rücksprung nicht als Änderung am Gerät ins Protokoll ein.
 
 **Zonen im Auto-Betrieb mit EEBUS:** Im Auto-Betrieb heizt die Zone nach dem Zeitprogramm des Reglers. Dessen
 Temperatur meldet das Gateway über EEBUS nicht, und eine über EEBUS gesendete Solltemperatur wirkt dort nicht. Das
@@ -139,7 +156,8 @@ von dem Wert abweichen, den myVAILLANT für das laufende Zeitfenster zeigt. Im A
 deren Integration in Home Assistant. Auch was Sie dort im Auto-Betrieb ändern, sieht diese App nicht. In der
 Betriebsart **Ein** heizt die Zone auf die Solltemperatur, die Sie hier einstellen.
 
-Was die Wärmepumpe über EEBUS nicht liefert, steht als **nicht verfügbar** da.
+Was die Wärmepumpe über EEBUS nicht liefert, steht als **nicht verfügbar** da. Mit myVAILLANT fehlen die Zeilen,
+die die Integration nie liefert (Vorlauf, Rücklauf, Verdichter, Energiezähler), ganz.
 
 **Raumtemperatur:** Die Raumfühler der Zonen liefern über EEBUS keine verlässlichen Werte. Das Rundinstrument
 einer Zone zeigt deshalb den Mittelwert der Räume, die Sie ihr in den Einstellungen zuordnen („Mittelwert aus
@@ -175,8 +193,8 @@ In der Kopfzeile schalten Sie zwischen **Demo** und **Live** um; der gewählte B
   Wert der Anlage. Das Protokoll vermerkt „Würde senden: …“.
 - **Live** (Umschalter orange): Die App sendet Änderungen an die Wärmepumpe. Das Umschalten muss bestätigt werden.
   Bis die Anlage den neuen Wert meldet, zeigt die Kachel ihn blass; danach normal. Sobald die Wärmepumpe den
-  Befehl quittiert hat, können Sie weiter einstellen. Meldet die Anlage den Wert nicht innerhalb von 30 Sekunden,
-  steht das im Protokoll.
+  Befehl quittiert hat, können Sie weiter einstellen. Meldet die Anlage den Wert nicht innerhalb von 30 Sekunden
+  (mit myVAILLANT 90 Sekunden), steht das im Protokoll.
 
 Eine Änderung gilt immer für den Betrieb, in dem Sie sie gemacht haben: Wechseln Sie den Betrieb, während die App
 Klicks auf − und + noch sammelt, verwirft sie diese, statt sie im neuen Betrieb zu senden.
@@ -204,7 +222,8 @@ einem Neustart), laufen mit EEBUS Übersicht und Steuerung der Wärmepumpe weite
 stehen solange als „nicht verfügbar“ da. Mit myVAILLANT ist die Wärmepumpe so lange nicht erreichbar. Ob die App gerade mit Home Assistant verbunden ist, zeigt die Seite **Einstellungen** neben der
 Überschrift „Home Assistant“.
 
-Eingerichtet wird alles unter **Einstellungen**, gespeichert mit **Speichern**:
+Eingerichtet wird alles unter **Einstellungen**, gespeichert mit **Räume, Wärme und Export speichern** unter den
+drei Karten. Verlassen Sie die Seite mit ungespeicherten Änderungen, fragt die App vorher nach.
 
 - **Räume:** Unter „Raum hinzufügen“ suchen Sie einen Temperatursensor (°C oder °F), geben dem Raum einen Namen
   und wählen Zone 1, Zone 2 oder keine Zone. Ein Wert zählt für den Mittelwert, solange er eine Zahl ist und der
@@ -273,7 +292,8 @@ alle 15 Minuten neu, außerdem sobald neue Strompreise oder eine neue PV-Prognos
   Stunde). Sie endet von selbst, auch wenn die App nicht mehr läuft. Endet der Block früher (neuer Plan, Aus,
   Vorschau, Demo-Betrieb, App beendet), beendet der Planer sie. Starten oder beenden Sie selbst eine Übersteuerung,
   lässt er die Zone bis zum Ende des Blocks in Ruhe. Wechselt das Zeitprogramm mitten im Block die Temperatur, gilt
-  bis zum Blockende der Wert vom Blockbeginn.
+  bis zum Blockende der Wert vom Blockbeginn. In der Absenkung des Zeitprogramms („eco“) kennt er dessen Temperatur
+  nicht und lässt die Zone in Ruhe.
 
 **Grundwert:** Für jede Zone und das Warmwasser merkt sich der Planer den normalen Wert, beim Einschalten den
 aktuellen. Ändern Sie eine Solltemperatur selbst – in dieser App, in myVAILLANT oder am Gerät, auch während die

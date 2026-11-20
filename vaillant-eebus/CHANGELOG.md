@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.1 (noch nicht veröffentlicht)
+
+Korrekturen aus der Abnahme von 1.2.0 an der Anlage (Anbindung myVAILLANT):
+
+- **Außentemperatur:** 1.2.0 hat als Außentemperatur den eigenen Sensor der App
+  (`sensor.vaillant_eebus_outdoor_temperature`) vorgeschlagen; die App las dann nur ihren eigenen Wert zurück, und er
+  blieb stehen. Die eigenen Sensoren werden nicht mehr vorgeschlagen und nicht mehr angenommen. Ist einer gespeichert,
+  entfernt die App ihn beim Start und vermerkt es im Protokoll – bitte unter Einstellungen → Anbindung den Sensor der
+  Integration wählen.
+- **Rücksprünge der Cloud:** Die Integration zeigt einen gesendeten Wert sofort, fällt kurz auf den alten Wert der
+  Cloud zurück und meldet erst danach den neuen. Das stand bisher als „Am Gerät geändert“ im Protokoll, der Regler
+  sprang kurz zurück, und der Planer hätte es für eine Änderung von Hand gehalten. Jetzt zeigt die App den gesendeten
+  Wert blass, bis er bestätigt ist, und wertet den Rücksprung nicht als Änderung.
+- **Übersteuerung beenden:** neuer Knopf unter einer Zone mit laufender zeitweiser Übersteuerung (Quick-Veto).
+- **Räume beim Umstellen:** Die Räume nehmen ihre Zone mit (über den Namen, „Zone 1“ zu „Zone 1“), und die
+  Zuordnung bleibt je Anbindung gespeichert. Eine Zone, die es nicht mehr gibt, heißt „Zone nicht mehr vorhanden“
+  statt „Zone 5.1.1“.
+- **Einstellungen:** Der Knopf heißt „Räume, Wärme und Export speichern“; ungespeicherte Änderungen werden angezeigt,
+  und beim Verlassen der Seite fragt die App nach.
+- **Zone in „Aus“ und Absenkung:** keine „Solltemperatur 0,0 °C“ mehr in Übersicht und Protokoll. In der Absenkung
+  des Zeitprogramms („eco“) zeigt die Zone einen Hinweis und die letzte Solltemperatur; der Planer lässt sie in Ruhe.
+- **Übersicht mit myVAILLANT:** Zeilen, die die Integration nie liefert (Vorlauf, Rücklauf, Verdichter,
+  Energiezähler), sind ausgeblendet.
+- Anleitung: 90 Sekunden Bestätigungsfrist mit myVAILLANT, Update, Räume beim Umstellen, Übersteuerung beenden.
+
 ## 1.2.0
 
 **Anbindung über myVAILLANT:** Die App erreicht die Wärmepumpe jetzt wahlweise über die Entitäten der

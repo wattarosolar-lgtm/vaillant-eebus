@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.2.0)
+# Briefing: Vaillant EEBUS (Stand v1.2.1)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -293,6 +293,27 @@ Integration `signalkraft/mypyllant-component` v0.9.19 (nicht gegen eine echte In
 - **Oberfläche:** Assistent mit Wahl der Anbindung (`Setup.svelte`, `MyVaillantChoice.svelte`, EEBUS-Schritte in
   `EebusSetup.svelte`), Karte „Anbindung“ in den Einstellungen, Hinweise zum Quick-Veto auf der Übersicht, „Stand“
   in der Kopfzeile.
+- **1.2.1 (Abnahme an der Anlage, 19.11.2026):**
+  - Eigene Sensoren (`ids.OWN_ENTITY`, `is_own_entity`) sind nie Quelle: `discover()` überspringt sie, `PUT
+    api/connection` lehnt sie ab (422), `HomeAssistant._drop_own_sources()` entfernt eine gespeicherte (1.2.0 schlug
+    `sensor.vaillant_eebus_outdoor_temperature` vor → Kreislauf) mit Protokolleintrag.
+  - Echo und Rücksprung der Cloud: Die Integration zeigt einen Wert sofort, holt nach ~5 s die Cloud (oft noch der
+    alte Wert) und später den neuen. `WriteGate` merkt den Wert bei einem Link **vor** dem Dienstaufruf vor
+    (`_Pending.in_flight`, `before`), wertet Änderungen während des Aufrufs und Rücksprünge auf `before` nicht als
+    „Am Gerät geändert“, hält einen bestätigten Wert noch `LINK_SETTLE_S` (20 s) und zeigt ihn als offen, solange die
+    Cloud den alten zeigt. `settling(control, zone)` sagt dem Executor, dass er die Steuerung so lange nicht als
+    Handänderung auswertet. `EndZoneOverride` hat das Ziel `TIME_PROGRAM` (bestätigt, sobald die Zone wieder dem
+    Programm folgt).
+  - `POST api/zones/{zone}/override/end` (`EndZoneOverride` über den Schreibschutz), Knopf `OverrideEnd.svelte`.
+  - `Room.other_zone_id`: Zone der anderen Anbindung; `HomeAssistant.switch_rooms()` tauscht beim Umstellen und ordnet
+    beim ersten Mal über den Zonennamen zu (`myvaillant_zone_labels()`); die API zeigt nur `zone_id`.
+  - Soll 0 (Zone „Aus“) → kein Soll; Preset `eco` im Auto-Betrieb → `Zone.setback`, Soll = letzter Wert davor; der
+    Planer überspringt Zonen in der Absenkung (`_devices`).
+  - Oberfläche: Warnung bei ungespeicherten Einstellungen (`lib/unsaved.ts`), Zeilen ohne myVAILLANT-Werte
+    ausgeblendet, „Zone nicht mehr vorhanden“.
+  - Feldbefunde: Fehlerliste `vaillant-eebus-notizen/fehlerliste-abnahme-1.2.0.md`. Zone 1 schaltet beim Nutzer per
+    Automation bei jedem WP-Stopp auf „Aus“ (echt, 15–25-mal am Tag); ob die Eco-Absenkung als `off` + Preset `eco`
+    gemeldet wird (Kühl-Soll 0,0 → `active_operating_type` COOLING in der Integration), ist ungeklärt.
 
 ## 6. Die echte Anlage (Feldbefunde)
 
@@ -322,7 +343,7 @@ Integration `signalkraft/mypyllant-component` v0.9.19 (nicht gegen eine echte In
 
 ## 7. Tests
 
-- Python: 290 Tests (`pytest`, 2 übersprungen ohne Zeitzonen-Datenbank unter Windows), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+- Python: 303 Tests (`pytest`, 2 übersprungen ohne Zeitzonen-Datenbank unter Windows), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`, mit `add_myvaillant()`: Entitäten und
   Dienste der myVAILLANT-Integration wie im Quellcode der Integration). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
@@ -388,12 +409,13 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
 15. Energiemanagement, bewusst offen: Ein Zurücksetzen mit „Ergebnis unbekannt“, das nicht ankam, bleibt bis zum
     nächsten Block dieser Steuerung stehen (das Protokoll zeigt „Nicht übernommen“). Ist die Wärmepumpe beim Planen
     noch nicht verbunden (nach dem Start), plant der Planer spätestens zur nächsten Viertelstunde neu.
-16. Anbindung myVAILLANT (1.2.0), an der Anlage ungeprüft: Namen und Attribute der Entitäten, Verhalten von
-    `climate.set_temperature` im Auto-Betrieb (Quick-Veto mit der Dauer aus den Optionen), `mypyllant.set_quick_veto`
-    mit Dauer, Ende eines Quick-Veto (Preset zurück auf `none`), Warmwasser „Cylinder Boost“, Fehlercodes der
-    REST-Dienstaufrufe bei Cloud-Fehlern, Kontingent der Cloud. Die Werte sind so alt wie das Abfrageintervall der
-    Integration (Vorgabe 30 min); die Bestätigung eines Werts kommt aus der lokalen Aktualisierung der Integration
-    direkt nach dem Befehl.
+16. Anbindung myVAILLANT, an der Anlage abgenommen (19.11.2026, Fehlerliste in den Notizen): Entitäten gefunden,
+    Werte stimmen mit der myVAILLANT-App überein, Demo, Quick-Veto in Zone 1 und 2 (Dauer laut Optionen),
+    Einmalladung, Warmwasser-Betriebsart; Bestätigung meist im selben Augenblick, der Dienstaufruf dauert ~5 s.
+    Ungeprüft: Soll in „Ein“ (`heat_cool`) und Zonen-Betriebsart (der Nutzer hat beides ausgelassen),
+    Warmwasser-Soll, Fehlercodes bei Cloud-Fehlern, Kontingent. Die Korrekturen von 1.2.1 sind nur gegen das
+    nachgebaute Verhalten (Fake-HA mit `cloud_lag`) geprüft. Die Werte sind so alt wie das Abfrageintervall der
+    Integration (Vorgabe 30 min).
 
 ## 10. Wo eine Prüfung am meisten bringt
 
