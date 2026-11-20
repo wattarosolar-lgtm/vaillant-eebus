@@ -56,8 +56,8 @@ Der Tageswechsel folgt der Zeitzone von Home Assistant (`TZ`, vom Supervisor ges
 
 **Home Assistant** (`homeassistant_api: true`, Token aus `SUPERVISOR_TOKEN`, über `http://supervisor/core`):
 `ha_client.py` hält eine WebSocket-Verbindung, abonniert die Zustände der gewählten Entitäten (`subscribe_trigger`,
-bei Versionen vor 2024.10 mit `platform` statt `trigger`) und `homeassistant_started` und liest die Entitäten alle
-5 Minuten neu (`last_reported`). Schreiben darf der Client nur `sensor.vaillant_eebus_*` und
+bei Versionen vor 2024.10 mit `platform` statt `trigger`) und `homeassistant_started`, liest die Entitäten alle
+5 Minuten neu (`last_reported`) und auf derselben Verbindung die Langzeitstatistik (`statistics()`, nur lesen). Schreiben darf der Client nur `sensor.vaillant_eebus_*` und
 `binary_sensor.vaillant_eebus_*`. Dienste: `weather.get_forecasts` (liest nur, per REST mit `return_response`) und
 mit der Anbindung myVAILLANT `call_device_service()` für genau die Dienste in `DEVICE_SERVICES` auf Klima- und
 Warmwasser-Entitäten; Tests prüfen, dass es keine anderen sind und nur `write_gate.py` (über `myvaillant.py`) sie
@@ -75,16 +75,19 @@ nach der SPINE-Adresse ihres Raum-Eintrags, z. B. `5.1.1`; mit myVAILLANT ist ih
 `climate.zuhause_zone_1_climate`. Schreibende Aufrufe brauchen bei mehreren Zonen diese
 Zonen-ID; ohne sie lehnt die Bridge ab, statt eine Zone zu raten.
 
-**Energiemanagement** (`backend/src/vaillant_eebus/hems/`): `config.py` (Einstellungen in `settings.json` unter
-`hems`), `inputs.py` (Zustände von Preis-, PV-, Hausverbrauch- und Akku-Entität über den HA-Client), `tariff.py`
-(Bezugspreis je Viertelstunde: Festpreis, `epex_spot`, §14a Modul 3), `supply.py` (PV-Prognose aus dem Attribut
-`watts`, Hausverbrauch ohne WP als Median der letzten 7 Tage aus der HA-Historie, Akku lädt zuerst → Überschuss),
-`weather.py` (Stundenprognose aus `weather.get_forecasts` oder Open-Meteo, höchstens stündlich), `planner.py`
-(reine Funktion: Regeln → Blöcke je Steuerung), `executor.py` (Grundwerte, Handänderung, 30-min-Ruhe, Rückkehr zum
-Grundwert, `/data/hems.json`), `days.py` (Tageswerte, lineares Modell, nur Anzeige), `service.py` (plant alle 15 min
-und bei neuen Preisen/Prognosen, führt alle 30 s und nach jedem Zustand aus, setzt beim Beenden zurück). Der Planer
-schreibt nur über `write_gate` (Herkunft `Source.PLANNER`, Stufe Vorschau mit `preview=True`) und nur
-Zonen-Soll, Warmwasser-Soll und Einmalladung (Strukturtest).
+**Energiemanagement** (`backend/src/vaillant_eebus/hems/`, 1.3.0: beobachten, lernen, planen; sendet nichts):
+`config.py` (Einstellungen in `settings.json` unter `hems`), `sources.py` (gelesene HA-Zustände: Räume, Thermostate,
+Ventile, Feuchte, Vorlauf, Puffer), `forecast.py` (Open-Meteo `/v1/dwd-icon` höchstens stündlich, Koordinaten auf
+2 Stellen gerundet, Rückfall `weather.get_forecasts`, Eichung je Tageszeit am Außenfühler, Day-ahead-Fehler),
+`statistics.py` (HA-Langzeitstatistik über WebSocket `recorder/statistics_during_period`, monatsweise, Tageswerte),
+`house_model.py` (Wärmeverlust W/K, Gewinne, Sonne, Verzögerung, Arbeitszahl aus echten Wärme- und Stromwerten,
+Bedarf je Stunde), `samples.py` (5-Minuten-Proben in `/data/hems.db`, 21 Tage), `room_model.py` (Zeitkonstante,
+Fremdwärme, Aufheizen, Anlaufzeit, Bedarfsöffnung, Korrektur, Versorgung, Vorlauf-Hinweis), `cycles.py` (Starts,
+Lauf, Pause, Abtau-Muster, `/data/cycles.json`), `defrost.py` (Abtaurisiko je Stunde), `frost.py` (Frostschutz
+< 4 °C länger als 4 h), `windows.py` (Fenster aus Temperatur und absoluter Feuchte), `rules.py` (reine Funktion:
+Plan 48 h je Zone und Stunde mit Grund), `service.py` (Beobachten, Proben, Lernen, Planen alle 15 min, Status,
+Sensoren, CSV). Das Paket importiert weder `write_gate` noch den Bridge-Client (Strukturtest). Raumdaten stehen
+in `room_data.py` (je Raum in `settings.json`).
 
 **Schreiben:** Einzige Stelle, die an die Wärmepumpe schreibt, ist `backend/src/vaillant_eebus/write_gate.py`
 (Tests stellen sicher, dass kein anderes Modul die Schreibmethoden des Bridge-Clients oder `send_command()` des
@@ -94,9 +97,9 @@ Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
 
 | Methode | Pfad | Zweck |
 |---|---|---|
-| GET/PUT | `api/connection` | Anbindung (`myvaillant` oder `eebus`) und die gewählten myVAILLANT-Entitäten; eine neue Anbindung setzt den Planer zurück, schaltet auf Demo und startet das Backend neu (`restarting`) |
+| GET/PUT | `api/connection` | Anbindung (`myvaillant` oder `eebus`) und die gewählten myVAILLANT-Entitäten; eine neue Anbindung schaltet auf Demo und startet das Backend neu (`restarting`) |
 | GET | `api/myvaillant/discover` | Vorschlag der myVAILLANT-Entitäten aus Home Assistant |
-| GET/POST | `api/mode` | Demo/Live lesen und setzen (Live nur mit `"confirm": true`; vor Demo setzt der Planer seine Werte zurück) |
+| GET/POST | `api/mode` | Demo/Live lesen und setzen (Live nur mit `"confirm": true`) |
 | POST | `api/zones/{zone_id}/setpoint`, `api/zones/{zone_id}/mode` | Solltemperatur (`value`), Betriebsart (`mode`) einer Zone; mit EEBUS die Solltemperatur nicht im Auto-Betrieb der Zone (409, wirkt dort nicht), mit myVAILLANT dort als zeitweise Übersteuerung und nicht in „Aus“ |
 | POST | `api/dhw/setpoint`, `api/dhw/mode`, `api/dhw/boost` | Warmwasser: `value`, `mode`, `active` |
 | POST | `api/lpc`, `api/lpc/failsafe` | Leistungsdeckel und Failsafe-Grenze (nur API und nur mit EEBUS, im Demo-Betrieb gesperrt; die Bridge wartet hier nicht auf eine Quittung des Geräts, „Gesendet“ heißt nur abgeschickt) |
@@ -104,12 +107,15 @@ Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
 | GET | `api/log` | Protokoll, neueste zuerst: seitenweise (`before`, `limit`), neuere als ein Eintrag (`after`), bis zu einem Tag in Ortszeit (`until=JJJJ-MM-TT`), gefiltert nach `category` oder `problems=true` |
 | GET | `api/log/export` | Protokoll als CSV (Semikolon, UTF-8 mit BOM, Ortszeit), gleiche Filter |
 | GET | `api/history/power` | Leistung der letzten 24 h als 5-Minuten-Mittelwerte aus der HA-Historie von `sensor.vaillant_eebus_power`; ohne Daten mit Grund in `gap` (`no_home_assistant`, `not_exported`, `unreachable`) |
-| GET/PUT | `api/settings` | Räume (`entity_id`, `name`, `zone_id`), Wärmesensoren (`heat_energy_entities`, bis zu 4, addiert), Export-Gruppen (`export`); dazu `exported` und `home_assistant_available` |
-| GET | `api/ha/entities?kind=temperature\|energy\|power\|battery\|price\|pv_forecast\|weather\|climate\|water_heater&q=…` | Entitäten aus Home Assistant zur Auswahl (503, wenn Home Assistant nicht erreichbar ist) |
+| GET/PUT | `api/settings` | Räume (`entity_id`, `name`, `zone_id`; die Raumdaten bleiben erhalten), Wärmesensoren (`heat_energy_entities`, bis zu 4, addiert), Export-Gruppen (`export`); dazu `exported` und `home_assistant_available` |
+| GET | `api/ha/entities?kind=temperature\|energy\|power\|percent\|humidity\|room\|thermostat\|weather\|climate\|water_heater&q=…` | Entitäten aus Home Assistant zur Auswahl (503, wenn Home Assistant nicht erreichbar ist) |
 | GET | `api/ha/location` | Standort aus der HA-Konfiguration (für Open-Meteo); 404 ohne Standort |
-| GET | `api/hems` | Energiemanagement: Stufe, Einstellungen, Plan (Viertelstunden und Blöcke), fehlende Daten, nächste Aktion, Grundwerte, Strombedarf morgen |
+| GET | `api/hems` | Energiemanagement: Stufe, Einstellungen, fehlende Daten, Prognose, Hausmodell, Bedarf, Takte und Abtauungen, Abtauraten, Frostschutz, Zone-1-Logik, Vorlauf, nächste Änderungen |
 | PUT | `api/hems/settings` | Einstellungen des Energiemanagements (ohne Stufe), geprüft (422 mit Begründung) |
-| POST | `api/hems/mode` | Stufe `off`, `preview` oder `control`; beim Verlassen von `control` zurück zu den Grundwerten |
+| POST | `api/hems/mode` | Stufe `off` oder `preview`; `control` antwortet in 1.3.0 mit 409 |
+| GET | `api/hems/plan`, `api/hems/plan/export` | Plan 48 h je Stunde und Rückblick 24 h; als CSV |
+| GET | `api/rooms` | Räume mit Messwerten, Lernstand, Versorgung und Fenster; je Zone der begrenzende Raum |
+| PUT | `api/rooms/{entity_id}` | Raumdaten eines Raums (Soll, Zeitplan, Komfortband, Verluste, Thermostat, Ventil, Feuchte, statischer Abgleich) |
 
 Jeder Schreibbefehl nennt in `operating_mode` (`demo` oder `live`) den Betrieb, den der Nutzer beim Ändern sah;
 stimmt er nicht mehr, wird nichts gesendet (409). Antworten sagen immer, ob gesendet wurde: `{"sent": false,
