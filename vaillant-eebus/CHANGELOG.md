@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.3.0
+
+**Energiemanagement neu, Stufe 1: beobachten, lernen, planen.** Die App lernt Haus und Räume kennen, zählt Takte und
+Abtauungen und plant 48 Stunden voraus. In dieser Version zeigt sie nur, was sie tun würde – **sie sendet nichts
+Neues an die Wärmepumpe**; das Energiemanagement ruft die Schreibsperre gar nicht auf (Strukturtest). Steuern kommt
+mit 1.4.0 (Zonen) und 1.5.0 (Heizkörperthermostate).
+
+- **Prognose 48 h:** Open-Meteo mit den Modellen des Deutschen Wetterdienstes (Temperatur, Feuchte, Taupunkt, Wind,
+  Einstrahlung, Bewölkung, Niederschlag), höchstens stündlich und mit auf etwa 1 km gerundetem Standort; die
+  Wetter-Entität von Home Assistant ist der Rückfall. Die Prognose wird am Außenfühler der Wärmepumpe geeicht; die
+  App zeigt, wie gut die Prognose für den nächsten Tag stimmte.
+- **Lernen aus der Langzeitstatistik von Home Assistant** (nur lesen, über die bestehende Verbindung): Wärmeverlust
+  des Hauses, Gewinne, Sonne, Verzögerung und Arbeitszahl aus echten Wärme- und Stromwerten; daraus Wärme- und
+  Strombedarf je Stunde und Zone. Ein Export aus der myVAILLANT-App ist nicht nötig.
+- **Räume:** neue Seite **Räume** mit Raumdaten (Soll, Zeitplan, Komfortband, erlaubter Verlust nachts und gegen
+  Abtauen, Notfallwert, Drosseln erlaubt, Thermostat, Ventilstellung, Luftfeuchte und die Werte des statischen
+  Abgleichs), Lernstand (Abkühlen, Aufheizen, Anlaufzeit, Ventil), Versorgung und Fenster als „würde“. Ein Raum ohne
+  Sensor kann sein Heizkörperthermostat als Temperatur nehmen; es zählt nicht im Mittelwert der Zone.
+- **Takten und Abtauen:** Starts, Lauf und Pause sowie Abtauungen (am Muster der Leistung erkannt) heute, der
+  letzten Tage und je Außentemperatur; nach einem Start werden die letzten zehn Tage aus dem Verlauf nachgeholt.
+  Abtaurisiko je Stunde aus Temperatur und Feuchte, gelernt aus den gezählten Abtauungen.
+- **Frostschutz der Wärmepumpe** (länger als 4 h unter 4 °C) wird erkannt, angezeigt und beim Planen beachtet.
+- **Neuer Regel-Planer, nur Vorschau:** je Zone und Stunde mit Grund – Vorlauf nach den Ventilstellungen,
+  vorausschauend nach Kälte und Sonne, warme Tage, weniger Last in Stunden mit Abtaurisiko (vorher speichern),
+  Nachtabsenkung nur wenn sie sich lohnt (mit Schutz vor Schimmel), Blockbetrieb bei mildem Wetter, die
+  Zone-1-Logik der bekannten Automation als „würde“. Neue Seite **Plan** (48 h, „Nur Änderungen“ oder „Stündlich“,
+  Rückblick 24 h, CSV), auf der Übersicht die Karten **Nächste Änderungen** und **Takten und Abtauen**.
+- **Einstellungen Energiemanagement neu:** Stufe Aus/Vorschau („Steuern“ ab 1.4.0), Wetter, Lernquellen, Zonen
+  (Art, Auslegung, Vorlauf-Sensoren, Band), Nachtfenster und Verluste, Ziel Starts je Tag, Heizgrenze und – wirksam
+  ab 1.4.0 – Quick-Veto und Tagesgrenze für Cloud-Befehle.
+- **Sensoren:** `sensor.vaillant_eebus_hems_next_change`, `sensor.vaillant_eebus_starts_today`,
+  `sensor.vaillant_eebus_defrosts_today`, `binary_sensor.vaillant_eebus_frost_protection`; `…_hems_plan` zählt jetzt
+  die geplanten Änderungen. `…_hems_next_action` und `…_hems_demand_tomorrow` entfallen.
+- **Protokoll:** neue Kategorie **Räume** (Fenster und Versorgung als „würde“); unter „Planer“ der Plan in Kurzform,
+  erkannte Abtauungen und der Frostschutz.
+- **Entfallen:** der Planer aus 1.1/1.2 (Warmwasser und Zonen nach Strompreis, PV-Überschuss und Akku) mit seinen
+  Einstellungen; PV kommt später neu. Ein Planer auf „Steuern“ steht nach dem Update auf „Vorschau“. Hatte er beim
+  Update noch eine Verschiebung offen, steht ein Hinweis im Protokoll.
+
 ## 1.2.1
 
 Korrekturen aus der Abnahme von 1.2.0 an der Anlage (Anbindung myVAILLANT):
