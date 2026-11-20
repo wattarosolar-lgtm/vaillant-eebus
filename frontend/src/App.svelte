@@ -8,6 +8,7 @@
   import { ApiError, getConnection, getPairing, setOperatingMode, subscribeState } from './lib/api';
   import { BRIDGE_PROBLEMS, CONNECTION_SUBTITLES } from './lib/texts';
   import type { ApiState, Connection, ConnectionStatus, OperatingMode, PairingStatus } from './lib/types';
+  import { hasUnsaved, UNSAVED_QUESTION } from './lib/unsaved';
   import Log from './pages/Log.svelte';
   import Overview from './pages/Overview.svelte';
   import Settings from './pages/Settings.svelte';
@@ -144,12 +145,26 @@
       route = currentRoute();
     };
     window.addEventListener('hashchange', onHashChange);
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      if (hasUnsaved()) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
     return () => {
       window.clearTimeout(timer);
       closeStream();
       window.removeEventListener('hashchange', onHashChange);
+      window.removeEventListener('beforeunload', onBeforeUnload);
     };
   });
+
+  /** A link to another page: with unsaved settings the user decides first. */
+  function leave(event: MouseEvent): void {
+    if (hasUnsaved() && !window.confirm(UNSAVED_QUESTION)) {
+      event.preventDefault();
+    }
+  }
 </script>
 
 <div class="page">
@@ -172,9 +187,11 @@
 
   {#if ready && route !== 'einrichtung'}
     <nav aria-label="Seiten">
-      <a href="#/uebersicht" aria-current={route === 'uebersicht' ? 'page' : undefined}>Übersicht</a>
-      <a href="#/protokoll" aria-current={route === 'protokoll' ? 'page' : undefined}>Protokoll</a>
-      <a href="#/einstellungen" aria-current={route === 'einstellungen' ? 'page' : undefined}>Einstellungen</a>
+      <a href="#/uebersicht" aria-current={route === 'uebersicht' ? 'page' : undefined} onclick={leave}>Übersicht</a>
+      <a href="#/protokoll" aria-current={route === 'protokoll' ? 'page' : undefined} onclick={leave}>Protokoll</a>
+      <a href="#/einstellungen" aria-current={route === 'einstellungen' ? 'page' : undefined} onclick={leave}
+        >Einstellungen</a
+      >
     </nav>
   {/if}
 

@@ -99,7 +99,7 @@ export async function setOperatingMode(mode: OperatingMode, confirm: boolean): P
   return post<{ mode: OperatingMode }>('api/mode', { mode, confirm });
 }
 
-function zonePath(zoneId: string, what: 'setpoint' | 'mode'): string {
+function zonePath(zoneId: string, what: 'setpoint' | 'mode' | 'override/end'): string {
   return `api/zones/${encodeURIComponent(zoneId)}/${what}`;
 }
 
@@ -112,6 +112,11 @@ export async function setZoneSetpoint(zoneId: string, value: number, shown: Oper
 
 export async function setZoneMode(zoneId: string, mode: string, shown: OperatingMode): Promise<WriteResult> {
   return post<WriteResult>(zonePath(zoneId, 'mode'), { mode, operating_mode: shown });
+}
+
+/** myVAILLANT: ends the zone's temporary override (quick veto). */
+export async function endZoneOverride(zoneId: string, shown: OperatingMode): Promise<WriteResult> {
+  return post<WriteResult>(zonePath(zoneId, 'override/end'), { operating_mode: shown });
 }
 
 export async function setHotWaterSetpoint(value: number, shown: OperatingMode): Promise<WriteResult> {

@@ -2,8 +2,10 @@
   import BoostSwitch from '../components/BoostSwitch.svelte';
   import Dial from '../components/Dial.svelte';
   import HemsCard from '../components/HemsCard.svelte';
+  import OverrideEnd from '../components/OverrideEnd.svelte';
   import PowerChart from '../components/PowerChart.svelte';
   import {
+    endZoneOverride,
     setHotWaterBoost,
     setHotWaterMode,
     setHotWaterSetpoint,
@@ -36,6 +38,13 @@
     return live?.pending.find((write) => write.control === control && write.zone_id === zoneId)?.value ?? null;
   }
 
+  /** The gate's value for ending an override (myVAILLANT); it has no setpoint to show. */
+  const END_OVERRIDE = 'end_override';
+
+  function numeric(value: number | string | boolean | null): number | null {
+    return typeof value === 'number' ? value : null;
+  }
+
   function celsius(reading: Reading | null | undefined): string | null {
     const value = temperature(reading);
     return value === null ? null : `${value} °C`;
@@ -54,6 +63,9 @@
         ? new Date(zone.override_until).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
         : null;
       return until ? `Zeitweise übersteuert bis ${until} Uhr.` : 'Zeitweise übersteuert.';
+    }
+    if (zone.setback) {
+      return `Absenkung laut Zeitprogramm; angezeigt ist die letzte Solltemperatur davor. ${AUTO_MODE_OVERRIDE}`;
     }
     return zone.mode === 'auto' ? AUTO_MODE_OVERRIDE : null;
   }
@@ -85,7 +97,8 @@
     if (zoneId === null) {
       return 'keine Zone';
     }
-    return values?.zones.find((zone) => zone.id === zoneId)?.label ?? `Zone ${zoneId}`;
+    // A zone the heat pump does not report, e.g. one of the other connection.
+    return values?.zones.find((zone) => zone.id === zoneId)?.label ?? 'Zone nicht mehr vorhanden';
   }
 
   function roomValue(room: RoomReading): string {
@@ -112,23 +125,44 @@
     ] as const;
   });
 
-  const energyRows = $derived([
-    ['Energie heute (berechnet)', energyToday(live?.energy_today)],
-    ...heatRows,
-    ['Verdichterleistung', watts(measurements['compressor_power'])],
-    ['Energie gesamt', kilowattHours(measurements['energy_consumed'])],
-    ['Erzeugte Energie', kilowattHours(measurements['energy_produced'])],
-    ['davon Heizung', kilowattHours(measurements['energy_consumed_heating'])],
-    ['davon Warmwasser', kilowattHours(measurements['energy_consumed_dhw'])],
-  ] as const);
+  // Rows the connection myVAILLANT never fills (it reads only zones, hot water, outdoor
+  // temperature and power); there they are left out instead of standing as "nicht verfügbar".
+  const EEBUS_ONLY = new Set([
+    'Verdichterleistung',
+    'Energie gesamt',
+    'Erzeugte Energie',
+    'davon Heizung',
+    'davon Warmwasser',
+    'Vorlauf',
+    'Rücklauf',
+    'Verdichter',
+  ]);
 
-  const temperatureRows = $derived([
-    ['Außen', celsius(measurements['outdoor_temperature'])],
-    ['Vorlauf', celsius(measurements['flow_temperature'])],
-    ['Rücklauf', celsius(measurements['return_temperature'])],
-    ['Verdichter', celsius(measurements['compressor_temperature'])],
-    ['Warmwasser', celsius(measurements['dhw_temperature'])],
-  ] as const);
+  function forLink<T extends readonly [string, string | null]>(rows: readonly T[]): T[] {
+    return rows.filter(([label]) => !(myVaillant && EEBUS_ONLY.has(label)));
+  }
+
+  const energyRows = $derived(
+    forLink([
+      ['Energie heute (berechnet)', energyToday(live?.energy_today)],
+      ...heatRows,
+      ['Verdichterleistung', watts(measurements['compressor_power'])],
+      ['Energie gesamt', kilowattHours(measurements['energy_consumed'])],
+      ['Erzeugte Energie', kilowattHours(measurements['energy_produced'])],
+      ['davon Heizung', kilowattHours(measurements['energy_consumed_heating'])],
+      ['davon Warmwasser', kilowattHours(measurements['energy_consumed_dhw'])],
+    ] as const),
+  );
+
+  const temperatureRows = $derived(
+    forLink([
+      ['Außen', celsius(measurements['outdoor_temperature'])],
+      ['Vorlauf', celsius(measurements['flow_temperature'])],
+      ['Rücklauf', celsius(measurements['return_temperature'])],
+      ['Verdichter', celsius(measurements['compressor_temperature'])],
+      ['Warmwasser', celsius(measurements['dhw_temperature'])],
+    ] as const),
+  );
 </script>
 
 {#if live === null}
@@ -169,6 +203,7 @@
                Assistant; the gateway's own value is unreliable (field finding). -->
           {@const room = zoneRoom(zone.id)}
           {@const note = zoneNote(zone)}
+          {@const ending = pending('zone_setpoint', zone.id) === END_OVERRIDE}
           <Dial
             title={zone.label}
             label="Raumtemperatur"
@@ -179,7 +214,7 @@
             availableModes={zone.available_modes}
             modeWritable={zone.mode_writable}
             appMode={live.mode}
-            pendingSetpoint={pending('zone_setpoint', zone.id) as number | null}
+            pendingSetpoint={numeric(pending('zone_setpoint', zone.id))}
             pendingMode={pending('zone_mode', zone.id) as string | null}
             setpointLocked={zone.mode === 'auto' && !myVaillant ? AUTO_MODE_SETPOINT_LOCKED : null}
             sendSetpoint={(value, shown) => setZoneSetpoint(zone.id, value, shown)}
@@ -189,6 +224,10 @@
           >
             {#if note}
               <p class="hint">{note}</p>
+            {/if}
+            {#if myVaillant && (zone.override || ending)}
+              <!-- Stays while the end is on its way: the cloud may show the override once more. -->
+              <OverrideEnd mode={live.mode} {ending} send={(shown) => endZoneOverride(zone.id, shown)} />
             {/if}
           </Dial>
         {/each}

@@ -93,6 +93,8 @@ export interface Zone {
   /** myVAILLANT: a temporary override (quick veto) runs, until this time if known. */
   override: boolean;
   override_until: string | null;
+  /** myVAILLANT: the time program's setback ("eco") runs; the setpoint is the last one known. */
+  setback: boolean;
 }
 
 export interface HotWater {

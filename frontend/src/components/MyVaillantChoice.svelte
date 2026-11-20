@@ -150,6 +150,12 @@
 
     {@render single('Warmwasser', 'water_heater', draft.hot_water, (value) => (draft.hot_water = value))}
     {@render single('Außentemperatur', 'temperature', draft.outdoor_temperature, (value) => (draft.outdoor_temperature = value))}
+    {#if !draft.outdoor_temperature}
+      <p class="hint">
+        Ohne Außentemperatur fehlen ihre Anzeige und ihr Sensor in Home Assistant. Wählen Sie den Sensor der
+        myVAILLANT-Integration (etwa „Outdoor Temperature“); die eigenen Sensoren der App sind keine Quelle.
+      </p>
+    {/if}
     {@render single('Leistung der Wärmepumpe (optional)', 'power', draft.power, (value) => (draft.power = value))}
     <p class="hint">
       Ohne Leistungssensor gibt es keine „Energie heute“, und der Planer rechnet die Wärmepumpe in den Hausverbrauch ein.

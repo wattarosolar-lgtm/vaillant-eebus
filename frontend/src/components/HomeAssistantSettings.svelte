@@ -4,6 +4,7 @@
   import { ApiError, getSettings, saveSettings } from '../lib/api';
   import { EXPORT_GROUPS } from '../lib/texts';
   import type { AppSettings, EntityChoice, ExportGroup, HomeAssistantState, Room } from '../lib/types';
+  import { guardUnsaved } from '../lib/unsaved';
   import EntityPicker from './EntityPicker.svelte';
   import StatusPill from './StatusPill.svelte';
 
@@ -18,6 +19,8 @@
 
   /** Heat sensors that are added up, e.g. heating and hot water (backend limit). */
   const HEAT_SENSORS_MAX = 4;
+  /** Saves the three cards of this section together. */
+  const SAVE_LABEL = 'Räume, Wärme und Export speichern';
 
   let saved = $state<AppSettings | null>(null);
   let rooms = $state<Room[]>([]);
@@ -56,16 +59,24 @@
     exportGroups = [...settings.export];
   }
 
-  onMount(async () => {
-    try {
-      adopt(await getSettings());
-    } catch (err) {
-      loadError = err instanceof ApiError ? err.message : 'Die Einstellungen konnten nicht geladen werden.';
-    }
+  onMount(() => {
+    void (async () => {
+      try {
+        adopt(await getSettings());
+      } catch (err) {
+        loadError = err instanceof ApiError ? err.message : 'Die Einstellungen konnten nicht geladen werden.';
+      }
+    })();
+    return guardUnsaved(() => changed);
   });
 
+  /** A zone the heat pump does not report (any more), e.g. one of the other connection. */
   function zoneLabel(zoneId: string): string {
-    return zones.find((zone) => zone.id === zoneId)?.label ?? `Zone ${zoneId}`;
+    const zone = zones.find((candidate) => candidate.id === zoneId);
+    if (zone) {
+      return zone.label;
+    }
+    return zones.length > 0 ? 'Zone nicht mehr vorhanden' : 'unbekannte Zone';
   }
 
   // Zones the device reports, plus any assigned zone it does not report right now.
@@ -197,6 +208,12 @@
           />
         </div>
       {/if}
+      {#if changed}
+        <!-- The save button sits below "Wärme heute" and "Export"; easy to miss after a long room list. -->
+        <p class="hint unsaved" role="status">
+          Noch nicht gespeichert: unten „{SAVE_LABEL}“ wählen.
+        </p>
+      {/if}
     </section>
 
     <div class="pair">
@@ -272,7 +289,7 @@
 
     <div class="actions">
       <button type="button" class="button primary" disabled={!changed || !roomsValid || saving} onclick={save}>
-        Speichern
+        {SAVE_LABEL}
       </button>
       {#if saveError}
         <p class="error" role="alert">{saveError}</p>
@@ -443,6 +460,10 @@
   .error {
     color: var(--error-text);
     font-size: 14px;
+  }
+
+  .unsaved {
+    color: var(--warn-text);
   }
 
   @media (max-width: 420px) {
