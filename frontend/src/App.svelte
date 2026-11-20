@@ -11,11 +11,13 @@
   import { hasUnsaved, UNSAVED_QUESTION } from './lib/unsaved';
   import Log from './pages/Log.svelte';
   import Overview from './pages/Overview.svelte';
+  import Plan from './pages/Plan.svelte';
+  import Rooms from './pages/Rooms.svelte';
   import Settings from './pages/Settings.svelte';
   import Setup from './pages/Setup.svelte';
 
-  type Route = 'uebersicht' | 'einstellungen' | 'protokoll' | 'einrichtung';
-  const ROUTES: Route[] = ['uebersicht', 'einstellungen', 'protokoll', 'einrichtung'];
+  type Route = 'uebersicht' | 'plan' | 'raeume' | 'einstellungen' | 'protokoll' | 'einrichtung';
+  const ROUTES: Route[] = ['uebersicht', 'plan', 'raeume', 'einstellungen', 'protokoll', 'einrichtung'];
 
   // The connection (and with EEBUS the pairing) drives setup and settings; the heat
   // pump values arrive live over server-sent events. While connected they rarely change.
@@ -188,6 +190,8 @@
   {#if ready && route !== 'einrichtung'}
     <nav aria-label="Seiten">
       <a href="#/uebersicht" aria-current={route === 'uebersicht' ? 'page' : undefined} onclick={leave}>Übersicht</a>
+      <a href="#/plan" aria-current={route === 'plan' ? 'page' : undefined} onclick={leave}>Plan</a>
+      <a href="#/raeume" aria-current={route === 'raeume' ? 'page' : undefined} onclick={leave}>Räume</a>
       <a href="#/protokoll" aria-current={route === 'protokoll' ? 'page' : undefined} onclick={leave}>Protokoll</a>
       <a href="#/einstellungen" aria-current={route === 'einstellungen' ? 'page' : undefined} onclick={leave}
         >Einstellungen</a
@@ -247,6 +251,10 @@
       />
     {:else if route === 'protokoll'}
       <Log />
+    {:else if route === 'plan'}
+      <Plan />
+    {:else if route === 'raeume'}
+      <Rooms homeAssistantAvailable={live?.home_assistant?.available ?? false} />
     {:else}
       <Overview {live} {streamOpen} />
     {/if}
@@ -297,11 +305,14 @@
 
   nav {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
     padding: 4px;
     background: var(--segment-bg);
     border-radius: 12px;
     align-self: flex-start;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 
   nav a {
@@ -330,6 +341,10 @@
   @media (max-width: 600px) {
     .page {
       padding: 16px 16px 32px;
+    }
+
+    nav a {
+      padding: 0 10px;
     }
   }
 </style>

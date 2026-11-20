@@ -1,12 +1,16 @@
 import type {
   ConnectionState,
   ExportGroup,
+  FlowHint,
   Gateway,
   HistoryGap,
   LogCategory,
   PlannerMode,
-  TariffKind,
+  RiskLevel,
+  Supply,
   ValueStatus,
+  WeatherSource,
+  ZoneKind,
 } from './types';
 
 export type Tone = 'ok' | 'warn' | 'error' | 'neutral';
@@ -103,6 +107,7 @@ export const LOG_CATEGORY_LABELS: Record<LogCategory, string> = {
   mode: 'Modus',
   settings: 'Einstellungen',
   hems: 'Planer',
+  rooms: 'Räume',
 };
 
 /** Groups of values reported to Home Assistant, in the order of the settings page. */
@@ -114,7 +119,11 @@ export const EXPORT_GROUPS: { group: ExportGroup; label: string; hint: string }[
   { group: 'energy', label: 'Leistung und Energie', hint: 'Leistung, Verdichterleistung, Energie heute (berechnet)' },
   { group: 'power_limits', label: 'Leistungsdeckel', hint: 'Grenze, aktiv, Failsafe-Grenze und -Dauer' },
   { group: 'compressor', label: 'Verdichter-Flexibilität', hint: 'Zustand eines angebotenen Verdichterlaufs' },
-  { group: 'hems', label: 'Energiemanagement', hint: 'Stufe des Planers, nächste Aktion, Plan, Strombedarf morgen' },
+  {
+    group: 'hems',
+    label: 'Energiemanagement',
+    hint: 'Stufe, nächste Änderung, Plan, Starts und Abtauungen heute, Frostschutz aktiv',
+  },
 ];
 
 export const PLANNER_MODE_LABELS: Record<PlannerMode, string> = {
@@ -124,19 +133,41 @@ export const PLANNER_MODE_LABELS: Record<PlannerMode, string> = {
 };
 
 export const PLANNER_MODE_HINTS: Record<PlannerMode, string> = {
-  off: 'Der Planer plant nicht und ändert nichts.',
-  preview: 'Der Planer plant und zeigt, was er senden würde. Er sendet nichts, auch im Live-Betrieb.',
-  control:
-    'Der Planer setzt den Plan um: Er verschiebt Solltemperaturen und startet die Warmwasser-Einmalladung. Im Demo-Betrieb der App sendet er trotzdem nichts.',
+  off: 'Das Energiemanagement plant nicht. Takte, Abtauungen und Raumwerte zählt und lernt die App trotzdem.',
+  preview:
+    'Das Energiemanagement plant 48 Stunden voraus und zeigt, was es tun würde. Es sendet nichts, auch im Live-Betrieb.',
+  control: 'Steuern kommt mit Version 1.4.0 (erst die Zonen, mit 1.5.0 die Thermostate).',
 };
 
-export const CONTROL_CONFIRMATION =
-  'Steuern einschalten? Der Planer ändert dann Solltemperaturen der Wärmepumpe und kehrt danach jeweils zum Grundwert zurück.';
+export const RISK_LABELS: Record<RiskLevel, string> = {
+  none: 'keins',
+  low: 'gering',
+  medium: 'mittel',
+  high: 'hoch',
+};
 
-export const TARIFF_LABELS: Record<TariffKind, string> = {
-  fixed: 'Festpreis',
-  dynamic: 'Dynamisch (Börsenpreis)',
-  fixed_14a: 'Festpreis mit §14a Modul 3',
+export const SUPPLY_LABELS: Record<Supply, string> = {
+  unknown: 'unbekannt',
+  supplied: 'versorgt',
+  under: 'unterversorgt',
+  over: 'überversorgt',
+};
+
+export const FLOW_HINT_LABELS: Record<FlowHint, string> = {
+  unknown: 'noch keine Aussage (Ventilstellungen fehlen oder zu neu)',
+  hold: 'halten',
+  higher: 'höher',
+  lower: 'tiefer',
+};
+
+export const ZONE_KIND_LABELS: Record<ZoneKind, string> = {
+  floor: 'Fußbodenheizung (Speicher)',
+  radiator: 'Heizkörper',
+};
+
+export const WEATHER_SOURCE_LABELS: Record<WeatherSource, string> = {
+  open_meteo: 'Open-Meteo (DWD-ICON)',
+  home_assistant: 'Wetter-Entität aus Home Assistant',
 };
 
 /** Shown instead of the power chart. */

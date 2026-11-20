@@ -162,7 +162,9 @@
       <h3 id="rooms-title">Räume</h3>
       <p class="secondary">
         Wählen Sie Temperatursensoren Ihrer Räume und ordnen Sie sie einer Heizzone zu. Das Rundinstrument jeder Zone
-        zeigt den Mittelwert ihrer Räume. Werte, die fehlen oder älter als 30 Minuten sind, zählen nicht mit.
+        zeigt den Mittelwert ihrer Räume. Werte, die fehlen oder älter als 30 Minuten sind, zählen nicht mit. Für einen
+        Raum ohne Sensor können Sie das Heizkörperthermostat wählen; es misst am Heizkörper und zählt deshalb nicht im
+        Mittelwert. Heizlast, Thermostat, Soll und Zeitplan je Raum stellen Sie auf der Seite „Räume“ ein.
       </p>
       {#if rooms.length > 0}
         <ul class="rooms">
@@ -201,7 +203,7 @@
       {#if available}
         <div class="picker-width">
           <EntityPicker
-            kind="temperature"
+            kind="room"
             label="Raum hinzufügen"
             exclude={rooms.map((room) => room.entity_id)}
             onPick={addRoom}

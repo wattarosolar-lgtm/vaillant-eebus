@@ -1,7 +1,7 @@
 <script lang="ts">
   import BoostSwitch from '../components/BoostSwitch.svelte';
   import Dial from '../components/Dial.svelte';
-  import HemsCard from '../components/HemsCard.svelte';
+  import HemsOverview from '../components/HemsOverview.svelte';
   import OverrideEnd from '../components/OverrideEnd.svelte';
   import PowerChart from '../components/PowerChart.svelte';
   import {
@@ -315,9 +315,8 @@
         {/if}
       </section>
 
-      <!-- Full width: the timeline needs the room. -->
       <section aria-label="Energiemanagement">
-        <HemsCard />
+        <HemsOverview />
       </section>
 
       {#if values.captured_at}

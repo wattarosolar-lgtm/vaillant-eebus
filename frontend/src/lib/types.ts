@@ -250,7 +250,7 @@ export interface EntityChoice {
   unit: string | null;
 }
 
-export type LogCategory = 'mode' | 'write' | 'connection' | 'device' | 'settings' | 'hems';
+export type LogCategory = 'mode' | 'write' | 'connection' | 'device' | 'settings' | 'hems' | 'rooms';
 
 export interface LogEntry {
   id: number;
@@ -272,130 +272,338 @@ export interface LogPage {
   more: boolean;
 }
 
-/** What Home Assistant entities are offered for: rooms, heat, and the planner's inputs. */
+/** What Home Assistant entities are offered for: rooms, heat, myVAILLANT and the energy management. */
 export type EntityKind =
   | 'temperature'
   | 'energy'
   | 'power'
-  | 'battery'
-  | 'price'
-  | 'pv_forecast'
+  | 'percent'
+  | 'humidity'
+  | 'room'
+  | 'thermostat'
   | 'weather'
   | 'climate'
   | 'water_heater';
 
 // --- energy management (hems/) ---------------------------------------------------
 
-/** Aus, Vorschau (plans, sends nothing), Steuern (through the write gate). */
+/** Aus, Vorschau (plans, sends nothing); Steuern comes with 1.4.0. */
 export type PlannerMode = 'off' | 'preview' | 'control';
-export type TariffKind = 'fixed' | 'dynamic' | 'fixed_14a';
-export type WeatherSource = 'home_assistant' | 'open_meteo';
+export type WeatherSource = 'open_meteo' | 'home_assistant';
+export type ZoneKind = 'floor' | 'radiator';
+export type RiskLevel = 'none' | 'low' | 'medium' | 'high';
+export type Supply = 'unknown' | 'supplied' | 'under' | 'over';
+export type FlowHint = 'unknown' | 'hold' | 'higher' | 'lower';
 
-/** Local time of day "HH:MM"; an end before the start crosses midnight. */
-export interface TimeWindow {
-  start: string;
-  end: string;
-}
-
-export interface Tariff {
-  kind: TariffKind;
-  /** ct/kWh; with §14a the price in standard time. */
-  price_ct: number | null;
-  price_entity: string | null;
-  surcharge_ct: number;
-  vat_percent: number;
-  high_price_ct: number | null;
-  low_price_ct: number | null;
-  high_windows: TimeWindow[];
-  low_windows: TimeWindow[];
-  feed_in_ct: number | null;
-}
-
-export interface ZoneLimits {
+export interface ZoneConfig {
   zone_id: string;
-  up_k: number;
-  down_k: number;
+  kind: ZoneKind | null;
+  flow_entity: string | null;
+  flow_setpoint_entity: string | null;
+  design_flow_c: number | null;
+  design_return_c: number | null;
+  band_down_k: number | null;
+  band_up_k: number | null;
 }
 
 /** The settings as the backend stores them (hems_to_json). */
 export interface HemsSettings {
   mode: PlannerMode;
-  tariff: Tariff;
-  pv_forecast_today: string | null;
-  pv_forecast_tomorrow: string | null;
-  house_power: string | null;
-  battery_soc: string | null;
-  battery_capacity_kwh: number | null;
-  battery_charge_kw: number | null;
-  battery_min_soc: number;
   weather_source: WeatherSource;
   weather_entity: string | null;
   latitude: number | null;
   longitude: number | null;
-  zones: ZoneLimits[];
-  dhw_max_c: number;
+  heat_heating_entity: string | null;
+  heat_dhw_entity: string | null;
+  buffer_entity: string | null;
+  design_outdoor_c: number | null;
+  heat_load_w: number | null;
+  zones: ZoneConfig[];
+  step_k: number;
+  min_interval_min: number;
+  /** "HH:MM", local. */
+  night_start: string;
+  night_end: string;
+  night_loss_k: number;
+  defrost_loss_k: number;
+  target_starts: number;
   heating_limit_c: number;
+  block_above_c: number;
+  cloud_commands_max: number;
+  zone1_threshold_w: number;
 }
 
-export interface PlanSlot {
+export interface WeatherHour {
   start: string;
-  /** EUR/kWh from the grid. */
-  price: number | null;
-  pv_w: number | null;
-  base_w: number | null;
-  /** What would go to the grid otherwise, W. */
-  surplus_w: number | null;
-  battery_soc: number | null;
+  temperature_c: number | null;
+  humidity: number | null;
+  dew_point_c: number | null;
+  wind_ms: number | null;
+  radiation_w: number | null;
+  cloud_cover: number | null;
+  precipitation_mm: number | null;
+  snowfall_cm: number | null;
+}
+
+export interface ForecastStatus {
+  source: WeatherSource | null;
+  fetched_at: string | null;
+  calibrated: boolean;
+  /** How well the day-ahead forecast held against the heat pump's sensor. */
+  check: { hours: number; mean_abs_error_k: number; bias_k: number } | null;
+  now: WeatherHour | null;
+}
+
+export interface CopModel {
+  a: number;
+  b: number;
+  days: number;
+}
+
+export interface HouseModel {
+  loss_w_per_k: number;
+  gains_w: number;
+  sun_m2: number | null;
+  days: number;
+  r2: number | null;
+  spread_kwh: number | null;
+  /** False: start value from the static balancing. */
+  learned: boolean;
+  lag_h: number | null;
+  cop: CopModel | null;
+}
+
+export interface DayDemand {
+  day: string;
+  heat_kwh: number;
+  electricity_kwh: number | null;
   outdoor_c: number | null;
 }
 
-export type BlockAction = 'charge' | 'raise' | 'lower';
+export interface DayCycles {
+  day: string;
+  starts: number;
+  run_minutes: number | null;
+  pause_minutes: number | null;
+  defrosts: number;
+  outdoor_c: number | null;
+}
 
-export interface PlanBlock {
-  /** "dhw" or the zone's ID. */
-  control: string;
-  action: BlockAction;
-  start: string;
-  end: string;
-  shift_k: number | null;
-  target_c: number | null;
+export interface BandCycles {
+  band: string;
+  starts: number;
+  run_minutes: number | null;
+  pause_minutes: number | null;
+  defrosts: number;
+  run_hours: number;
+}
+
+export interface Defrost {
+  at: string;
+  minutes: number;
+  peak_w: number;
+  outdoor_c: number | null;
+  humidity: number | null;
+}
+
+export interface CycleStats {
+  today: DayCycles;
+  days: DayCycles[];
+  bands: BandCycles[];
+  running: boolean | null;
+  since: string | null;
+  last_defrost: Defrost | null;
+}
+
+export interface BandRate {
+  band: string;
+  rate: number;
+  defrosts: number;
+  run_hours: number;
+  learned: boolean;
+}
+
+export interface FrostState {
+  active: boolean;
+  below_since: string | null;
+}
+
+export interface Zone1Status {
+  zone_id: string;
+  would: 'off' | 'auto' | null;
+  actual: string | null;
   reason: string;
+  switches_today: number;
+  checked_today: number;
+  agreed_today: number;
 }
 
-export interface Plan {
-  created_at: string;
-  slots: PlanSlot[];
-  blocks: PlanBlock[];
-  /** Per control: why nothing is planned. */
-  notes: Record<string, string>;
+export interface FlowStatus {
+  zone_id: string;
+  offset_k: number;
+  hint: FlowHint;
+  reason: string | null;
+  bottleneck: string | null;
+  max_valve: number | null;
+  under: number;
 }
 
-export interface NextAction {
+export interface Change {
   at: string;
   text: string;
-  reason: string | null;
-}
-
-export interface Demand {
-  kwh: number;
-  spread_kwh: number;
-  days: number;
-  outdoor_c: number;
+  reasons: string[];
 }
 
 export interface HemsStatus {
   mode: PlannerMode;
+  available_modes: PlannerMode[];
   app_mode: OperatingMode;
   settings: HemsSettings;
-  plan: Plan | null;
+  /** German: missing or outdated inputs. */
   problems: string[];
-  next_action: NextAction | null;
+  /** Zone ID -> name. */
   labels: Record<string, string>;
-  bases: Record<string, number>;
-  shifted: Record<string, number>;
-  /** EUR/kWh. */
-  feed_in: number | null;
-  demand_tomorrow: Demand | null;
-  learned_days: number;
-  needed_days: number;
+  forecast: ForecastStatus;
+  house: HouseModel | null;
+  statistics_days: number;
+  demand: DayDemand[];
+  cycles: CycleStats;
+  defrost_rates: BandRate[];
+  frost: FrostState;
+  zone1: Zone1Status | null;
+  flow: FlowStatus[];
+  next_changes: Change[];
+  plan_created_at: string | null;
+}
+
+export interface ZoneHour {
+  zone_id: string;
+  shift_k: number;
+  target_c: number | null;
+  flow_c: number | null;
+  block: boolean;
+  night: boolean;
+}
+
+export interface RoomHour {
+  entity_id: string;
+  setpoint_c: number;
+}
+
+export interface PlanHour {
+  start: string;
+  outdoor_c: number | null;
+  humidity: number | null;
+  defrost: RiskLevel | null;
+  heat_w: number | null;
+  electricity_w: number | null;
+  frost: boolean;
+  zones: ZoneHour[];
+  rooms: RoomHour[];
+  reasons: string[];
+}
+
+export interface HourRecord {
+  start: string;
+  planned: PlanHour | null;
+  outdoor_c: number | null;
+  /** Zone ID -> mean setpoint in the hour. */
+  setpoints: Record<string, number>;
+  starts: number;
+  defrosts: number;
+  electricity_kwh: number | null;
+}
+
+export interface PlanView {
+  created_at: string | null;
+  hours: PlanHour[];
+  history: HourRecord[];
+  labels: Record<string, string>;
+  /** Room entity -> name. */
+  rooms: Record<string, string>;
+}
+
+export type SurfaceKind = 'radiator' | 'floor';
+export type RatedBasis = '75/65' | '55/45' | '50/40';
+
+export interface HeatingSurface {
+  kind: SurfaceKind;
+  rated_w: number | null;
+  rated_basis: RatedBasis;
+  flow_lph: number | null;
+  presetting: string;
+}
+
+export interface ScheduleWindow {
+  start: string;
+  end: string;
+  setpoint_c: number;
+}
+
+export interface RoomDetails {
+  heat_load_w: number | null;
+  design_c: number | null;
+  surfaces: HeatingSurface[];
+  trv_entity: string | null;
+  valve_entity: string | null;
+  humidity_entity: string | null;
+  setpoint_c: number;
+  schedule: ScheduleWindow[];
+  comfort_down_k: number;
+  comfort_up_k: number;
+  night_loss_k: number | null;
+  defrost_loss_k: number | null;
+  throttle: boolean;
+  emergency_c: number | null;
+}
+
+export interface RoomLearned {
+  tau_h: number | null;
+  gains_k_per_h: number | null;
+  heating_rate: number | null;
+  startup_min: number | null;
+  demand_valve: number | null;
+  correction_k: number | null;
+  overshoot_k: number | null;
+  /** Value name -> learned (true) or start value / unknown (false). */
+  learned: Record<string, boolean>;
+  learning: boolean;
+}
+
+export interface RoomStatus {
+  entity_id: string;
+  name: string;
+  zone_id: string | null;
+  zone_label: string | null;
+  measured_at_thermostat: boolean;
+  details: RoomDetails;
+  temperature_c: number | null;
+  humidity: number | null;
+  valve: number | null;
+  trv_setpoint_c: number | null;
+  setpoint_c: number;
+  comfort_low_c: number;
+  comfort_high_c: number;
+  heat_loss_start_w_per_k: number | null;
+  model: RoomLearned | null;
+  cooling_now_k_per_h: number | null;
+  /** Outdoor °C (as text) -> K/h at the setpoint. */
+  cooling_table: Record<string, number>;
+  minutes_to_lower: number | null;
+  supply: Supply;
+  window_open: boolean;
+  window_since: string | null;
+}
+
+export interface ZoneRoomsStatus {
+  zone_id: string;
+  label: string;
+  limiting_room: string | null;
+  limiting_minutes: number | null;
+  flow: FlowStatus | null;
+}
+
+export interface RoomsView {
+  rooms: RoomStatus[];
+  zones: ZoneRoomsStatus[];
 }

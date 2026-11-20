@@ -17,8 +17,11 @@ import type {
   OperatingMode,
   PairingStatus,
   PlannerMode,
+  PlanView,
   PowerHistory,
   Room,
+  RoomDetails,
+  RoomsView,
   WriteResult,
 } from './types';
 
@@ -177,6 +180,25 @@ export async function setHemsMode(mode: PlannerMode): Promise<HemsStatus> {
   return post<HemsStatus>('api/hems/mode', { mode });
 }
 
+/** The plan for 48 hours and the look-back on the last 24. */
+export async function getPlan(): Promise<PlanView> {
+  return (await send('api/hems/plan')).json() as Promise<PlanView>;
+}
+
+export async function getRooms(): Promise<RoomsView> {
+  return (await send('api/rooms')).json() as Promise<RoomsView>;
+}
+
+/** Saves what the user entered for one room. */
+export async function saveRoom(entityId: string, details: RoomDetails): Promise<RoomsView> {
+  const response = await send(`api/rooms/${encodeURIComponent(entityId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(details),
+  });
+  return response.json() as Promise<RoomsView>;
+}
+
 function logParams(filter: LogFilter): URLSearchParams {
   const params = new URLSearchParams();
   if (filter.category) {
@@ -231,6 +253,10 @@ export async function downloadDump(): Promise<void> {
 }
 
 /** The protocol as a CSV file, with the same filter as the list. */
+export async function downloadPlan(): Promise<void> {
+  await download('api/hems/plan/export', 'vaillant-eebus-plan.csv');
+}
+
 export async function downloadLog(filter: LogFilter): Promise<void> {
   const query = logParams(filter).toString();
   await download(query ? `api/log/export?${query}` : 'api/log/export', 'vaillant-eebus-protokoll.csv');

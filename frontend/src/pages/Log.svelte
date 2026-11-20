@@ -7,7 +7,7 @@
 
   type FilterKey = 'all' | 'problems' | LogCategory;
 
-  const CATEGORIES: LogCategory[] = ['write', 'device', 'hems', 'connection', 'mode', 'settings'];
+  const CATEGORIES: LogCategory[] = ['write', 'device', 'hems', 'rooms', 'connection', 'mode', 'settings'];
   const FILTERS: { key: FilterKey; label: string }[] = [
     { key: 'all', label: 'Alle' },
     { key: 'problems', label: 'Probleme' },
@@ -326,7 +326,8 @@
     color: var(--info-text);
   }
 
-  .category.hems {
+  .category.hems,
+  .category.rooms {
     background: var(--ok-bg);
     color: var(--ok-text);
   }

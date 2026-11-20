@@ -2,16 +2,9 @@
   import { onMount } from 'svelte';
 
   import { ApiError, getHems, getLocation, saveHemsSettings, setHemsMode } from '../lib/api';
-  import { CONTROL_CONFIRMATION, PLANNER_MODE_HINTS, PLANNER_MODE_LABELS, TARIFF_LABELS } from '../lib/texts';
-  import type {
-    EntityKind,
-    HemsSettings,
-    HemsStatus,
-    PlannerMode,
-    TariffKind,
-    TimeWindow,
-    ZoneLimits,
-  } from '../lib/types';
+  import { PLANNER_MODE_HINTS, PLANNER_MODE_LABELS, WEATHER_SOURCE_LABELS, ZONE_KIND_LABELS } from '../lib/texts';
+  import type { EntityKind, HemsSettings, HemsStatus, PlannerMode, WeatherSource, ZoneConfig, ZoneKind } from '../lib/types';
+  import { guardUnsaved } from '../lib/unsaved';
   import EntityPicker from './EntityPicker.svelte';
   import StatusPill from './StatusPill.svelte';
 
@@ -25,10 +18,9 @@
   } = $props();
 
   const MODES: PlannerMode[] = ['off', 'preview', 'control'];
-  const TARIFFS: TariffKind[] = ['fixed', 'dynamic', 'fixed_14a'];
-  const SHIFTS = [0, 0.5, 1, 1.5, 2, 2.5, 3];
-  const WINDOWS_MAX = 4;
-  const DEFAULT_LIMITS = { up_k: 1, down_k: 1 };
+  const SOURCES: WeatherSource[] = ['open_meteo', 'home_assistant'];
+  const KINDS: ZoneKind[] = ['floor', 'radiator'];
+  const BANDS = [0, 0.5, 1, 1.5, 2, 2.5, 3];
 
   let status = $state<HemsStatus | null>(null);
   let draft = $state<HemsSettings | null>(null);
@@ -41,7 +33,6 @@
   let saving = $state(false);
   let switching = $state(false);
   let justSaved = $state(false);
-  let confirmingControl = $state(false);
 
   function clone(settings: HemsSettings): HemsSettings {
     return JSON.parse(JSON.stringify(settings)) as HemsSettings;
@@ -55,18 +46,22 @@
   // Numbers the backend needs; an emptied field must be filled again.
   const complete = $derived(
     draft !== null &&
-      [draft.tariff.surcharge_ct, draft.tariff.vat_percent, draft.battery_min_soc, draft.dhw_max_c, draft.heating_limit_c].every(
-        (value) => typeof value === 'number' && Number.isFinite(value),
-      ),
+      [
+        draft.step_k,
+        draft.min_interval_min,
+        draft.night_loss_k,
+        draft.defrost_loss_k,
+        draft.target_starts,
+        draft.heating_limit_c,
+        draft.block_above_c,
+        draft.cloud_commands_max,
+        draft.zone1_threshold_w,
+      ].every((value) => typeof value === 'number' && Number.isFinite(value)) &&
+      draft.night_start !== '' &&
+      draft.night_end !== '',
   );
-  // With a battery the planner needs its capacity and charging power.
-  const batteryComplete = $derived(
-    draft === null ||
-      !draft.battery_soc ||
-      [draft.battery_capacity_kwh, draft.battery_charge_kw].every(
-        (value) => typeof value === 'number' && Number.isFinite(value) && value > 0,
-      ),
-  );
+
+  onMount(() => guardUnsaved(() => changed));
 
   onMount(async () => {
     try {
@@ -82,24 +77,15 @@
     justSaved = false;
   }
 
-  function requestMode(mode: PlannerMode): void {
-    if (status === null || mode === status.mode) {
-      return;
-    }
-    if (mode === 'control') {
-      confirmingControl = true;
-      return;
-    }
-    void switchMode(mode);
-  }
-
   async function switchMode(mode: PlannerMode): Promise<void> {
+    if (status === null || mode === status.mode || !status.available_modes.includes(mode)) {
+      return;
+    }
     switching = true;
     modeError = null;
     try {
       // Only the stage changes; unsaved settings stay in the form.
       status = await setHemsMode(mode);
-      confirmingControl = false;
     } catch (err) {
       modeError = err instanceof ApiError ? err.message : 'Die Stufe konnte nicht umgestellt werden.';
     } finally {
@@ -139,32 +125,42 @@
     }
   }
 
-  function limits(zoneId: string): ZoneLimits {
-    return draft?.zones.find((zone) => zone.zone_id === zoneId) ?? { zone_id: zoneId, ...DEFAULT_LIMITS };
+  function zoneConfig(zoneId: string): ZoneConfig {
+    return (
+      draft?.zones.find((zone) => zone.zone_id === zoneId) ?? {
+        zone_id: zoneId,
+        kind: null,
+        flow_entity: null,
+        flow_setpoint_entity: null,
+        design_flow_c: null,
+        design_return_c: null,
+        band_down_k: null,
+        band_up_k: null,
+      }
+    );
   }
 
-  function setLimit(zoneId: string, key: 'up_k' | 'down_k', value: number): void {
+  function setZone<K extends keyof ZoneConfig>(zoneId: string, key: K, value: ZoneConfig[K]): void {
     if (draft === null) {
       return;
     }
-    const next = { ...limits(zoneId), [key]: value };
-    draft.zones = [...draft.zones.filter((zone) => zone.zone_id !== zoneId), next];
+    const next = { ...zoneConfig(zoneId), [key]: value };
+    const others = draft.zones.filter((zone) => zone.zone_id !== zoneId);
+    draft.zones = [...others, next].sort((a, b) => a.zone_id.localeCompare(b.zone_id));
     edited();
   }
 
-  function addWindow(list: TimeWindow[]): void {
-    list.push({ start: '17:00', end: '20:00' });
-    edited();
+  /** An empty number field means "not set" for optional values. */
+  function optional(value: string): number | null {
+    if (value.trim() === '') {
+      return null;
+    }
+    const number = Number(value.replace(',', '.'));
+    return Number.isFinite(number) ? number : null;
   }
 
-  function removeWindow(list: TimeWindow[], index: number): void {
-    list.splice(index, 1);
-    edited();
-  }
-
-  /** "+1,5 K"; no sign for 0. */
-  function shiftLabel(sign: string, value: number): string {
-    return `${value === 0 ? '' : sign}${String(value).replace('.', ',')} K`;
+  function bandLabel(sign: string, value: number | null): string {
+    return value === null ? 'Vorgabe' : `${value === 0 ? '' : sign}${String(value).replace('.', ',')} K`;
   }
 </script>
 
@@ -203,41 +199,13 @@
   </div>
 {/snippet}
 
-{#snippet windows(title: string, list: TimeWindow[])}
-  <fieldset class="windows">
-    <legend>{title}</legend>
-    {#each list as window, index (index)}
-      <div class="window">
-        <label>von <input type="time" bind:value={window.start} oninput={edited} /></label>
-        <label>bis <input type="time" bind:value={window.end} oninput={edited} /></label>
-        <button
-          type="button"
-          class="button small"
-          aria-label={`${title}: Zeitfenster ${index + 1} entfernen`}
-          onclick={() => removeWindow(list, index)}>Entfernen</button
-        >
-      </div>
-    {/each}
-    {#if list.length < WINDOWS_MAX}
-      <div>
-        <button
-          type="button"
-          class="button small"
-          aria-label={`${title}: Zeitfenster hinzufügen`}
-          onclick={() => addWindow(list)}>Zeitfenster hinzufügen</button
-        >
-      </div>
-    {/if}
-  </fieldset>
-{/snippet}
-
 <div class="hems">
   <div class="section-head">
     <h2>Energiemanagement</h2>
     {#if status}
       <StatusPill
-        label={`Planer: ${PLANNER_MODE_LABELS[status.mode]}`}
-        tone={status.mode === 'off' ? 'neutral' : status.mode === 'control' ? 'ok' : 'warn'}
+        label={`Stufe: ${PLANNER_MODE_LABELS[status.mode]}`}
+        tone={status.mode === 'off' ? 'neutral' : 'warn'}
       />
     {/if}
   </div>
@@ -248,39 +216,30 @@
     <p class="secondary" role="status">Einstellungen werden geladen …</p>
   {:else}
     <section class="card" aria-labelledby="hems-stage-title">
-      <h3 id="hems-stage-title">Planer</h3>
+      <h3 id="hems-stage-title">Stufe</h3>
       <p class="secondary">
-        Der Planer legt das Warmwasser-Laden in Stunden mit PV-Überschuss oder günstigem Strom und heizt die Zonen dann
-        vor. Er ändert nur Solltemperaturen und die Einmalladung, nie Betriebsarten, und kehrt danach zum Grundwert zurück.
-        Ändern Sie eine Solltemperatur selbst, wird sie zum neuen Grundwert.
+        Das Energiemanagement beobachtet die Wärmepumpe und die Räume, lernt Haus und Räume kennen und plant 48 Stunden
+        voraus: Vorlauf, Vorausschau, Abtauungen, Nachtabsenkung und Takten. In dieser Version zeigt es nur, was es tun
+        würde, und sendet nichts.
       </p>
-      <div class="segments stage" role="group" aria-label="Stufe des Planers">
+      <div class="segments stage" role="group" aria-label="Stufe des Energiemanagements">
         {#each MODES as mode (mode)}
+          {@const available = status.available_modes.includes(mode)}
           <button
             type="button"
             class:active={status.mode === mode}
             aria-pressed={status.mode === mode}
-            disabled={switching}
-            onclick={() => requestMode(mode)}>{PLANNER_MODE_LABELS[mode]}</button
+            disabled={switching || !available}
+            title={available ? undefined : PLANNER_MODE_HINTS[mode]}
+            onclick={() => void switchMode(mode)}>{PLANNER_MODE_LABELS[mode]}{available ? '' : ' (ab 1.4.0)'}</button
           >
         {/each}
       </div>
       <p class="hint">{PLANNER_MODE_HINTS[status.mode]}</p>
-      {#if confirmingControl}
-        <div class="banner warn confirm" role="alertdialog" aria-label="Steuern bestätigen">
-          <p>{CONTROL_CONFIRMATION}</p>
-          <div class="buttons">
-            <button type="button" class="button primary" disabled={switching} onclick={() => switchMode('control')}
-              >Steuern einschalten</button
-            >
-            <button type="button" class="button" onclick={() => (confirmingControl = false)}>Abbrechen</button>
-          </div>
-        </div>
-      {/if}
       {#if modeError}
         <p class="error" role="alert">{modeError}</p>
       {/if}
-      {#if status.mode !== 'off' && status.problems.length > 0}
+      {#if status.problems.length > 0}
         <ul class="problems" aria-label="Fehlende Daten">
           {#each status.problems as problem (problem)}
             <li>{problem}</li>
@@ -290,204 +249,253 @@
     </section>
 
     <div class="pair">
-      <section class="card" aria-labelledby="hems-tariff-title">
-        <h3 id="hems-tariff-title">Strompreis</h3>
-        <label class="field">
-          <span class="field-label">Tarif</span>
-          <select bind:value={draft.tariff.kind} onchange={edited}>
-            {#each TARIFFS as kind (kind)}
-              <option value={kind}>{TARIFF_LABELS[kind]}</option>
-            {/each}
-          </select>
-        </label>
-        {#if draft.tariff.kind === 'fixed'}
+      <section class="card" aria-labelledby="hems-weather-title">
+        <h3 id="hems-weather-title">Wetterprognose</h3>
+        <fieldset class="choice">
+          <legend class="sr-only">Quelle</legend>
+          {#each SOURCES as source (source)}
+            <label class="radio">
+              <input type="radio" value={source} bind:group={draft.weather_source} onchange={edited} />
+              <span>{WEATHER_SOURCE_LABELS[source]}</span>
+            </label>
+          {/each}
+        </fieldset>
+        <div class="numbers">
           <label class="field">
-            <span class="field-label">Arbeitspreis (ct/kWh)</span>
-            <input type="number" min="0" max="200" step="0.01" bind:value={draft.tariff.price_ct} oninput={edited} />
+            <span class="field-label">Breite</span>
+            <input type="number" min="-90" max="90" step="0.01" bind:value={draft.latitude} oninput={edited} />
           </label>
-        {:else if draft.tariff.kind === 'dynamic'}
-          {@render entity('Preis-Sensor (epex_spot)', 'price', draft.tariff.price_entity, (value) => {
-            if (draft) draft.tariff.price_entity = value;
-          })}
-          <p class="hint">
-            Der Sensor „Total Price“ von epex_spot enthält Aufschläge und MwSt. schon, wenn sie in der Integration
-            eingetragen sind; dann hier 0 lassen.
-          </p>
-          <div class="numbers">
-            <label class="field">
-              <span class="field-label">Aufschlag (ct/kWh)</span>
-              <input type="number" min="0" max="200" step="0.01" bind:value={draft.tariff.surcharge_ct} oninput={edited} />
-            </label>
-            <label class="field">
-              <span class="field-label">MwSt. (%)</span>
-              <input type="number" min="0" max="50" step="1" bind:value={draft.tariff.vat_percent} oninput={edited} />
-            </label>
+          <label class="field">
+            <span class="field-label">Länge</span>
+            <input type="number" min="-180" max="180" step="0.01" bind:value={draft.longitude} oninput={edited} />
+          </label>
+        </div>
+        {#if homeAssistantAvailable}
+          <div>
+            <button type="button" class="button small" onclick={takeLocation}>Standort aus Home Assistant übernehmen</button>
           </div>
-        {:else}
-          <div class="numbers">
-            <label class="field">
-              <span class="field-label">Standardzeit ST (ct/kWh)</span>
-              <input type="number" min="0" max="200" step="0.01" bind:value={draft.tariff.price_ct} oninput={edited} />
-            </label>
-            <label class="field">
-              <span class="field-label">Hochtarif HT (ct/kWh)</span>
-              <input type="number" min="0" max="200" step="0.01" bind:value={draft.tariff.high_price_ct} oninput={edited} />
-            </label>
-            <label class="field">
-              <span class="field-label">Niedertarif NT (ct/kWh)</span>
-              <input type="number" min="0" max="200" step="0.01" bind:value={draft.tariff.low_price_ct} oninput={edited} />
-            </label>
-          </div>
-          <p class="hint">Preise jeweils mit Netzentgelt. Die Zeitfenster stehen auf der Seite Ihres Netzbetreibers.</p>
-          {@render windows('Zeitfenster Hochtarif (HT)', draft.tariff.high_windows)}
-          {@render windows('Zeitfenster Niedertarif (NT)', draft.tariff.low_windows)}
         {/if}
-        <label class="field">
-          <span class="field-label">Einspeisevergütung (ct/kWh)</span>
-          <input type="number" min="0" max="100" step="0.01" bind:value={draft.tariff.feed_in_ct} oninput={edited} />
-        </label>
+        {#if locationError}
+          <p class="error" role="alert">{locationError}</p>
+        {/if}
+        {@render entity('Wetter-Entität (Rückfall)', 'weather', draft.weather_entity, (value) => {
+          if (draft) draft.weather_entity = value;
+        })}
+        <p class="hint">
+          Open-Meteo wird höchstens einmal pro Stunde gefragt, mit auf etwa 1 km gerundetem Standort (api.open-meteo.com).
+          Antwortet es nicht, nimmt die App die Wetter-Entität. Die Prognose wird am Außenfühler der Wärmepumpe geeicht.
+        </p>
       </section>
 
-      <section class="card" aria-labelledby="hems-sources-title">
-        <h3 id="hems-sources-title">PV, Hausverbrauch und Akku</h3>
-        {@render entity('PV-Prognose heute', 'pv_forecast', draft.pv_forecast_today, (value) => {
-          if (draft) draft.pv_forecast_today = value;
-        })}
-        {@render entity('PV-Prognose morgen', 'pv_forecast', draft.pv_forecast_tomorrow, (value) => {
-          if (draft) draft.pv_forecast_tomorrow = value;
-        })}
-        {@render entity('Hausverbrauch (W oder kW, mit Wärmepumpe)', 'power', draft.house_power, (value) => {
-          if (draft) draft.house_power = value;
-        })}
-        {@render entity('Akku-Ladestand (%)', 'battery', draft.battery_soc, (value) => {
-          if (draft) draft.battery_soc = value;
-        })}
-        {#if draft.battery_soc}
-          <div class="numbers">
-            <label class="field">
-              <span class="field-label">Kapazität (kWh)</span>
-              <input type="number" min="0" max="200" step="0.1" bind:value={draft.battery_capacity_kwh} oninput={edited} />
-            </label>
-            <label class="field">
-              <span class="field-label">Ladeleistung (kW)</span>
-              <input type="number" min="0" max="50" step="0.1" bind:value={draft.battery_charge_kw} oninput={edited} />
-            </label>
-            <label class="field">
-              <span class="field-label">Entladegrenze (%)</span>
-              <input type="number" min="0" max="100" step="1" bind:value={draft.battery_min_soc} oninput={edited} />
-            </label>
-          </div>
-        {/if}
-        <p class="hint">
-          Als Überschuss zählt, was nach dem Hausverbrauch und dem Laden des Akkus ins Netz ginge. Den üblichen
-          Hausverbrauch lernt der Planer aus den letzten sieben Tagen.
+      <section class="card" aria-labelledby="hems-learn-title">
+        <h3 id="hems-learn-title">Lernen</h3>
+        <p class="secondary">
+          Aus der Langzeitstatistik von Home Assistant lernt die App, wie viel Wärme das Haus braucht. Wählen Sie dafür die
+          Wärmesensoren der myVAILLANT-Integration (Wärme heute).
         </p>
+        {@render entity('Wärme Heizen', 'energy', draft.heat_heating_entity, (value) => {
+          if (draft) draft.heat_heating_entity = value;
+        })}
+        {@render entity('Wärme Warmwasser', 'energy', draft.heat_dhw_entity, (value) => {
+          if (draft) draft.heat_dhw_entity = value;
+        })}
+        {@render entity('Puffertemperatur', 'temperature', draft.buffer_entity, (value) => {
+          if (draft) draft.buffer_entity = value;
+        })}
+        <div class="numbers">
+          <label class="field">
+            <span class="field-label">Normaußentemperatur (°C)</span>
+            <input
+              type="number"
+              min="-30"
+              max="10"
+              step="0.1"
+              value={draft.design_outdoor_c ?? ''}
+              oninput={(event) => {
+                if (draft) draft.design_outdoor_c = optional(event.currentTarget.value);
+                edited();
+              }}
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">Heizlast des Hauses (W)</span>
+            <input
+              type="number"
+              min="100"
+              max="50000"
+              step="10"
+              value={draft.heat_load_w ?? ''}
+              oninput={(event) => {
+                if (draft) draft.heat_load_w = optional(event.currentTarget.value);
+                edited();
+              }}
+            />
+          </label>
+        </div>
+        <p class="hint">Aus dem statischen hydraulischen Abgleich; nur Startwert, bis die App genug gelernt hat.</p>
       </section>
     </div>
 
-    <div class="pair">
-      <section class="card" aria-labelledby="hems-weather-title">
-        <h3 id="hems-weather-title">Temperaturprognose</h3>
-        <fieldset class="choice">
-          <legend class="sr-only">Quelle</legend>
-          <label class="radio">
-            <input type="radio" value="home_assistant" bind:group={draft.weather_source} onchange={edited} />
-            <span>Wetter-Entität aus Home Assistant</span>
-          </label>
-          <label class="radio">
-            <input type="radio" value="open_meteo" bind:group={draft.weather_source} onchange={edited} />
-            <span>Open-Meteo mit eigenem Standort</span>
-          </label>
-        </fieldset>
-        {#if draft.weather_source === 'home_assistant'}
-          {@render entity('Wetter-Entität', 'weather', draft.weather_entity, (value) => {
-            if (draft) draft.weather_entity = value;
-          })}
-        {:else}
+    <section class="card" aria-labelledby="hems-zones-title">
+      <h3 id="hems-zones-title">Zonen</h3>
+      {#each zones as zone (zone.id)}
+        {@const config = zoneConfig(zone.id)}
+        <fieldset class="zone">
+          <legend>{zone.label}</legend>
           <div class="numbers">
             <label class="field">
-              <span class="field-label">Breite</span>
-              <input type="number" min="-90" max="90" step="0.0001" bind:value={draft.latitude} oninput={edited} />
-            </label>
-            <label class="field">
-              <span class="field-label">Länge</span>
-              <input type="number" min="-180" max="180" step="0.0001" bind:value={draft.longitude} oninput={edited} />
-            </label>
-          </div>
-          {#if homeAssistantAvailable}
-            <div><button type="button" class="button small" onclick={takeLocation}>Standort aus Home Assistant übernehmen</button></div>
-          {/if}
-          {#if locationError}
-            <p class="error" role="alert">{locationError}</p>
-          {/if}
-          <p class="hint">
-            Die App fragt dafür höchstens einmal pro Stunde api.open-meteo.com ab – ihre einzige Verbindung ins Internet.
-          </p>
-        {/if}
-      </section>
-
-      <section class="card" aria-labelledby="hems-limits-title">
-        <h3 id="hems-limits-title">Grenzen</h3>
-        {#each zones as zone (zone.id)}
-          {@const current = limits(zone.id)}
-          <div class="numbers">
-            <label class="field">
-              <span class="field-label">{zone.label}: höchstens hoch</span>
-              <select value={current.up_k} onchange={(event) => setLimit(zone.id, 'up_k', Number(event.currentTarget.value))}>
-                {#each SHIFTS as shift (shift)}
-                  <option value={shift}>{shiftLabel('+', shift)}</option>
-                {/each}
-              </select>
-            </label>
-            <label class="field">
-              <span class="field-label">{zone.label}: höchstens runter</span>
+              <span class="field-label">Art</span>
               <select
-                value={current.down_k}
-                onchange={(event) => setLimit(zone.id, 'down_k', Number(event.currentTarget.value))}
+                value={config.kind ?? ''}
+                onchange={(event) =>
+                  setZone(zone.id, 'kind', event.currentTarget.value === '' ? null : (event.currentTarget.value as ZoneKind))}
               >
-                {#each SHIFTS as shift (shift)}
-                  <option value={shift}>{shiftLabel('−', shift)}</option>
+                <option value="">nicht angegeben</option>
+                {#each KINDS as kind (kind)}
+                  <option value={kind}>{ZONE_KIND_LABELS[kind]}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Auslegung Vorlauf (°C)</span>
+              <input
+                type="number"
+                min="20"
+                max="80"
+                step="0.5"
+                value={config.design_flow_c ?? ''}
+                oninput={(event) => setZone(zone.id, 'design_flow_c', optional(event.currentTarget.value))}
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Auslegung Rücklauf (°C)</span>
+              <input
+                type="number"
+                min="20"
+                max="80"
+                step="0.5"
+                value={config.design_return_c ?? ''}
+                oninput={(event) => setZone(zone.id, 'design_return_c', optional(event.currentTarget.value))}
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Band nach unten</span>
+              <select
+                value={config.band_down_k === null ? '' : String(config.band_down_k)}
+                onchange={(event) => setZone(zone.id, 'band_down_k', optional(event.currentTarget.value))}
+              >
+                <option value="">Vorgabe</option>
+                {#each BANDS as band (band)}
+                  <option value={String(band)}>{bandLabel('−', band)}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Band nach oben</span>
+              <select
+                value={config.band_up_k === null ? '' : String(config.band_up_k)}
+                onchange={(event) => setZone(zone.id, 'band_up_k', optional(event.currentTarget.value))}
+              >
+                <option value="">Vorgabe</option>
+                {#each BANDS as band (band)}
+                  <option value={String(band)}>{bandLabel('+', band)}</option>
                 {/each}
               </select>
             </label>
           </div>
-        {:else}
-          <p class="hint">Die Grenzen der Zonen lassen sich einstellen, sobald die Wärmepumpe verbunden ist.</p>
-        {/each}
+          {@render entity('Vorlauf-Ist', 'temperature', config.flow_entity, (value) => setZone(zone.id, 'flow_entity', value))}
+          {@render entity('Vorlauf-Soll', 'temperature', config.flow_setpoint_entity, (value) =>
+            setZone(zone.id, 'flow_setpoint_entity', value),
+          )}
+        </fieldset>
+      {:else}
+        <p class="hint">Die Zonen lassen sich einstellen, sobald die Wärmepumpe verbunden ist.</p>
+      {/each}
+      <p class="hint">
+        Die Fußbodenheizung dient als Speicher (Blockbetrieb, Zone-1-Logik), die Heizkörper-Zone bekommt den Vorlauf nach
+        den Ventilstellungen. Vorgabe für das Band: Fußbodenheizung −1 … +2 K, Heizkörper −2 … +2 K. Bei myVAILLANT heißen
+        die Vorlauf-Sensoren meist „… circuit_0/1 … flow temperature“.
+      </p>
+    </section>
+
+    <div class="pair">
+      <section class="card" aria-labelledby="hems-night-title">
+        <h3 id="hems-night-title">Nachtabsenkung und Abtauen</h3>
         <div class="numbers">
           <label class="field">
-            <span class="field-label">Warmwasser höchstens (°C)</span>
-            <input type="number" min="35" max="70" step="1" bind:value={draft.dhw_max_c} oninput={edited} />
+            <span class="field-label">Nachtfenster von</span>
+            <input type="time" bind:value={draft.night_start} oninput={edited} />
           </label>
           <label class="field">
-            <span class="field-label">Heizgrenze (°C außen)</span>
-            <input type="number" min="0" max="25" step="0.5" bind:value={draft.heating_limit_c} oninput={edited} />
+            <span class="field-label">bis</span>
+            <input type="time" bind:value={draft.night_end} oninput={edited} />
+          </label>
+          <label class="field">
+            <span class="field-label">Verlust nachts höchstens (K)</span>
+            <input type="number" min="0" max="3" step="0.1" bind:value={draft.night_loss_k} oninput={edited} />
+          </label>
+          <label class="field">
+            <span class="field-label">Verlust gegen Abtauen höchstens (K)</span>
+            <input type="number" min="0" max="3" step="0.1" bind:value={draft.defrost_loss_k} oninput={edited} />
           </label>
         </div>
         <p class="hint">
-          Warmwasser wird nur angehoben, nie abgesenkt. Liegt die erwartete Außentemperatur über der Heizgrenze, bleiben die
-          Zonen unverändert.
+          Vorgabe für alle Räume; einzelne Räume stellen Sie auf der Seite „Räume“ anders ein. Die Absenkung nutzt die App
+          nur, wenn sich das Wiederaufheizen lohnt, und nie in feuchten Räumen.
         </p>
+      </section>
+
+      <section class="card" aria-labelledby="hems-cycles-title">
+        <h3 id="hems-cycles-title">Takten und Grenzen</h3>
+        <div class="numbers">
+          <label class="field">
+            <span class="field-label">Ziel: Starts je Tag höchstens</span>
+            <input type="number" min="1" max="48" step="1" bind:value={draft.target_starts} oninput={edited} />
+          </label>
+          <label class="field">
+            <span class="field-label">Blockbetrieb ab (°C außen)</span>
+            <input type="number" min="-10" max="20" step="0.5" bind:value={draft.block_above_c} oninput={edited} />
+          </label>
+          <label class="field">
+            <span class="field-label">Heizgrenze (°C Tagesmittel)</span>
+            <input type="number" min="0" max="25" step="0.5" bind:value={draft.heating_limit_c} oninput={edited} />
+          </label>
+          <label class="field">
+            <span class="field-label">Zone 1 aus unter (W)</span>
+            <input type="number" min="5" max="500" step="1" bind:value={draft.zone1_threshold_w} oninput={edited} />
+          </label>
+        </div>
+        <h4>Quick-Veto (wirkt ab 1.4.0)</h4>
+        <div class="numbers">
+          <label class="field">
+            <span class="field-label">Schritt (K)</span>
+            <select bind:value={draft.step_k} onchange={edited}>
+              <option value={0.5}>0,5 K</option>
+              <option value={1}>1 K</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Abstand je Zone (min)</span>
+            <input type="number" min="15" max="120" step="5" bind:value={draft.min_interval_min} oninput={edited} />
+          </label>
+          <label class="field">
+            <span class="field-label">Cloud-Befehle je Tag höchstens</span>
+            <input type="number" min="10" max="1000" step="1" bind:value={draft.cloud_commands_max} oninput={edited} />
+          </label>
+        </div>
       </section>
     </div>
 
     <div class="actions">
-      <button
-        type="button"
-        class="button primary"
-        disabled={!changed || !complete || !batteryComplete || saving}
-        onclick={save}
-      >
+      <button type="button" class="button primary" disabled={!changed || !complete || saving} onclick={save}>
         Speichern
       </button>
       {#if saveError}
         <p class="error" role="alert">{saveError}</p>
       {:else if !complete}
         <p class="hint">Bitte alle Zahlenfelder ausfüllen.</p>
-      {:else if !batteryComplete}
-        <p class="hint">Für den Akku bitte Kapazität und Ladeleistung angeben.</p>
       {:else if justSaved && !changed}
-        <p class="hint" role="status">Gespeichert. Der Planer plant neu.</p>
+        <p class="hint" role="status">Gespeichert. Das Energiemanagement plant neu.</p>
       {/if}
     </div>
   {/if}
@@ -518,8 +526,14 @@
     font-weight: 600;
   }
 
+  h4 {
+    margin: 4px 0 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+
   .stage {
-    max-width: 420px;
+    max-width: 520px;
   }
 
   .stage > button {
@@ -527,19 +541,7 @@
   }
 
   .stage > button:disabled {
-    cursor: wait;
-  }
-
-  .confirm {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .buttons {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
+    cursor: not-allowed;
   }
 
   .problems {
@@ -563,6 +565,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-width: 0;
   }
 
   .field-label,
@@ -571,14 +574,24 @@
     color: var(--text-secondary);
   }
 
+  .zone legend {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+
   .numbers {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 12px;
   }
 
-  input[type='number'] {
+  input[type='number'],
+  input[type='time'],
+  select {
     width: 100%;
+    box-sizing: border-box;
   }
 
   .row-end {
@@ -608,20 +621,12 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    min-width: 0;
   }
 
-  .window {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px 12px;
-  }
-
-  .window label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 14px;
+  .zone {
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--divider);
   }
 
   .radio {
