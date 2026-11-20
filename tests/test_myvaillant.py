@@ -30,9 +30,6 @@ from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_client import Backoff, BridgeClient
 from vaillant_eebus.energy import EnergyMeter
 from vaillant_eebus.ha_client import DEVICE_SERVICES, EntityState, HomeAssistantClient
-from vaillant_eebus.hems.config import PlannerMode
-from vaillant_eebus.hems.executor import Executor
-from vaillant_eebus.hems.planner import Action, Block, Plan
 from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.myvaillant import MyVaillantLink, MyVaillantState, discover, zone_label
@@ -49,6 +46,7 @@ from vaillant_eebus.write_gate import (
     SetZoneMode,
     SetZoneOverride,
     SetZoneSetpoint,
+    Source,
     WriteGate,
     WriteNotExecuted,
     WriteOutcomeUnknown,
@@ -903,225 +901,20 @@ async def test_choosing_eebus_in_the_wizard_needs_no_restart(
     assert settings_store.current.connection is Connection.EEBUS
 
 
-# --- the planner in auto: temporary overrides ----------------------------------------------
+# --- the write gate's planner path (used by the energy management from 1.4.0) -------------
 
 
-class Clock:
-    def __init__(self) -> None:
-        self.now = datetime.now(UTC).replace(microsecond=0)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-
-@pytest.fixture
-def clock() -> Clock:
-    return Clock()
-
-
-def control_mode(settings: SettingsStore, mode: PlannerMode) -> None:
-    settings.update(lambda current: replace(current, hems=replace(current.hems, mode=mode)))
-
-
-def raise_plan(clock: Clock, zone: str = MV_ZONE_1, hours: float = 2.0) -> Plan:
-    block = Block(
-        control=zone,
-        action=Action.RAISE,
-        start=clock.now,
-        end=clock.now + timedelta(hours=hours),
-        shift_k=1.0,
-        target_c=None,
-        reason="PV-Überschuss 2,0 kW erwartet",
-    )
-    return Plan(created_at=clock.now, slots=[], blocks=[block])
-
-
-@pytest.fixture
-async def planner(
-    live: WriteGate, device: MyVaillantState, chosen: SettingsStore, log_store: LogStore, tmp_path: Path, clock: Clock
-) -> AsyncIterator[Executor]:
-    control_mode(chosen, PlannerMode.CONTROL)
-    # As in the app, the gate confirms sent values; until then the planner leaves the control alone.
-    follower = asyncio.create_task(live.run())
-    try:
-        yield Executor(live, device, chosen, log_store, tmp_path, clock=clock)
-    finally:
-        follower.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await follower
-
-
-def overridden(device: MyVaillantState) -> bool:
-    return device.current is not None and device.current.zones[0].override
-
-
-async def test_the_planner_overrides_a_zone_in_auto_for_the_block(
-    planner: Executor, device: MyVaillantState, fake_ha: FakeHomeAssistant, clock: Clock
+async def test_a_planner_preview_names_the_override_and_sends_nothing(
+    live: WriteGate, fake_ha: FakeHomeAssistant, log_store: LogStore
 ) -> None:
-    await planner.step(raise_plan(clock))
-
-    assert device_calls(fake_ha) == [
-        ("mypyllant.set_quick_veto", {"entity_id": MV_ZONE_1, "temperature": 22.5, "duration_hours": 2.0})
-    ]
-    assert planner.shifted() == {MV_ZONE_1: 22.5}
-    assert planner.bases()[MV_ZONE_1] == 21.5
-
-
-async def test_the_override_ends_by_itself_with_the_block(
-    planner: Executor, device: MyVaillantState, fake_ha: FakeHomeAssistant, clock: Clock
-) -> None:
-    plan = raise_plan(clock)
-    await planner.step(plan)
-    await eventually(lambda: overridden(device))
-
-    await planner.step(plan)
-    clock.now += timedelta(hours=2)
-    await planner.step(plan)
-
-    assert [service for service, _body in device_calls(fake_ha)] == ["mypyllant.set_quick_veto"]
-
-
-async def test_a_block_that_ends_early_ends_the_override(
-    planner: Executor, device: MyVaillantState, fake_ha: FakeHomeAssistant, clock: Clock
-) -> None:
-    await planner.step(raise_plan(clock))
-    await eventually(lambda: overridden(device))
-
-    clock.now += timedelta(minutes=30)
-    await planner.step(None)
-
-    assert device_calls(fake_ha)[-1] == ("mypyllant.cancel_quick_veto", {"entity_id": MV_ZONE_1})
-    assert planner.shifted() == {}
-    await eventually(lambda: not overridden(device))
-    await planner.step(None)
-    assert planner.bases()[MV_ZONE_1] == 21.5
-
-
-async def test_release_ends_the_override(
-    planner: Executor, device: MyVaillantState, fake_ha: FakeHomeAssistant, clock: Clock, log_store: LogStore
-) -> None:
-    await planner.step(raise_plan(clock))
-    await eventually(lambda: overridden(device))
-
-    await planner.release("Die App wird beendet")
-
-    assert device_calls(fake_ha)[-1] == ("mypyllant.cancel_quick_veto", {"entity_id": MV_ZONE_1})
-    assert "Gesendet: Zone 1: Übersteuerung beenden (Planer)" in await messages(log_store)
-
-
-async def test_an_override_set_by_hand_pauses_the_zone(
-    planner: Executor, device: MyVaillantState, fake_ha: FakeHomeAssistant, clock: Clock, log_store: LogStore
-) -> None:
-    await planner.step(None)
-    fake_ha.change(MV_ZONE_1, preset_mode="boost", temperature=24.0)
-    await eventually(lambda: overridden(device))
-
-    await planner.step(raise_plan(clock))
-
-    assert device_calls(fake_ha) == []
-    assert "Planer: Zone 1 von Hand übersteuert; der Planer wartet bis zum Blockende." in await messages(log_store)
-
-
-async def test_ending_the_planners_override_by_hand_pauses_the_zone(
-    planner: Executor, device: MyVaillantState, fake_ha: FakeHomeAssistant, clock: Clock, log_store: LogStore
-) -> None:
-    plan = raise_plan(clock)
-    await planner.step(plan)
-    await eventually(lambda: overridden(device))
-    await planner.step(plan)
-
-    fake_ha.change(MV_ZONE_1, preset_mode="none", temperature=21.5, quick_veto_end_date_time=None)
-    await eventually(lambda: not overridden(device))
-    clock.now += timedelta(minutes=40)
-    await planner.step(plan)
-
-    assert [service for service, _body in device_calls(fake_ha)] == ["mypyllant.set_quick_veto"]
-    assert "Planer: Zone 1 Übersteuerung von Hand beendet; der Planer wartet bis zum Blockende." in await messages(
-        log_store
+    result = await live.submit(
+        SetZoneOverride(zone_id=MV_ZONE_1, celsius=22.5, hours=2.0), source=Source.PLANNER, preview=True
     )
 
-
-async def test_the_clouds_lag_does_not_pause_the_planner(
-    bridge_client: BridgeClient,
-    pairing: PairingService,
-    device: MyVaillantState,
-    chosen: SettingsStore,
-    log_store: LogStore,
-    ha: HomeAssistantClient,
-    fake_ha: FakeHomeAssistant,
-    clock: Clock,
-    tmp_path: Path,
-) -> None:
-    # Right after the quick veto the cloud still reports the time program: no override.
-    fake_ha.cloud_lag = 0.3
-    control_mode(chosen, PlannerMode.CONTROL)
-    gate = clocked_gate(bridge_client, pairing, device, chosen, log_store, ha)
-    planner = Executor(gate, device, chosen, log_store, tmp_path, clock=clock)
-    plan = raise_plan(clock)
-    async with following(gate, device):
-        await planner.step(plan)
-        await eventually(lambda: not overridden(device))
-        await planner.step(plan)
-        await eventually(lambda: overridden(device))
-        await wait_logged(log_store, "Bestätigt vom Gerät: Zone 1: Solltemperatur 22,5 °C")
-        await planner.step(plan)
-
-    assert [service for service, _body in device_calls(fake_ha)] == ["mypyllant.set_quick_veto"]
-    assert planner.shifted() == {MV_ZONE_1: 22.5}
-    assert not [message for message in await messages(log_store) if "von Hand" in message]
-
-
-async def test_the_planner_leaves_a_zone_in_its_setback_alone(
-    planner: Executor, device: MyVaillantState, fake_ha: FakeHomeAssistant, clock: Clock
-) -> None:
-    # The time program's value is unknown while Vaillant reports the setback.
-    fake_ha.change(MV_ZONE_1, preset_mode="eco", temperature=0.0)
-    await eventually(lambda: device.current is not None and device.current.zones[0].setback)
-
-    await planner.step(raise_plan(clock))
-
-    assert device_calls(fake_ha) == []
-
-
-async def test_preview_names_the_override_and_sends_nothing(
-    planner: Executor, chosen: SettingsStore, fake_ha: FakeHomeAssistant, clock: Clock, log_store: LogStore
-) -> None:
-    control_mode(chosen, PlannerMode.PREVIEW)
-
-    await planner.step(raise_plan(clock))
-
+    assert result.sent is False
     assert device_calls(fake_ha) == []
     assert "Planer würde senden: Zone 1: Übersteuerung 22,5 °C für 2 h" in await messages(log_store)
 
 
-async def test_the_planners_override_survives_a_restart(
-    planner: Executor,
-    live: WriteGate,
-    device: MyVaillantState,
-    chosen: SettingsStore,
-    log_store: LogStore,
-    fake_ha: FakeHomeAssistant,
-    tmp_path: Path,
-    clock: Clock,
-) -> None:
-    plan = raise_plan(clock)
-    await planner.step(plan)
-    await eventually(lambda: overridden(device))
-
-    again = Executor(live, device, chosen, log_store, tmp_path, clock=clock)
-    clock.now += timedelta(minutes=10)
-    await again.step(plan)
-    await again.release("Die App wird beendet")
-
-    assert [service for service, _body in device_calls(fake_ha)] == [
-        "mypyllant.set_quick_veto",
-        "mypyllant.cancel_quick_veto",
-    ]
-
-
-async def test_a_zone_in_on_is_shifted_as_with_eebus(
-    planner: Executor, fake_ha: FakeHomeAssistant, clock: Clock
-) -> None:
-    await planner.step(raise_plan(clock, zone=MV_ZONE_2))
-
-    assert device_calls(fake_ha) == [("climate.set_temperature", {"entity_id": MV_ZONE_2, "temperature": 24.0})]
+def overridden(device: MyVaillantState) -> bool:
+    return device.current is not None and device.current.zones[0].override

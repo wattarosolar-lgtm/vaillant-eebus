@@ -1,96 +1,299 @@
-"""The energy management as one service for main and api.
+"""The energy management as one service for main and api (1.3.0: observe, learn, plan).
 
-Plans every quarter hour and whenever prices or the PV forecast change,
-carries the plan out at least every 30 seconds and after every new device
-state, records the daily values, and reports its status to the UI and to
-Home Assistant. When the app stops, it returns every control it changed to
-the base value.
+It watches the heat pump's power and outdoor temperature (starts, runs,
+pauses, defrosts, frost protection), samples the rooms every five minutes
+(room model, windows, supply), reads Home Assistant's long-term statistics
+(house model), fetches the 48-hour forecast and plans every quarter hour by
+rules. In this version it only shows and logs what it would do: it never calls
+the write gate (a test checks that the package does not even import it).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
+import io
+import json
 import logging
+import os
 import statistics
-from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta, tzinfo
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
-from vaillant_eebus.energy import EnergyMeter
-from vaillant_eebus.ha_client import HomeAssistantUnavailable
+from vaillant_eebus.ha_client import EntityState, HomeAssistantUnavailable
 from vaillant_eebus.ha_export import PREFIX, Sensor
-from vaillant_eebus.hems.config import HemsSettings, PlannerMode, TariffKind, hems_to_json
-from vaillant_eebus.hems.days import MIN_COVERAGE, MIN_DAYS, DayRecorder
-from vaillant_eebus.hems.executor import Executor
-from vaillant_eebus.hems.planner import DHW, Action, Block, DeviceView, Plan, PlanSlot, ZoneView, make_plan
-from vaillant_eebus.hems.supply import BASE_DAYS, base_load, base_profile, number, pv_forecast, surplus
-from vaillant_eebus.hems.tariff import feed_in_price, import_prices
-from vaillant_eebus.hems.timeline import SLOT, horizon, local_day, local_midnight, slot_start
-from vaillant_eebus.hems.weather import OPEN_METEO_URL, WeatherForecasts
+from vaillant_eebus.ha_import import room_celsius
+from vaillant_eebus.hems.config import (
+    AVAILABLE_MODES,
+    HemsSettings,
+    PlannerMode,
+    WeatherSource,
+    ZoneKind,
+    hems_to_json,
+)
+from vaillant_eebus.hems.cycles import CycleStats, CycleTracker
+from vaillant_eebus.hems.defrost import LEVEL_NAMES, BandRate, RiskLevel, learn_rates, risk
+from vaillant_eebus.hems.forecast import OPEN_METEO_URL, ForecastCheck, ForecastService, WeatherHour, hour_start
+from vaillant_eebus.hems.frost import FrostState, frost_hours, frost_state
+from vaillant_eebus.hems.house_model import (
+    DEFAULT_INSIDE_C,
+    HouseModel,
+    demand,
+    find_lag,
+    fit_cop,
+    fit_house,
+    start_model,
+    zone_shares,
+)
+from vaillant_eebus.hems.room_model import (
+    FlowHint,
+    RoomModel,
+    Supply,
+    SupplyState,
+    cooling_table,
+    flow_hint,
+    learn,
+    minutes_until,
+    supply,
+)
+from vaillant_eebus.hems.rules import (
+    Plan,
+    PlanHour,
+    PlanInputs,
+    RoomHour,
+    RoomInput,
+    ZoneHour,
+    ZoneInput,
+    make_plan,
+)
+from vaillant_eebus.hems.samples import SampleStore, room_series
+from vaillant_eebus.hems.sources import HemsSources
+from vaillant_eebus.hems.statistics import StatisticsHistory, daily_values, hourly_changes
+from vaillant_eebus.hems.windows import WindowDetector, WindowEvent
 from vaillant_eebus.home_assistant import POWER_SENSOR, HomeAssistant
 from vaillant_eebus.log_store import LogCategory, LogStore
-from vaillant_eebus.settings import Connection, ExportGroup, OperatingMode, SettingsStore
+from vaillant_eebus.room_data import details_to_json
+from vaillant_eebus.settings import Connection, ExportGroup, OperatingMode, Room, SettingsStore
 from vaillant_eebus.state import HeatPumpState, StateHub
-from vaillant_eebus.write_gate import WriteGate
 
 _LOGGER = logging.getLogger(__name__)
 
-EXECUTE_EVERY = 30.0
-# Bursts of new prices and forecasts are planned once.
+PLAN_EVERY = timedelta(minutes=15)
+SAMPLE_EVERY = 300.0
+# Bursts of new settings are planned once.
 PLAN_SETTLE = 2.0
-PROFILE_EVERY = timedelta(hours=6)
-# Time to return to the base values when the app stops: the gate's 5 s per control plus
-# up to 10 s for the device's answer. The Supervisor waits 30 s (config.yaml timeout).
-RELEASE_TIMEOUT = 15.0
-PLAN_LOG_BLOCKS = 6
+STATISTICS_EVERY = timedelta(hours=6)
+ROOM_MODEL_EVERY = timedelta(hours=1)
+DETECT_EVERY = timedelta(seconds=60)
+# After a start: the power and outdoor history read from Home Assistant for the counting.
+BACKFILL = timedelta(days=10)
+# Zone 1 logic ("würde"): off only after the power stayed below the threshold this long.
+ZONE1_OFF_AFTER = timedelta(seconds=60)
+ZONE1_CHECK_AFTER = timedelta(minutes=2)
+HISTORY_FILE = "plan_history.json"
+STATE_FILE = "hems_state.json"
+LEGACY_FILE = "hems.json"
+LOOK_BACK = timedelta(hours=24)
+NEXT_CHANGES = 5
+EXPORT_CHANGES = 20
 
 _MODE_LOG = {
-    PlannerMode.OFF: "Planer ausgeschaltet.",
-    PlannerMode.PREVIEW: "Planer auf Vorschau: Er plant und zeigt, was er senden würde, sendet aber nichts.",
-    PlannerMode.CONTROL: "Planer auf Steuern: Er setzt den Plan über die Schreibsperre um.",
+    PlannerMode.OFF: "Energiemanagement ausgeschaltet.",
+    PlannerMode.PREVIEW: "Energiemanagement auf Vorschau: Es plant und zeigt, was es tun würde, und sendet nichts.",
+    PlannerMode.CONTROL: "Energiemanagement auf Steuern.",
 }
-_MODE_NAMES = {PlannerMode.OFF: "Aus", PlannerMode.PREVIEW: "Vorschau", PlannerMode.CONTROL: "Steuern"}
+# The minus sign of the UI texts.
+MINUS = "\u2212"
+MODE_NAMES = {PlannerMode.OFF: "Aus", PlannerMode.PREVIEW: "Vorschau", PlannerMode.CONTROL: "Steuern"}
+SUPPLY_NAMES = {
+    Supply.UNKNOWN: "unbekannt",
+    Supply.SUPPLIED: "versorgt",
+    Supply.UNDER: "unterversorgt",
+    Supply.OVER: "überversorgt",
+}
+
+
+class ModeNotAvailable(Exception):
+    """The stage comes with a later version."""
 
 
 @dataclass(frozen=True, slots=True)
-class NextAction:
-    at: datetime
-    # German, e.g. "Warmwasser auf 60 °C und Einmalladung".
-    text: str
+class ForecastStatus:
+    source: WeatherSource | None
+    fetched_at: datetime | None
+    calibrated: bool
+    check: ForecastCheck | None
+    now: WeatherHour | None
+
+
+@dataclass(frozen=True, slots=True)
+class DayDemand:
+    day: date
+    heat_kwh: float
+    electricity_kwh: float | None
+    outdoor_c: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class FlowStatus:
+    zone_id: str
+    offset_k: float
+    hint: FlowHint
     reason: str | None
+    bottleneck: str | None
+    max_valve: float | None
+    under: int
 
 
 @dataclass(frozen=True, slots=True)
-class Demand:
-    """Estimated electricity of the heat pump tomorrow (model from the daily values)."""
+class Zone1Status:
+    zone_id: str
+    # What the app would do now: "off" or "auto"; None without power.
+    would: str | None
+    actual: str | None
+    reason: str
+    switches_today: int
+    # Of the switches checked today, how often the zone did the same (the user's automation still runs).
+    checked_today: int
+    agreed_today: int
 
-    kwh: float
-    spread_kwh: float
-    days: int
-    outdoor_c: float
+
+@dataclass(frozen=True, slots=True)
+class Change:
+    at: datetime
+    text: str
+    reasons: list[str]
 
 
 @dataclass(frozen=True, slots=True)
 class HemsStatus:
     mode: PlannerMode
+    available_modes: list[PlannerMode]
     app_mode: OperatingMode
     settings: dict[str, Any]
-    plan: Plan | None
-    # German: missing or outdated inputs.
     problems: list[str]
-    next_action: NextAction | None
-    # Control ("dhw" or zone ID) -> label, base value and the value the planner set.
     labels: dict[str, str]
-    bases: dict[str, float]
-    shifted: dict[str, float]
-    feed_in: float | None
-    demand_tomorrow: Demand | None
-    # Complete heating days learned so far, and how many the model needs.
-    learned_days: int
-    needed_days: int
+    forecast: ForecastStatus
+    house: HouseModel | None
+    statistics_days: int
+    demand: list[DayDemand]
+    cycles: CycleStats
+    defrost_rates: list[BandRate]
+    frost: FrostState
+    zone1: Zone1Status | None
+    flow: list[FlowStatus]
+    next_changes: list[Change]
+    plan_created_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class HourRecord:
+    """One past hour: what the plan said when the hour began, and what happened."""
+
+    start: datetime
+    planned: PlanHour | None
+    outdoor_c: float | None
+    setpoints: dict[str, float]
+    starts: int
+    defrosts: int
+    electricity_kwh: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class PlanView:
+    created_at: datetime | None
+    hours: list[PlanHour]
+    history: list[HourRecord]
+    labels: dict[str, str]
+    rooms: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class RoomLearned:
+    tau_h: float | None
+    gains_k_per_h: float | None
+    heating_rate: float | None
+    startup_min: float | None
+    demand_valve: float | None
+    correction_k: float | None
+    overshoot_k: float | None
+    # Value name -> learned (True) or start value / unknown (False).
+    learned: dict[str, bool]
+    learning: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RoomStatus:
+    entity_id: str
+    name: str
+    zone_id: str | None
+    zone_label: str | None
+    measured_at_thermostat: bool
+    details: dict[str, Any]
+    temperature_c: float | None
+    humidity: float | None
+    valve: float | None
+    trv_setpoint_c: float | None
+    setpoint_c: float
+    comfort_low_c: float
+    comfort_high_c: float
+    # Start value of the heat loss from the static balancing, W/K.
+    heat_loss_start_w_per_k: float | None
+    model: RoomLearned | None
+    cooling_now_k_per_h: float | None
+    cooling_table: dict[str, float]
+    minutes_to_lower: float | None
+    supply: Supply
+    window_open: bool
+    window_since: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ZoneRoomsStatus:
+    zone_id: str
+    label: str
+    # The room that ends a pause first, and after how many minutes.
+    limiting_room: str | None
+    limiting_minutes: float | None
+    flow: FlowStatus | None
+
+
+@dataclass(frozen=True, slots=True)
+class RoomsView:
+    rooms: list[RoomStatus]
+    zones: list[ZoneRoomsStatus]
+
+
+@dataclass
+class _Zone1:
+    below_since: datetime | None = None
+    would: str | None = None
+    day: date | None = None
+    switches: int = 0
+    checked: int = 0
+    agreed: int = 0
+    check_at: datetime | None = None
+
+
+@dataclass
+class _Flow:
+    offset_k: float = 0.0
+    changed_at: datetime | None = None
+    reason: str | None = None
+    # The last hint from the valves (not saved).
+    hint: FlowHint = FlowHint.UNKNOWN
+
+
+@dataclass
+class _Models:
+    house: HouseModel | None = None
+    rooms: dict[str, RoomModel] = field(default_factory=dict)
+    flow_lines: dict[str, tuple[float, float]] = field(default_factory=dict)
+    radiation_wh: dict[date, float] = field(default_factory=dict)
 
 
 class HemsService:
@@ -98,8 +301,6 @@ class HemsService:
         self,
         settings: SettingsStore,
         state: StateHub,
-        gate: WriteGate,
-        energy: EnergyMeter,
         home_assistant: HomeAssistant,
         log: LogStore,
         data_dir: Path,
@@ -110,21 +311,39 @@ class HemsService:
     ) -> None:
         self._settings = settings
         self._state = state
-        self._gate = gate
         self._home_assistant = home_assistant
         self._log = log
+        self._data_dir = data_dir
         self._zone = zone
         self._clock = clock
-        self.weather = WeatherForecasts(settings, home_assistant.client, open_meteo_url=open_meteo_url, clock=clock)
-        self.executor = Executor(gate, state, settings, log, data_dir, zone=zone, clock=clock)
-        self.days = DayRecorder(state, home_assistant.importer, energy, data_dir, zone=zone, clock=clock)
+        self.sources: HemsSources = home_assistant.hems_sources
+        self.forecast = ForecastService(
+            settings, home_assistant.client, data_dir, zone=zone, open_meteo_url=open_meteo_url, clock=clock
+        )
+        self.history = StatisticsHistory(home_assistant.client, clock=clock)
+        self.samples = SampleStore(data_dir)
+        self.cycles = CycleTracker(data_dir, zone=zone, clock=clock, humidity_at=self._humidity_at)
+        self._models = _Models()
         self._plan: Plan | None = None
         self._problems: list[str] = []
-        self._profile: tuple[datetime, str, dict[tuple[int, int], float]] | None = None
+        self._statistics_at: datetime | None = None
+        self._rooms_at: datetime | None = None
+        self._detected_at: datetime | None = None
+        self._backfilled = False
+        self._frost = FrostState(active=False, below_since=None)
+        self._windows: dict[str, WindowDetector] = {}
+        self._supply: dict[str, SupplyState] = {}
+        self._zone1 = _Zone1()
+        self._flows: dict[str, _Flow] = {}
+        self._planned: dict[datetime, PlanHour] = {}
+        self._logged_changes: list[tuple[datetime, str]] | None = None
         self._wake = asyncio.Event()
-        # One change at a time: carrying out the plan and returning to the base values.
-        self._lock = asyncio.Lock()
-        home_assistant.hems_entities.on_forecast_change(self.wake)
+        self._load_state()
+        self._load_history()
+        self._check_legacy()
+        self.sources.on_change(self._source_changed)
+        # Statistics, history and rooms come from Home Assistant: plan again once it is there.
+        self.sources.on_connected(self.wake)
         if home_assistant.exporter is not None:
             home_assistant.exporter.add_source(self.sensors)
 
@@ -132,43 +351,38 @@ class HemsService:
     def plan(self) -> Plan | None:
         return self._plan
 
+    @property
+    def mode(self) -> PlannerMode:
+        return self._settings.current.hems.mode
+
     def wake(self) -> None:
-        """Plan again soon, e.g. after new prices."""
+        """Plan again soon, e.g. after new settings."""
         self._wake.set()
 
     async def run(self) -> None:
         try:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(self._planning())
-                tasks.create_task(self._executing())
-                tasks.create_task(self.days.run())
+                tasks.create_task(self._observing())
+                tasks.create_task(self._sampling())
         finally:
-            self.days.close()
-            await _despite_cancellation(self._release_on_stop())
-
-    async def _release_on_stop(self) -> None:
-        with contextlib.suppress(Exception):
-            async with asyncio.timeout(RELEASE_TIMEOUT):
-                await self.release("Die App wird beendet")
-
-    async def release(self, reason: str) -> None:
-        """Return every control the planner changed to its base value."""
-        async with self._lock:
-            await self.executor.release(reason)
+            self.cycles.save()
+            self._save_state()
+            self.samples.close()
 
     async def set_mode(self, mode: PlannerMode) -> PlannerMode:
-        before = self._settings.current.hems.mode
+        if mode not in AVAILABLE_MODES:
+            raise ModeNotAvailable(mode)
+        before = self.mode
         if mode is before:
             return mode
-        if before is PlannerMode.CONTROL:
-            await self.release(f"Planer auf {_MODE_NAMES[mode]}")
         self._settings.update(lambda settings: replace(settings, hems=replace(settings.hems, mode=mode)))
         self._log.add(LogCategory.HEMS, _MODE_LOG[mode])
         self.wake()
         return mode
 
     def change_settings(self, hems: HemsSettings) -> HemsSettings:
-        """Save the user's settings (the mode stays) and plan again at once."""
+        """Save the user's settings (the stage stays) and plan again at once."""
         before = self._settings.current.hems
         hems = replace(hems, mode=before.mode)
         if hems == before:
@@ -176,364 +390,1114 @@ class HemsService:
         self._settings.update(lambda settings: replace(settings, hems=hems))
         self._home_assistant.watch()
         self._log.add(LogCategory.SETTINGS, "Einstellungen des Energiemanagements geändert.")
+        # New sources: read the statistics and learn again.
+        self._statistics_at = self._rooms_at = None
         self.wake()
         return hems
 
+    async def plan_now(self) -> None:
+        try:
+            await self._make_plan()
+        except Exception:
+            _LOGGER.exception("Planning failed")
+
+    # --- status ------------------------------------------------------------------
+
     def status(self) -> HemsStatus:
         settings = self._settings.current
-        heat_pump = self._state.current
+        now = self._clock()
+        forecast = self.forecast.current
+        measured = self._measured_outdoor()
+        house = self._models.house or start_model(settings.hems.heat_load_w, settings.hems.design_outdoor_c)
         return HemsStatus(
             mode=settings.hems.mode,
+            available_modes=sorted(AVAILABLE_MODES, key=list(PlannerMode).index),
             app_mode=settings.operating_mode,
             settings=hems_to_json(settings.hems),
-            plan=self._plan,
             problems=list(self._problems),
-            next_action=self._next_action(),
-            labels=_labels(heat_pump),
-            bases=self.executor.bases(),
-            shifted=self.executor.shifted(),
-            feed_in=feed_in_price(settings.hems.tariff),
-            demand_tomorrow=self._demand(),
-            learned_days=self._learned_days(settings.hems.heating_limit_c),
-            needed_days=MIN_DAYS,
+            labels=self._labels(),
+            forecast=ForecastStatus(
+                source=forecast.source if forecast else None,
+                fetched_at=forecast.fetched_at if forecast else None,
+                calibrated=bool(forecast and forecast.bias),
+                check=self.forecast.check(measured),
+                now=forecast.at(now) if forecast else None,
+            ),
+            house=house,
+            statistics_days=self._statistics_days(),
+            demand=self._day_demand(),
+            cycles=self.cycles.stats(),
+            defrost_rates=learn_rates(self.cycles.runs, self.cycles.defrosts, now),
+            frost=self._frost,
+            zone1=self._zone1_status(),
+            flow=self._flow_status(),
+            next_changes=self.changes(NEXT_CHANGES),
+            plan_created_at=self._plan.created_at if self._plan else None,
         )
 
+    def plan_view(self) -> PlanView:
+        now = self._clock()
+        plan = self._plan
+        return PlanView(
+            created_at=plan.created_at if plan else None,
+            hours=list(plan.hours) if plan else [],
+            history=self._look_back(now),
+            labels=self._labels(),
+            rooms={room.entity_id: room.name for room in self._settings.current.rooms},
+        )
+
+    def changes(self, limit: int) -> list[Change]:
+        """The plan's coming changes, as text."""
+        plan = self._plan
+        if plan is None:
+            return []
+        labels = self._labels()
+        names = {room.entity_id: room.name for room in self._settings.current.rooms}
+        result: list[Change] = []
+        previous: PlanHour | None = None
+        for hour in plan.hours:
+            parts = []
+            for entry in hour.zones:
+                before = (
+                    next((item for item in previous.zones if item.zone_id == entry.zone_id), None) if previous else None
+                )
+                if previous is None or before is None or before.shift_k != entry.shift_k:
+                    if previous is None and entry.shift_k == 0:
+                        continue
+                    target = f" ({_number(entry.target_c)}\u00a0°C)" if entry.target_c is not None else ""
+                    parts.append(f"{labels.get(entry.zone_id, entry.zone_id)} {_signed(entry.shift_k)}\u00a0K{target}")
+            for room_hour in hour.rooms:
+                before_room = (
+                    next((item for item in previous.rooms if item.entity_id == room_hour.entity_id), None)
+                    if previous
+                    else None
+                )
+                if before_room is not None and before_room.setpoint_c != room_hour.setpoint_c:
+                    name = names.get(room_hour.entity_id, room_hour.entity_id)
+                    parts.append(f"{name} {_number(room_hour.setpoint_c)}\u00a0°C")
+            if parts:
+                result.append(Change(at=hour.start, text=", ".join(parts), reasons=list(hour.reasons)))
+            previous = hour
+            if len(result) >= limit:
+                break
+        return result
+
+    def rooms_view(self) -> RoomsView:
+        now = self._clock()
+        settings = self._settings.current
+        labels = self._labels()
+        forecast = self.forecast.current
+        outdoor_now = self._outdoor_now()
+
+        def outdoor_at(moment: datetime) -> float | None:
+            hour = forecast.at(moment) if forecast is not None else None
+            if hour is not None and hour.temperature_c is not None:
+                return hour.temperature_c
+            return outdoor_now
+
+        rooms = []
+        for room in settings.rooms:
+            details = room.details
+            temperature = room_celsius(self.sources.get(room.entity_id))
+            setpoint = details.setpoint_at(now.astimezone(self._zone).time())
+            model = self._models.rooms.get(room.entity_id)
+            lower = setpoint - details.comfort_down_k
+            window = self._windows.get(room.entity_id)
+            rooms.append(
+                RoomStatus(
+                    entity_id=room.entity_id,
+                    name=room.name,
+                    zone_id=room.zone_id,
+                    zone_label=labels.get(room.zone_id) if room.zone_id else None,
+                    measured_at_thermostat=room.measured_at_thermostat,
+                    details=details_to_json(details),
+                    temperature_c=temperature,
+                    humidity=self.sources.number(details.humidity_entity),
+                    valve=self.sources.number(details.valve_entity),
+                    trv_setpoint_c=self.sources.attribute(details.trv_entity, "temperature"),
+                    setpoint_c=setpoint,
+                    comfort_low_c=round(lower, 1),
+                    comfort_high_c=round(setpoint + details.comfort_up_k, 1),
+                    heat_loss_start_w_per_k=_round(details.heat_loss_w_per_k(settings.hems.design_outdoor_c), 1),
+                    model=_learned(model) if model is not None else None,
+                    cooling_now_k_per_h=(
+                        round(model.cooling_k_per_h(temperature, outdoor_now), 3)
+                        if model is not None and temperature is not None and outdoor_now is not None
+                        else None
+                    ),
+                    cooling_table=(
+                        {f"{key:g}": value for key, value in cooling_table(model, setpoint).items()}
+                        if model is not None
+                        else {}
+                    ),
+                    minutes_to_lower=(
+                        _round(minutes_until(model, temperature, lower, outdoor_at, now), 0)
+                        if model is not None and temperature is not None
+                        else None
+                    ),
+                    supply=self._supply.get(room.entity_id, SupplyState(Supply.UNKNOWN, None)).supply,
+                    window_open=window is not None and window.open,
+                    window_since=window.open_since if window is not None else None,
+                )
+            )
+        zones = []
+        flows = {item.zone_id: item for item in self._flow_status()}
+        for zone_id, label in labels.items():
+            members = [item for item in rooms if item.zone_id == zone_id and item.minutes_to_lower is not None]
+            limiting = min(members, key=lambda item: item.minutes_to_lower or 0.0, default=None)
+            zones.append(
+                ZoneRoomsStatus(
+                    zone_id=zone_id,
+                    label=label,
+                    limiting_room=limiting.name if limiting else None,
+                    limiting_minutes=limiting.minutes_to_lower if limiting else None,
+                    flow=flows.get(zone_id),
+                )
+            )
+        return RoomsView(rooms=rooms, zones=zones)
+
     def sensors(self) -> list[Sensor]:
-        """The planner's sensors for Home Assistant (export group "Energiemanagement")."""
-        status = self.status()
-        labels = status.labels
-        upcoming = [block for block in status.plan.blocks if block.end > self._clock()] if status.plan else []
-        demand = status.demand_tomorrow
+        """The energy management's sensors for Home Assistant (export group "Energiemanagement")."""
+        mode = self.mode
+        stats = self.cycles.stats()
+        changes = self.changes(EXPORT_CHANGES) if mode is not PlannerMode.OFF else []
+        upcoming = changes[0] if changes else None
         return [
             Sensor(
                 entity_id=f"sensor.{PREFIX}hems_status",
-                state=_MODE_NAMES[status.mode],
+                state=MODE_NAMES[mode],
                 attributes={
                     "friendly_name": "Energiemanagement Status",
                     "icon": "mdi:home-lightning-bolt-outline",
-                    "fehlende_daten": status.problems,
+                    "fehlende_daten": list(self._problems),
                 },
             ),
             Sensor(
-                entity_id=f"sensor.{PREFIX}hems_next_action",
-                state=status.next_action.text[:250] if status.next_action else "keine",
+                entity_id=f"sensor.{PREFIX}hems_next_change",
+                state=upcoming.text[:250] if upcoming else "keine",
                 attributes={
-                    "friendly_name": "Energiemanagement nächste Aktion",
+                    "friendly_name": "Energiemanagement nächste Änderung",
                     "icon": "mdi:clock-outline",
-                    "zeit": status.next_action.at.isoformat() if status.next_action else None,
-                    "grund": status.next_action.reason if status.next_action else None,
+                    "zeit": upcoming.at.isoformat() if upcoming else None,
+                    "grund": "; ".join(upcoming.reasons) if upcoming else None,
                 },
             ),
             Sensor(
                 entity_id=f"sensor.{PREFIX}hems_plan",
-                state=str(len(upcoming)),
+                state=str(len(changes)),
                 attributes={
-                    "friendly_name": "Energiemanagement geplante Blöcke",
+                    "friendly_name": "Energiemanagement geplante Änderungen (48 h)",
                     "icon": "mdi:calendar-clock",
-                    "blöcke": [_block_json(block, labels) for block in upcoming],
+                    "änderungen": [
+                        {"zeit": change.at.isoformat(), "änderung": change.text, "grund": "; ".join(change.reasons)}
+                        for change in changes
+                    ],
                 },
             ),
             Sensor(
-                entity_id=f"sensor.{PREFIX}hems_demand_tomorrow",
-                state="unavailable" if demand is None else f"{demand.kwh:.1f}",
+                entity_id=f"sensor.{PREFIX}starts_today",
+                state=str(stats.today.starts),
                 attributes={
-                    "friendly_name": "Wärmepumpe Strombedarf morgen (geschätzt)",
-                    "unit_of_measurement": "kWh",
-                    "icon": "mdi:chart-bell-curve",
-                    "streuung_kwh": demand.spread_kwh if demand else None,
-                    "gelernte_tage": demand.days if demand else None,
+                    "friendly_name": "Wärmepumpe Starts heute",
+                    "icon": "mdi:restart",
+                    "state_class": "measurement",
+                    "laufzeit_median_min": stats.today.run_minutes,
+                    "pause_median_min": stats.today.pause_minutes,
+                },
+            ),
+            Sensor(
+                entity_id=f"sensor.{PREFIX}defrosts_today",
+                state=str(stats.today.defrosts),
+                attributes={
+                    "friendly_name": "Wärmepumpe Abtauungen heute",
+                    "icon": "mdi:snowflake-melt",
+                    "state_class": "measurement",
+                },
+            ),
+            Sensor(
+                entity_id=f"binary_sensor.{PREFIX}frost_protection",
+                state="on" if self._frost.active else "off",
+                attributes={
+                    "friendly_name": "Frostschutz der Wärmepumpe aktiv",
+                    "icon": "mdi:snowflake-alert",
+                    "unter_4_grad_seit": self._frost.below_since.isoformat() if self._frost.below_since else None,
                 },
             ),
         ]
 
-    async def plan_now(self) -> None:
-        # Without the lock: reading Home Assistant and the weather may take seconds, and
-        # returning to the base values must never wait for it.
-        await self._make_plan()
-
-    # --- internals -------------------------------------------------------------
+    # --- loops -------------------------------------------------------------------
 
     async def _planning(self) -> None:
         while True:
-            try:
-                await self.plan_now()
-            except Exception:
-                _LOGGER.exception("Planning failed")
+            await self.plan_now()
             now = self._clock()
-            wait = (slot_start(now) + SLOT - now).total_seconds() + 1
+            wait = (_quarter(now) + PLAN_EVERY - now).total_seconds() + 1
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(wait):
                     await self._wake.wait()
                 await asyncio.sleep(PLAN_SETTLE)
             self._wake.clear()
 
-    async def _executing(self) -> None:
+    async def _observing(self) -> None:
         async with self._state.listen() as updates:
             while True:
-                with contextlib.suppress(TimeoutError):
-                    async with asyncio.timeout(EXECUTE_EVERY):
-                        await updates.get()
+                heat_pump = await updates.get()
                 try:
-                    async with self._lock:
-                        await self.executor.step(self._plan)
+                    self.observe(heat_pump)
                 except Exception:
                     # A fault here must not stop the rest of the app.
-                    _LOGGER.exception("Carrying out the plan failed")
+                    _LOGGER.exception("Observing the heat pump failed")
+
+    async def _sampling(self) -> None:
+        while True:
+            try:
+                await self.sample()
+            except Exception:
+                _LOGGER.exception("Sampling failed")
+            await asyncio.sleep(SAMPLE_EVERY)
+
+    # --- observing ---------------------------------------------------------------
+
+    def observe(self, heat_pump: HeatPumpState | None) -> None:
+        """A new state of the heat pump: power and outdoor temperature for the counting."""
+        now = self._clock()
+        reachable = heat_pump is not None and heat_pump.available and heat_pump.connected
+        power = heat_pump.measurements.get("power_consumption") if reachable and heat_pump else None
+        outdoor = heat_pump.measurements.get("outdoor_temperature") if reachable and heat_pump else None
+        self.cycles.feed_power(now, power.value if power is not None else None)
+        if outdoor is not None:
+            self.cycles.feed_outdoor(now, outdoor.value)
+        frost = frost_state(self.cycles.outdoor, now)
+        if frost.active != self._frost.active and self.mode is PlannerMode.PREVIEW:
+            self._log.add(
+                LogCategory.HEMS,
+                "Frostschutz der Wärmepumpe aktiv: länger als 4 h unter 4 °C. Die Anlage heizt jetzt auch in "
+                "„Aus“ und in der Absenkung."
+                if frost.active
+                else "Frostschutz der Wärmepumpe beendet: wieder über 4 °C.",
+            )
+        self._frost = frost
+        self._zone1_logic(heat_pump if reachable else None, power.value if power is not None else None, now)
+        if self._detected_at is None or now - self._detected_at >= DETECT_EVERY:
+            self._detected_at = now
+            for item in self.cycles.update():
+                if self.mode is PlannerMode.PREVIEW:
+                    local = item.at.astimezone(self._zone)
+                    outside = f", außen {_number(item.outdoor_c)} °C" if item.outdoor_c is not None else ""
+                    self._log.add(
+                        LogCategory.HEMS,
+                        f"Abtauung erkannt: {local:%H:%M} Uhr, {_number(item.minutes)} min{outside}.",
+                    )
+
+    def _zone1_logic(self, heat_pump: HeatPumpState | None, watts: float | None, now: datetime) -> None:
+        """The user's automation as "würde": floor heating off while the heat pump stands still."""
+        hems = self._settings.current.hems
+        state = self._zone1
+        today = now.astimezone(self._zone).date()
+        if state.day != today:
+            state.day, state.switches, state.checked, state.agreed = today, 0, 0, 0
+        zone_id = self._floor_zone()
+        if zone_id is None or heat_pump is None or watts is None:
+            state.below_since = None
+            return
+        actual = next((zone.mode for zone in heat_pump.zones if zone.id == zone_id), None)
+        if state.check_at is not None and now >= state.check_at:
+            state.check_at = None
+            state.checked += 1
+            if (actual == "off") == (state.would == "off"):
+                state.agreed += 1
+        if watts < hems.zone1_threshold_w:
+            state.below_since = state.below_since or now
+        else:
+            state.below_since = None
+        would = "auto"
+        if state.below_since is not None and now - state.below_since >= ZONE1_OFF_AFTER:
+            would = "off" if not self._frost.active and not self._floor_room_cold(zone_id) else "auto"
+        if would != state.would:
+            if state.would is not None:
+                state.switches += 1
+                state.check_at = now + ZONE1_CHECK_AFTER
+            state.would = would
+
+    def _floor_room_cold(self, zone_id: str) -> bool:
+        now = self._clock().astimezone(self._zone).time()
+        for room in self._settings.current.rooms:
+            if room.zone_id != zone_id:
+                continue
+            temperature = room_celsius(self.sources.get(room.entity_id))
+            lower = room.details.setpoint_at(now) - room.details.comfort_down_k
+            if temperature is not None and temperature < lower:
+                return True
+        return False
+
+    # --- sampling ----------------------------------------------------------------
+
+    async def sample(self) -> None:
+        """Every five minutes: store the samples, check windows, supply and the flow ("würde")."""
+        now = self._clock()
+        settings = self._settings.current
+        heat_pump = self._state.current
+        values: dict[str, float] = {}
+        if heat_pump is not None and heat_pump.available and heat_pump.connected:
+            for key, series in (("outdoor_temperature", "outdoor"), ("power_consumption", "power")):
+                reading = heat_pump.measurements.get(key)
+                if reading is not None:
+                    values[series] = reading.value
+            for zone in heat_pump.zones:
+                if zone.setpoint is not None:
+                    values[f"zone_setpoint:{zone.id}"] = zone.setpoint.value
+        for zone_config in settings.hems.zones:
+            for entity, series in (
+                (zone_config.flow_entity, f"flow:{zone_config.zone_id}"),
+                (zone_config.flow_setpoint_entity, f"flow_setpoint:{zone_config.zone_id}"),
+            ):
+                value = self.sources.number(entity)
+                if value is not None:
+                    values[series] = value
+        buffer = self.sources.number(settings.hems.buffer_entity)
+        if buffer is not None:
+            values["buffer"] = buffer
+        local = now.astimezone(self._zone).time()
+        for room in settings.rooms:
+            details = room.details
+            temperature = room_celsius(self.sources.get(room.entity_id))
+            if temperature is not None:
+                values[room_series(room.entity_id, "temperature")] = temperature
+            values[room_series(room.entity_id, "setpoint")] = details.setpoint_at(local)
+            for name, value in (
+                ("humidity", self.sources.number(details.humidity_entity)),
+                ("valve", self.sources.number(details.valve_entity)),
+                ("trv_setpoint", self.sources.attribute(details.trv_entity, "temperature")),
+            ):
+                if value is not None:
+                    values[room_series(room.entity_id, name)] = value
+            window = self._windows.get(room.entity_id)
+            if window is not None:
+                self._window_event(room, window.tick(now))
+        if values:
+            await self.samples.add_async(now, values)
+        await self._update_supply(now)
+
+    async def _update_supply(self, now: datetime) -> None:
+        settings = self._settings.current
+        rooms = [room for room in settings.rooms if room.details.valve_entity]
+        if not rooms:
+            self._supply = {}
+            return
+        names = [room_series(room.entity_id, value) for room in rooms for value in ("temperature", "valve")]
+        series = await self.samples.series_async(names, now - timedelta(hours=1))
+        local = now.astimezone(self._zone).time()
+        supplies = {}
+        for room in rooms:
+            state = supply(
+                series[room_series(room.entity_id, "temperature")],
+                series[room_series(room.entity_id, "valve")],
+                room.details.setpoint_at(local),
+                now,
+            )
+            before = self._supply.get(room.entity_id)
+            if (
+                self.mode is PlannerMode.PREVIEW
+                and state.supply in (Supply.UNDER, Supply.OVER)
+                and (before is None or before.supply != state.supply)
+            ):
+                self._log.add(
+                    LogCategory.ROOMS,
+                    f"{room.name} wäre {SUPPLY_NAMES[state.supply]} (Ventil im Mittel {_number(state.valve or 0)} %).",
+                )
+            supplies[room.entity_id] = state
+        self._supply = supplies
+        hems = settings.hems
+        for zone_config in hems.zones:
+            if zone_config.kind is not ZoneKind.RADIATOR:
+                continue
+            members = [room for room in rooms if room.zone_id == zone_config.zone_id]
+            if not members:
+                continue
+            hint = flow_hint(
+                [supplies[room.entity_id] for room in members],
+                [series[room_series(room.entity_id, "valve")] for room in members],
+                now,
+            )
+            flow = self._flows.setdefault(zone_config.zone_id, _Flow())
+            flow.hint = hint
+            if hint not in (FlowHint.HIGHER, FlowHint.LOWER):
+                continue
+            if flow.changed_at is not None and now - flow.changed_at < timedelta(minutes=hems.min_interval_min):
+                continue
+            step = hems.step_k if hint is FlowHint.HIGHER else -hems.step_k
+            offset = max(-zone_config.down_k, min(zone_config.up_k, flow.offset_k + step))
+            if offset == flow.offset_k:
+                continue
+            under = [room.name for room in members if supplies[room.entity_id].supply is Supply.UNDER]
+            reason = (
+                f"Vorlauf höher: {', '.join(under)} unterversorgt"
+                if hint is FlowHint.HIGHER
+                else "Vorlauf tiefer: alle Räume versorgt, kein Ventil weit offen"
+            )
+            flow.offset_k, flow.changed_at, flow.reason = offset, now, reason
+            if self.mode is PlannerMode.PREVIEW:
+                label = self._labels().get(zone_config.zone_id, zone_config.zone_id)
+                self._log.add(LogCategory.HEMS, f"{label} würde den Vorlauf ändern: {_signed(offset)} K ({reason}).")
+            self._save_state()
+
+    def _source_changed(self, entity_id: str, state: EntityState | None) -> None:
+        """A room's temperature or humidity changed: look for an open window."""
+        if state is None:
+            return
+        now = self._clock()
+        for room in self._settings.current.rooms:
+            details = room.details
+            if entity_id not in (room.entity_id, details.humidity_entity):
+                continue
+            temperature = room_celsius(self.sources.get(room.entity_id))
+            if temperature is None:
+                continue
+            humidity = None if room.measured_at_thermostat else self.sources.number(details.humidity_entity)
+            detector = self._windows.setdefault(room.entity_id, WindowDetector())
+            self._window_event(room, detector.feed(now, temperature, humidity))
+
+    def _window_event(self, room: Room, event: WindowEvent | None) -> None:
+        if event is None or self.mode is not PlannerMode.PREVIEW:
+            return
+        if event.opened:
+            humidity = f" und {_number(event.drop_g)} g/m³ Feuchte" if event.drop_g is not None else ""
+            self._log.add(
+                LogCategory.ROOMS,
+                f"Fenster offen erkannt (würde): {room.name}, {MINUS}{_number(event.drop_k)} K{humidity}.",
+            )
+        else:
+            self._log.add(LogCategory.ROOMS, f"Fenster wieder zu (würde): {room.name}.")
+
+    # --- planning ----------------------------------------------------------------
 
     async def _make_plan(self) -> None:
         settings = self._settings.current
         hems = settings.hems
+        now = self._clock()
+        problems: list[str] = []
+        if self._home_assistant.client is None:
+            problems.append("Ohne Home Assistant fehlen Prognose, Statistik und Räume.")
+        elif not self.sources.connected:
+            problems.append("Home Assistant ist nicht erreichbar.")
+        if not self._backfilled and self._home_assistant.client is not None and self.sources.connected:
+            await self._backfill(now)
+        due = self._statistics_at is None or now - self._statistics_at >= STATISTICS_EVERY
+        if due and self.sources.connected:
+            await self._learn_house(now)
+        if self.history.problem:
+            problems.append(self.history.problem)
+        if self._rooms_at is None or now - self._rooms_at >= ROOM_MODEL_EVERY:
+            await self._learn_rooms(now)
+        measured = self._measured_outdoor()
+        forecast = await self.forecast.refresh(measured)
+        if self.forecast.problem is not None:
+            problems.append(self.forecast.problem)
         if hems.mode is PlannerMode.OFF:
-            self._plan, self._problems = None, []
+            self._plan, self._problems = None, problems
+            return
+        if forecast is None:
+            self._problems = problems
             return
         heat_pump = self._state.current
         if heat_pump is None or not heat_pump.available or not heat_pump.connected:
-            self._problems = ["Die Wärmepumpe ist nicht verbunden; der Plan wartet."]
-            return
-        now = self._clock()
-        slots = horizon(now, self._zone)
-        problems: list[str] = []
-        if self._home_assistant.client is None:
-            problems.append("Ohne Home Assistant fehlen Preise und Prognosen.")
-        elif not self._home_assistant.hems_entities.connected:
-            problems.append("Home Assistant ist nicht erreichbar.")
-
-        price_state = self._home_assistant.entity_state(hems.tariff.price_entity)
-        prices = import_prices(hems.tariff, price_state, slots, self._zone)
-        problems += _price_problems(hems, prices)
-
-        pv_states = [
-            self._home_assistant.entity_state(entity) for entity in (hems.pv_forecast_today, hems.pv_forecast_tomorrow)
-        ]
-        pv = pv_forecast(pv_states, slots, self._zone)
-        if hems.pv_forecast_today is None and hems.pv_forecast_tomorrow is None:
-            problems.append("Es ist keine PV-Prognose gewählt.")
-        elif all(value is None for value in pv):
-            problems.append("Die PV-Prognose liefert keine Werte.")
-
-        base = base_load(await self._base_profile(now, problems), slots, self._zone)
-        soc = number(self._home_assistant.entity_state(hems.battery_soc))
-        if hems.battery_soc is not None and not hems.battery_capacity_kwh:
-            problems.append("Die Akku-Kapazität fehlt in den Einstellungen.")
-        elif hems.battery_soc is not None and not hems.battery_charge_kw:
-            problems.append("Die Ladeleistung des Akkus fehlt in den Einstellungen.")
-        elif hems.battery_soc is not None and soc is None:
-            problems.append("Der Akku-Ladestand ist gerade nicht verfügbar.")
-        supply = surplus(pv, base, soc, hems)
-
-        forecast = await self.weather.forecast()
-        if self.weather.problem is not None:
-            problems.append(self.weather.problem)
-
-        plan_slots = [
-            PlanSlot(
-                start=slot,
-                price=None if price is None else round(price, 4),
-                pv_w=entry.pv_w,
-                base_w=entry.base_w,
-                surplus_w=entry.surplus_w,
-                battery_soc=entry.battery_soc,
-                outdoor_c=forecast.at(slot) if forecast is not None else None,
+            problems.append("Die Wärmepumpe ist nicht verbunden; die Zonen fehlen im Plan.")
+        weather = forecast.ahead(now - timedelta(hours=1), timedelta(hours=52))
+        rates = learn_rates(self.cycles.runs, self.cycles.defrosts, now)
+        risks = {item.start: item for item in risk(weather, rates)}
+        frost = frozenset(frost_hours(weather, self._frost))
+        zones = self._zone_inputs(heat_pump)
+        rooms = [
+            RoomInput(
+                entity_id=room.entity_id,
+                name=room.name,
+                zone_id=room.zone_id,
+                details=room.details,
+                humidity=self.sources.number(room.details.humidity_entity),
             )
-            for slot, price, entry in zip(slots, prices, supply, strict=True)
+            for room in settings.rooms
         ]
-        previous = self._plan
-        keep = [block for block in previous.blocks if block.covers(now)] if previous is not None else []
-        dhw_base = self.executor.bases().get(DHW)
-        if dhw_base is None and heat_pump.hot_water is not None and heat_pump.hot_water.setpoint is not None:
-            dhw_base = heat_pump.hot_water.setpoint.value
+        demand_hours = self._demand_hours(weather, [item.zone_id for item in zones])
         plan = make_plan(
-            now,
-            plan_slots,
-            hems,
-            _device_view(heat_pump, auto_override=self._gate.connection is Connection.MYVAILLANT),
-            zone=self._zone,
-            dhw_base=dhw_base,
-            dhw_done=self.executor.charged_days(preview=hems.mode is PlannerMode.PREVIEW),
-            keep=keep,
+            PlanInputs(
+                now=now,
+                zone=self._zone,
+                settings=hems,
+                weather=weather,
+                risks=risks,
+                frost=frost,
+                demand={item.start: item for item in demand_hours},
+                zones=zones,
+                rooms=rooms,
+            )
         )
-        self._log_changes(previous, plan, _labels(heat_pump), now)
         self._plan, self._problems = plan, problems
+        current = hour_start(now)
+        first = next((hour for hour in plan.hours if hour.start == current), None)
+        if first is not None and current not in self._planned:
+            self._planned[current] = first
+            self._planned = {start: hour for start, hour in self._planned.items() if now - start <= LOOK_BACK}
+            self._save_history()
+        if zones:
+            # Without the zones (heat pump not connected yet) the plan is incomplete: not logged.
+            self._log_changes(now)
 
-    async def _base_profile(self, now: datetime, problems: list[str]) -> dict[tuple[int, int], float]:
+    def _zone_inputs(self, heat_pump: HeatPumpState | None) -> list[ZoneInput]:
         hems = self._settings.current.hems
-        if hems.house_power is None:
-            problems.append("Es ist kein Hausverbrauch gewählt.")
-            return {}
-        cached = self._profile
-        if cached is not None and cached[1] == hems.house_power and now - cached[0] < PROFILE_EVERY:
-            profile = cached[2]
-        else:
-            start = now - timedelta(days=BASE_DAYS) - SLOT
-            try:
-                house = await self._home_assistant.history(hems.house_power, start, now)
-                pump = (
-                    await self._home_assistant.history(POWER_SENSOR, start, now)
-                    if ExportGroup.ENERGY in self._settings.current.export
-                    else []
+        result = []
+        for zone in heat_pump.zones if heat_pump is not None else []:
+            config = hems.zone(zone.id)
+            flow = self._flows.get(zone.id)
+            result.append(
+                ZoneInput(
+                    zone_id=zone.id,
+                    label=zone.label,
+                    config=config,
+                    base_c=zone.setpoint.value if zone.setpoint is not None and not zone.override else None,
+                    flow_offset_k=flow.offset_k if flow is not None else 0.0,
+                    flow_reason=flow.reason if flow is not None and flow.offset_k else None,
+                    flow_line=self._models.flow_lines.get(zone.id),
                 )
-            except HomeAssistantUnavailable as err:
-                _LOGGER.warning("Reading the house's power history failed: %s", err)
-                return cached[2] if cached is not None and cached[1] == hems.house_power else {}
-            state = self._home_assistant.entity_state(hems.house_power)
-            unit = state.attributes.get("unit_of_measurement") if state is not None else None
-            if unit not in ("W", "kW"):
-                problems.append("Der Hausverbrauch braucht die Einheit W oder kW.")
-                return {}
-            profile = base_profile(house, str(unit), pump, now, self._zone)
-            self._profile = (now, hems.house_power, profile)
-        if not profile:
-            problems.append("Für den Hausverbrauch gibt es noch keinen Verlauf in Home Assistant.")
-        return profile
+            )
+        return result
 
-    def _log_changes(self, previous: Plan | None, plan: Plan, labels: dict[str, str], now: datetime) -> None:
-        """One protocol line when the upcoming blocks change."""
+    def _demand_hours(self, weather: list[WeatherHour], zone_ids: list[str]) -> list[Any]:
+        settings = self._settings.current
+        house = self._models.house or start_model(settings.hems.heat_load_w, settings.hems.design_outdoor_c)
+        if house is None:
+            return []
+        loads: dict[str, float] = {}
+        for room in settings.rooms:
+            if room.zone_id is not None and room.details.heat_load_w:
+                loads[room.zone_id] = loads.get(room.zone_id, 0.0) + room.details.heat_load_w
+        inside = self._inside_now()
+        return demand(
+            house,
+            [(hour.start, hour.temperature_c, hour.radiation_w) for hour in weather],
+            inside if inside is not None else DEFAULT_INSIDE_C,
+            zone_shares(loads, zone_ids),
+        )
 
-        def upcoming(source: Plan | None) -> list[tuple[str, Action, datetime, datetime, float | None, float | None]]:
-            if source is None:
-                return []
-            return [
-                (block.control, block.action, block.start, block.end, block.shift_k, block.target_c)
-                for block in source.blocks
-                if block.end > now
+    def _log_changes(self, now: datetime) -> None:
+        """One protocol line when the coming changes of the next 12 hours change."""
+        if self.mode is not PlannerMode.PREVIEW:
+            return
+        changes = [change for change in self.changes(EXPORT_CHANGES) if change.at - now <= timedelta(hours=12)]
+        key = [(change.at, change.text) for change in changes]
+        if key == self._logged_changes:
+            return
+        self._logged_changes = key
+        if not changes:
+            self._log.add(LogCategory.HEMS, "Plan (Vorschau): in den nächsten 12 h keine Änderung.")
+            return
+        parts = []
+        for change in changes[:4]:
+            local = change.at.astimezone(self._zone)
+            reason = f" ({change.reasons[0]})" if change.reasons else ""
+            parts.append(f"{local:%H} Uhr {change.text}{reason}")
+        more = f" und {len(changes) - 4} weitere" if len(changes) > 4 else ""
+        self._log.add(LogCategory.HEMS, f"Plan (Vorschau): {'; '.join(parts)}{more}.")
+
+    # --- learning ----------------------------------------------------------------
+
+    async def _backfill(self, now: datetime) -> None:
+        """Starts and defrosts of the last days from Home Assistant's history."""
+        self._backfilled = True
+        power_entity, outdoor_entity = self._power_entity(), self._outdoor_entity()
+        if power_entity is None:
+            return
+        start = now - BACKFILL
+        try:
+            power = await self._home_assistant.history(power_entity, start, now)
+            outdoor = await self._home_assistant.history(outdoor_entity, start, now) if outdoor_entity else []
+        except HomeAssistantUnavailable as err:
+            _LOGGER.warning("Reading the power history failed: %s", err)
+            self._backfilled = False
+            return
+        factor = self.sources.watt_factor(power_entity) or 1.0
+        self.cycles.import_history(
+            [(moment, value * factor if value is not None else float("nan")) for moment, value in _numbers(power)],
+            [(moment, value) for moment, value in _numbers(outdoor) if value is not None],
+        )
+        self.cycles.save()
+
+    async def _learn_house(self, now: datetime) -> None:
+        settings = self._settings.current
+        hems = settings.hems
+        outdoor_entity = self._outdoor_entity()
+        power_entity = self._power_entity()
+        rooms = [room.entity_id for room in settings.rooms if not room.measured_at_thermostat]
+        flow_entities = [entity for zone in hems.zones if (entity := zone.flow_setpoint_entity or zone.flow_entity)]
+        entities = [
+            entity
+            for entity in (hems.heat_heating_entity, hems.heat_dhw_entity, outdoor_entity, power_entity)
+            if entity is not None
+        ]
+        await self.history.update([*entities, *rooms, *flow_entities])
+        self._statistics_at = now
+        if self.history.problem is not None:
+            return
+        outdoor = self.history.means(outdoor_entity)
+        heating = hourly_changes(
+            self.history.rows(hems.heat_heating_entity), self.sources.kwh_factor(hems.heat_heating_entity) or 1.0
+        )
+        dhw = hourly_changes(
+            self.history.rows(hems.heat_dhw_entity), self.sources.kwh_factor(hems.heat_dhw_entity) or 1.0
+        )
+        watt_factor = self.sources.watt_factor(power_entity) or 1.0
+        power = {hour: value * watt_factor for hour, value in self.history.means(power_entity).items()}
+        indoor = [self.history.means(room) for room in rooms]
+        days = daily_values(
+            heating_kwh=heating, dhw_kwh=dhw, power_w=power, outdoor_c=outdoor, indoor_c=indoor, zone=self._zone
+        )
+        house = fit_house(days, heating_limit_c=hems.heating_limit_c, radiation_wh=self._models.radiation_wh)
+        if house is not None:
+            difference = {
+                hour: statistics.fmean(values) - outdoor[hour]
+                for hour in outdoor
+                if (values := [room[hour] for room in indoor if hour in room])
+            }
+            house = replace(house, lag_h=find_lag(heating, difference), cop=fit_cop(days))
+        self._models.house = house
+        lines = {}
+        for zone in hems.zones:
+            entity = zone.flow_setpoint_entity or zone.flow_entity
+            line = _flow_line(self.history.means(entity), outdoor, hems.heating_limit_c)
+            if line is not None:
+                lines[zone.zone_id] = line
+        self._models.flow_lines = lines
+
+    async def _learn_rooms(self, now: datetime) -> None:
+        settings = self._settings.current
+        self._rooms_at = now
+        names = ["outdoor", "power"]
+        for room in settings.rooms:
+            names += [
+                room_series(room.entity_id, value) for value in ("temperature", "valve", "trv_setpoint", "setpoint")
             ]
+        names += [f"flow:{zone.zone_id}" for zone in settings.hems.zones]
+        series = await self.samples.series_async(names, now - timedelta(days=21))
+        models = {}
+        for room in settings.rooms:
+            kind = settings.hems.zone(room.zone_id).kind if room.zone_id else None
+            models[room.entity_id] = learn(
+                temperature=series[room_series(room.entity_id, "temperature")],
+                outdoor=series["outdoor"],
+                power=series["power"],
+                valve=series[room_series(room.entity_id, "valve")],
+                flow=series.get(f"flow:{room.zone_id}", []),
+                trv_setpoint=series[room_series(room.entity_id, "trv_setpoint")],
+                setpoint=series[room_series(room.entity_id, "setpoint")],
+                kind=kind.value if kind is not None else "radiator",
+            )
+        self._models.rooms = models
 
-        if upcoming(previous) == upcoming(plan):
-            return
-        blocks = [block for block in plan.blocks if block.end > now]
-        if not blocks:
-            self._log.add(LogCategory.HEMS, "Plan: keine Verschiebung geplant.")
-            return
-        parts = [self._describe(block, labels) for block in blocks[:PLAN_LOG_BLOCKS]]
-        more = f" und {len(blocks) - PLAN_LOG_BLOCKS} weitere" if len(blocks) > PLAN_LOG_BLOCKS else ""
-        self._log.add(LogCategory.HEMS, f"Plan: {'; '.join(parts)}{more}.")
+    # --- helpers -----------------------------------------------------------------
 
-    def _describe(self, block: Block, labels: dict[str, str]) -> str:
-        start = block.start.astimezone(self._zone)
-        end = block.end.astimezone(self._zone)
-        day = "morgen " if start.date() > self._clock().astimezone(self._zone).date() else ""
-        return f"{day}{start:%H:%M} bis {end:%H:%M} {_action_text(block, labels)} ({block.reason})"
+    def _labels(self) -> dict[str, str]:
+        heat_pump = self._state.current
+        return {zone.id: zone.label for zone in heat_pump.zones} if heat_pump is not None else {}
 
-    def _next_action(self) -> NextAction | None:
+    def _floor_zone(self) -> str | None:
+        return next(
+            (zone.zone_id for zone in self._settings.current.hems.zones if zone.kind is ZoneKind.FLOOR),
+            None,
+        )
+
+    def _power_entity(self) -> str | None:
+        settings = self._settings.current
+        if settings.connection is Connection.MYVAILLANT:
+            return settings.myvaillant.power
+        return POWER_SENSOR if ExportGroup.ENERGY in settings.export else None
+
+    def _outdoor_entity(self) -> str | None:
+        settings = self._settings.current
+        if settings.connection is Connection.MYVAILLANT:
+            return settings.myvaillant.outdoor_temperature
+        return f"sensor.{PREFIX}outdoor_temperature" if ExportGroup.TEMPERATURES in settings.export else None
+
+    def _measured_outdoor(self) -> dict[datetime, float]:
+        return self.history.means(self._outdoor_entity())
+
+    def _outdoor_now(self) -> float | None:
+        heat_pump = self._state.current
+        reading = heat_pump.measurements.get("outdoor_temperature") if heat_pump is not None else None
+        return reading.value if reading is not None else None
+
+    def _inside_now(self) -> float | None:
+        values = [
+            temperature
+            for room in self._settings.current.rooms
+            if not room.measured_at_thermostat
+            and (temperature := room_celsius(self.sources.get(room.entity_id))) is not None
+        ]
+        return statistics.fmean(values) if values else None
+
+    def _humidity_at(self, moment: datetime) -> float | None:
+        forecast = self.forecast.current
+        hour = forecast.at(moment) if forecast is not None else None
+        return hour.humidity if hour is not None else None
+
+    def _statistics_days(self) -> int:
+        rows = self.history.rows(self._outdoor_entity())
+        return len({row.start.astimezone(self._zone).date() for row in rows})
+
+    def _day_demand(self) -> list[DayDemand]:
         plan = self._plan
         if plan is None:
-            return None
-        now = self._clock()
-        labels = _labels(self._state.current)
-        candidates: list[NextAction] = []
-        for block in plan.blocks:
-            if block.start > now:
-                candidates.append(NextAction(at=block.start, text=_action_text(block, labels), reason=block.reason))
-            elif block.end > now:
-                label = labels.get(block.control, block.control)
-                candidates.append(NextAction(at=block.end, text=f"{label} zurück auf den Grundwert", reason=None))
-        return min(candidates, key=lambda action: action.at, default=None)
-
-    def _demand(self) -> Demand | None:
-        hems = self._settings.current.hems
-        model = self.days.model(hems.heating_limit_c)
-        forecast = self.weather.current
-        indoor = self.days.indoor()
-        if model is None or forecast is None or indoor is None:
-            return None
-        tomorrow = local_day(self._clock(), self._zone) + timedelta(days=1)
-        start, end = local_midnight(tomorrow, self._zone), local_midnight(tomorrow + timedelta(days=1), self._zone)
-        temperatures = [value for hour, value in forecast.hours.items() if start <= hour < end]
-        if len(temperatures) < 20:
-            return None
-        outdoor = statistics.fmean(temperatures)
-        return Demand(
-            kwh=round(model.predict(indoor, outdoor), 1),
-            spread_kwh=model.spread_kwh,
-            days=model.days,
-            outdoor_c=round(outdoor, 1),
-        )
-
-    def _learned_days(self, heating_limit_c: float) -> int:
-        return sum(
-            1
-            for value in self.days.values()
-            if value.kwh is not None
-            and not value.incomplete
-            and value.outdoor_c is not None
-            and value.outdoor_c < heating_limit_c
-            and value.coverage >= MIN_COVERAGE
-        )
-
-
-async def _despite_cancellation(work: Coroutine[Any, Any, None]) -> None:
-    """Run work to its end even if the waiting task is cancelled again meanwhile.
-
-    Stopping the app cancels the services more than once (uvicorn passes SIGTERM on
-    after its own shutdown); work must limit its own duration.
-    """
-    task = asyncio.create_task(work)
-    while not task.done():
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.shield(task)
-
-
-def _price_problems(hems: HemsSettings, prices: list[float | None]) -> list[str]:
-    tariff = hems.tariff
-    match tariff.kind:
-        case TariffKind.FIXED:
-            return ["Der Strompreis fehlt in den Einstellungen."] if tariff.price_ct is None else []
-        case TariffKind.FIXED_14A:
-            missing = None in (tariff.price_ct, tariff.high_price_ct, tariff.low_price_ct)
-            return ["Für §14a Modul 3 fehlen Preise in den Einstellungen."] if missing else []
-        case TariffKind.DYNAMIC:
-            if tariff.price_entity is None:
-                return ["Es ist kein Preis-Sensor gewählt."]
-            if all(price is None for price in prices):
-                return ["Der Preis-Sensor liefert keine Preise."]
             return []
-
-
-def _device_view(heat_pump: HeatPumpState, *, auto_override: bool = False) -> DeviceView:
-    water = heat_pump.hot_water
-    return DeviceView(
-        zones=[
-            ZoneView(
-                id=zone.id,
-                label=zone.label,
-                mode=zone.mode,
-                writable=zone.setpoint is not None and zone.setpoint.writable,
-                auto_override=auto_override,
+        by_day: dict[date, list[PlanHour]] = {}
+        for hour in plan.hours:
+            by_day.setdefault(hour.start.astimezone(self._zone).date(), []).append(hour)
+        result = []
+        for day, hours in sorted(by_day.items()):
+            heat = [hour.heat_w for hour in hours if hour.heat_w is not None]
+            if not heat:
+                continue
+            electricity = [hour.electricity_w for hour in hours if hour.electricity_w is not None]
+            temps = [hour.outdoor_c for hour in hours if hour.outdoor_c is not None]
+            result.append(
+                DayDemand(
+                    day=day,
+                    heat_kwh=round(sum(heat) / 1000, 1),
+                    electricity_kwh=round(sum(electricity) / 1000, 1) if len(electricity) == len(heat) else None,
+                    outdoor_c=round(statistics.fmean(temps), 1) if temps else None,
+                )
             )
-            for zone in heat_pump.zones
-        ],
-        dhw_mode=water.mode if water is not None else None,
-        dhw_writable=water is not None and water.setpoint is not None and water.setpoint.writable,
-        boost_writable=water is not None and water.boost_writable,
-    )
+        return result
+
+    def _zone1_status(self) -> Zone1Status | None:
+        zone_id = self._floor_zone()
+        if zone_id is None:
+            return None
+        heat_pump = self._state.current
+        actual = next((zone.mode for zone in heat_pump.zones if zone.id == zone_id), None) if heat_pump else None
+        state = self._zone1
+        if state.would is None:
+            reason = "Ohne Leistung der Wärmepumpe keine Aussage."
+        elif self._frost.active:
+            reason = "Frostschutz aktiv: Zone bleibt an."
+        elif state.would == "off":
+            reason = "Wärmepumpe steht: Fußbodenheizung aus, nur Zone 2 nimmt Wärme aus dem Puffer."
+        elif state.below_since is not None and self._floor_room_cold(zone_id):
+            reason = "Ein Raum der Zone ist unter dem Komfortband: Zone bleibt an."
+        else:
+            reason = "Wärmepumpe läuft: Fußbodenheizung nimmt Wärme auf."
+        return Zone1Status(
+            zone_id=zone_id,
+            would=state.would,
+            actual=actual,
+            reason=reason,
+            switches_today=state.switches,
+            checked_today=state.checked,
+            agreed_today=state.agreed,
+        )
+
+    def _flow_status(self) -> list[FlowStatus]:
+        settings = self._settings.current
+        result = []
+        for zone in settings.hems.zones:
+            if zone.kind is not ZoneKind.RADIATOR:
+                continue
+            members = [room for room in settings.rooms if room.zone_id == zone.zone_id and room.details.valve_entity]
+            states = {room.name: self._supply.get(room.entity_id) for room in members}
+            known = {name: state for name, state in states.items() if state is not None and state.valve is not None}
+            bottleneck = max(known, key=lambda name: known[name].valve or 0.0, default=None)
+            flow = self._flows.get(zone.zone_id, _Flow())
+            result.append(
+                FlowStatus(
+                    zone_id=zone.zone_id,
+                    offset_k=flow.offset_k,
+                    hint=flow.hint,
+                    reason=flow.reason,
+                    bottleneck=bottleneck,
+                    max_valve=known[bottleneck].valve if bottleneck else None,
+                    under=sum(1 for state in states.values() if state is not None and state.supply is Supply.UNDER),
+                )
+            )
+        return result
+
+    def _look_back(self, now: datetime) -> list[HourRecord]:
+        stats_runs = self.cycles.runs
+        defrosts = self.cycles.defrosts
+        records = []
+        start = hour_start(now) - LOOK_BACK
+        samples = self.samples.series(
+            ["outdoor", "power", *[f"zone_setpoint:{zone}" for zone in self._labels()]], start
+        )
+        moment = start
+        while moment < hour_start(now):
+            end = moment + timedelta(hours=1)
+            outdoor = [value for at, value in samples["outdoor"] if moment <= at < end]
+            power = [value for at, value in samples["power"] if moment <= at < end]
+            setpoints = {}
+            for zone in self._labels():
+                values = [value for at, value in samples[f"zone_setpoint:{zone}"] if moment <= at < end]
+                if values:
+                    setpoints[zone] = round(statistics.fmean(values), 1)
+            records.append(
+                HourRecord(
+                    start=moment,
+                    planned=self._planned.get(moment),
+                    outdoor_c=round(statistics.fmean(outdoor), 1) if outdoor else None,
+                    setpoints=setpoints,
+                    starts=sum(1 for run in stats_runs if moment <= run.start < end),
+                    defrosts=sum(1 for item in defrosts if moment <= item.at < end),
+                    electricity_kwh=round(statistics.fmean(power) / 1000, 2) if len(power) >= 6 else None,
+                )
+            )
+            moment = end
+        return records
+
+    # --- persistence -------------------------------------------------------------
+
+    def _load_state(self) -> None:
+        path = self._data_dir / STATE_FILE
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            for zone_id, entry in raw.get("flows", {}).items():
+                self._flows[zone_id] = _Flow(
+                    offset_k=float(entry["offset_k"]),
+                    changed_at=datetime.fromisoformat(entry["changed_at"]) if entry.get("changed_at") else None,
+                    reason=entry.get("reason"),
+                )
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
+            _LOGGER.warning("%s unreadable (%s), starting anew", path, err)
+
+    def _save_state(self) -> None:
+        payload = {
+            "flows": {
+                zone_id: {
+                    "offset_k": flow.offset_k,
+                    "changed_at": flow.changed_at.isoformat() if flow.changed_at else None,
+                    "reason": flow.reason,
+                }
+                for zone_id, flow in self._flows.items()
+            }
+        }
+        path = self._data_dir / STATE_FILE
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as err:
+            _LOGGER.warning("Saving %s failed: %s", path, err)
+
+    def _save_history(self) -> None:
+        """What was planned for the last hours, for the look-back after a restart."""
+        payload = [_hour_json(hour) for _, hour in sorted(self._planned.items())]
+        path = self._data_dir / HISTORY_FILE
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as err:
+            _LOGGER.warning("Saving %s failed: %s", path, err)
+
+    def _load_history(self) -> None:
+        path = self._data_dir / HISTORY_FILE
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            hours = [_hour_from_json(item) for item in raw]
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
+            _LOGGER.warning("%s unreadable (%s), starting anew", path, err)
+            return
+        now = self._clock()
+        self._planned = {hour.start: hour for hour in hours if now - hour.start <= LOOK_BACK}
+
+    def _check_legacy(self) -> None:
+        """The planner of 1.1/1.2 kept its state in hems.json; a shift it left is named once."""
+        path = self._data_dir / LEGACY_FILE
+        if not path.exists():
+            return
+        shifted = []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            for control, entry in (raw.get("controls") or {}).items():
+                applied, base, override = entry.get("applied"), entry.get("base"), entry.get("override")
+                if (applied is not None and applied != base) or override is not None:
+                    shifted.append(str(control))
+        except (OSError, ValueError, AttributeError, TypeError) as err:
+            _LOGGER.warning("Old planner state %s unreadable: %s", path, err)
+        if shifted:
+            self._log.add(
+                LogCategory.HEMS,
+                "Der Planer der Version 1.1/1.2 hatte beim Beenden noch eine Verschiebung offen "
+                f"({', '.join(sorted(shifted))}). Bitte die Solltemperatur prüfen; ein Quick-Veto endet von selbst. "
+                "Version 1.3.0 sendet nichts.",
+                problem=True,
+            )
+        with contextlib.suppress(OSError):
+            os.replace(path, path.with_name(LEGACY_FILE + ".old"))
 
 
-def _labels(heat_pump: HeatPumpState | None) -> dict[str, str]:
-    labels = {DHW: "Warmwasser"}
-    if heat_pump is not None:
-        labels.update({zone.id: zone.label for zone in heat_pump.zones})
-    return labels
-
-
-def _action_text(block: Block, labels: dict[str, str]) -> str:
-    label = labels.get(block.control, block.control)
-    if block.action is Action.CHARGE:
-        return f"{label} auf {_number(block.target_c or 0)} °C und Einmalladung"
-    shift = block.shift_k or 0.0
-    sign = "+" if shift > 0 else "-"
-    return f"{label} {sign}{_number(abs(shift))} K"
-
-
-def _block_json(block: Block, labels: dict[str, str]) -> dict[str, Any]:
+def _hour_json(hour: PlanHour) -> dict[str, Any]:
     return {
-        "steuerung": labels.get(block.control, block.control),
-        "aktion": _action_text(block, labels),
-        "beginn": block.start.isoformat(),
-        "ende": block.end.isoformat(),
-        "grund": block.reason,
+        "start": hour.start.isoformat(),
+        "outdoor_c": hour.outdoor_c,
+        "humidity": hour.humidity,
+        "defrost": hour.defrost.value if hour.defrost is not None else None,
+        "heat_w": hour.heat_w,
+        "electricity_w": hour.electricity_w,
+        "frost": hour.frost,
+        "zones": [
+            [entry.zone_id, entry.shift_k, entry.target_c, entry.flow_c, entry.block, entry.night]
+            for entry in hour.zones
+        ],
+        "rooms": [[entry.entity_id, entry.setpoint_c] for entry in hour.rooms],
+        "reasons": list(hour.reasons),
     }
 
 
-def _number(value: float) -> str:
-    """German, without a decimal for whole numbers: "60", "1,5"."""
+def _hour_from_json(raw: dict[str, Any]) -> PlanHour:
+    return PlanHour(
+        start=datetime.fromisoformat(raw["start"]),
+        outdoor_c=raw.get("outdoor_c"),
+        humidity=raw.get("humidity"),
+        defrost=RiskLevel(raw["defrost"]) if raw.get("defrost") else None,
+        heat_w=raw.get("heat_w"),
+        electricity_w=raw.get("electricity_w"),
+        frost=bool(raw.get("frost")),
+        zones=[
+            ZoneHour(
+                zone_id=str(item[0]),
+                shift_k=float(item[1]),
+                target_c=item[2],
+                flow_c=item[3],
+                block=bool(item[4]),
+                night=bool(item[5]),
+            )
+            for item in raw.get("zones", [])
+        ],
+        rooms=[RoomHour(entity_id=str(item[0]), setpoint_c=float(item[1])) for item in raw.get("rooms", [])],
+        reasons=[str(reason) for reason in raw.get("reasons", [])],
+    )
+
+
+def _learned(model: RoomModel) -> RoomLearned:
+    values = {
+        "tau_h": model.tau_h,
+        "gains_k_per_h": model.gains_k_per_h,
+        "heating_rate": model.heating_rate,
+        "startup_min": model.startup_min,
+        "demand_valve": model.demand_valve,
+        "correction_k": model.correction_k,
+        "overshoot_k": model.overshoot_k,
+    }
+    return RoomLearned(
+        tau_h=model.tau_h.value,
+        gains_k_per_h=model.gains_k_per_h.value,
+        heating_rate=model.heating_rate.value,
+        startup_min=model.startup_min.value,
+        demand_valve=model.demand_valve.value,
+        correction_k=model.correction_k.value,
+        overshoot_k=model.overshoot_k.value,
+        learned={name: value.learned for name, value in values.items()},
+        learning=model.learning,
+    )
+
+
+def _flow_line(
+    flow: Mapping[datetime, float], outdoor: Mapping[datetime, float], heating_limit_c: float
+) -> tuple[float, float] | None:
+    """Flow (setpoint) = a + b * outdoor from hourly means while the circuit heats."""
+    pairs = [
+        (outdoor[hour], value)
+        for hour, value in flow.items()
+        if hour in outdoor and value > 20 and outdoor[hour] < heating_limit_c
+    ]
+    if len(pairs) < 48:
+        return None
+    xs, ys = [pair[0] for pair in pairs], [pair[1] for pair in pairs]
+    mean_x, mean_y = statistics.fmean(xs), statistics.fmean(ys)
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    b = sum((x - mean_x) * (y - mean_y) for x, y in pairs) / sxx
+    return round(mean_y - b * mean_x, 2), round(b, 3)
+
+
+def _numbers(changes: list[tuple[datetime, str]]) -> list[tuple[datetime, float | None]]:
+    result: list[tuple[datetime, float | None]] = []
+    for moment, text in changes:
+        try:
+            value: float | None = float(text)
+        except ValueError:
+            value = None
+        result.append((moment, value))
+    return result
+
+
+def _quarter(moment: datetime) -> datetime:
+    return moment.replace(minute=moment.minute - moment.minute % 15, second=0, microsecond=0)
+
+
+def _round(value: float | None, digits: int) -> float | None:
+    return round(value, digits) if value is not None else None
+
+
+def _number(value: float | None) -> str:
+    """German, without a decimal for whole numbers: "3", "1,5"."""
+    if value is None:
+        return "-"
     return f"{value:.0f}" if value == round(value) else f"{value:.1f}".replace(".", ",")
+
+
+def _signed(value: float) -> str:
+    if value == 0:
+        return "±0"
+    return f"{'+' if value > 0 else MINUS}{_number(abs(value))}"
+
+
+def plan_csv(view: PlanView, zone: tzinfo) -> bytes:
+    """The plan (and the look-back) as a CSV file like the protocol: semicolons, decimal commas, local time."""
+    out = io.StringIO()
+    writer = csv.writer(out, delimiter=";", lineterminator="\r\n")
+    zones = list(view.labels.items())
+    rooms = list(view.rooms.items())
+    header = ["Zeit", "Art"]
+    for _, label in zones:
+        header += [f"{label} Verschiebung K", f"{label} Soll °C", f"{label} Vorlauf °C"]
+    header += [f"{name} Soll °C" for _, name in rooms]
+    header += ["Außen °C", "Feuchte %", "Abtaurisiko", "Wärmebedarf W", "Strom W", "Frostschutz", "Grund"]
+    writer.writerow(header)
+
+    def row(hour: PlanHour, kind: str, start: datetime) -> list[str]:
+        cells = [f"{start.astimezone(zone):%d.%m.%Y %H:%M}", kind]
+        for zone_id, _ in zones:
+            entry = next((item for item in hour.zones if item.zone_id == zone_id), None)
+            cells += [
+                _csv(entry.shift_k if entry else None),
+                _csv(entry.target_c if entry else None),
+                _csv(entry.flow_c if entry else None),
+            ]
+        for entity_id, _ in rooms:
+            room = next((item for item in hour.rooms if item.entity_id == entity_id), None)
+            cells.append(_csv(room.setpoint_c if room else None))
+        cells += [
+            _csv(hour.outdoor_c),
+            _csv(hour.humidity),
+            LEVEL_NAMES[hour.defrost] if hour.defrost is not None else "",
+            _csv(hour.heat_w),
+            _csv(hour.electricity_w),
+            "ja" if hour.frost else "",
+            "; ".join(hour.reasons),
+        ]
+        return cells
+
+    for record in view.history:
+        if record.planned is not None:
+            writer.writerow(row(record.planned, "Rückblick", record.start))
+    for hour in view.hours:
+        writer.writerow(row(hour, "Plan", hour.start))
+    return ("﻿" + out.getvalue()).encode("utf-8")
+
+
+def _csv(value: float | None) -> str:
+    return "" if value is None else f"{value:g}".replace(".", ",")

@@ -1,7 +1,8 @@
 """The user's energy management settings, kept in settings.json under "hems".
 
 Every value is checked on its own: an invalid one falls back to its default
-and is logged, the rest of the settings stays.
+and is logged, the rest of the settings stays. Keys of the planner of 1.1/1.2
+(tariff, PV forecast, battery) are no longer read.
 """
 
 from __future__ import annotations
@@ -14,129 +15,131 @@ from datetime import time
 from enum import StrEnum
 from typing import Any, TypeIs
 
-from vaillant_eebus.ids import ENTITY_ID, ZONE_ID
+from vaillant_eebus.ids import ENTITY_ID, SENSOR_ENTITY, ZONE_ID
 
 _LOGGER = logging.getLogger(__name__)
 
-WINDOWS_MAX = 4
-
 # Allowed ranges of the numbers, inclusive.
-PRICE_CT = (0.0, 200.0)
-FEED_IN_CT = (0.0, 100.0)
-VAT_PERCENT = (0.0, 50.0)
-BATTERY_KWH = (0.0, 200.0)
-BATTERY_KW = (0.0, 50.0)
-PERCENT = (0.0, 100.0)
 LATITUDE = (-90.0, 90.0)
 LONGITUDE = (-180.0, 180.0)
-SHIFT_K = (0.0, 3.0)
-SHIFT_STEP_K = 0.5
-DHW_MAX_C = (35.0, 70.0)
+DESIGN_OUTDOOR_C = (-30.0, 10.0)
+HEAT_LOAD_W = (100.0, 50000.0)
+FLOW_C = (20.0, 80.0)
+BAND_K = (0.0, 3.0)
+STEP_K = (0.5, 1.0)
+INTERVAL_MIN = (15, 120)
+LOSS_K = (0.0, 3.0)
+TARGET_STARTS = (1, 48)
 HEATING_LIMIT_C = (0.0, 25.0)
+BLOCK_ABOVE_C = (-10.0, 20.0)
+CLOUD_COMMANDS = (10, 1000)
+ZONE1_THRESHOLD_W = (5.0, 500.0)
+LAG_H = (0.0, 12.0)
+ZONES_MAX = 10
 
 
 class PlannerMode(StrEnum):
     OFF = "off"
-    # Plans and shows what it would send; sends nothing, also in live mode.
+    # Plans and shows what it would do; sends nothing, also in live mode.
     PREVIEW = "preview"
-    # Carries the plan out through the write gate (which still blocks in demo mode).
+    # Carries the plan out through the write gate; comes with 1.4.0.
     CONTROL = "control"
 
 
-class TariffKind(StrEnum):
-    FIXED = "fixed"
-    # Spot market price from a Home Assistant sensor (epex_spot).
-    DYNAMIC = "dynamic"
-    # Fixed price with time-variable grid fees (§14a EnWG, module 3): three prices by time window.
-    FIXED_14A = "fixed_14a"
+# Stages the app offers in this version: 1.3.0 only observes, learns and plans.
+AVAILABLE_MODES = frozenset({PlannerMode.OFF, PlannerMode.PREVIEW})
 
 
 class WeatherSource(StrEnum):
-    HOME_ASSISTANT = "home_assistant"
+    # Open-Meteo with DWD's ICON models; the Home Assistant weather entity is the fallback.
     OPEN_METEO = "open_meteo"
+    HOME_ASSISTANT = "home_assistant"
+
+
+class ZoneKind(StrEnum):
+    # Floor heating with a mixer: slow, stores heat (the user's zone 1).
+    FLOOR = "floor"
+    # Radiators, often with thermostats (the user's zone 2).
+    RADIATOR = "radiator"
 
 
 @dataclass(frozen=True, slots=True)
-class TimeWindow:
-    """Local time of day; end before start crosses midnight."""
-
-    start: time
-    end: time
-
-    def contains(self, moment: time) -> bool:
-        if self.start <= self.end:
-            return self.start <= moment < self.end
-        return moment >= self.start or moment < self.end
-
-
-@dataclass(frozen=True, slots=True)
-class Tariff:
-    kind: TariffKind = TariffKind.FIXED
-    # ct/kWh. Fixed: the price; §14a: the price in standard time (ST).
-    price_ct: float | None = None
-    # Dynamic: sensor with the prices of today and tomorrow (epex_spot "Total Price").
-    price_entity: str | None = None
-    # Dynamic: added to the sensor's price, for a sensor with the bare market price.
-    surcharge_ct: float = 0.0
-    vat_percent: float = 0.0
-    # §14a: prices in high (HT) and low (NT) time, and their windows.
-    high_price_ct: float | None = None
-    low_price_ct: float | None = None
-    high_windows: tuple[TimeWindow, ...] = ()
-    low_windows: tuple[TimeWindow, ...] = ()
-    feed_in_ct: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ZoneLimits:
+class ZoneConfig:
     zone_id: str
-    up_k: float = 1.0
-    down_k: float = 1.0
+    kind: ZoneKind | None = None
+    # The circuit's flow temperature and the controller's flow setpoint (myVAILLANT circuit sensors).
+    flow_entity: str | None = None
+    flow_setpoint_entity: str | None = None
+    # Design values of the static balancing.
+    design_flow_c: float | None = None
+    design_return_c: float | None = None
+    # How far the planner may shift the zone's setpoint (quick veto from 1.4.0).
+    band_down_k: float | None = None
+    band_up_k: float | None = None
 
+    @property
+    def down_k(self) -> float:
+        if self.band_down_k is not None:
+            return self.band_down_k
+        # Radiator rooms may cool down more than a floor heating zone (1.4.0 start values).
+        return 2.0 if self.kind is ZoneKind.RADIATOR else 1.0
 
-DEFAULT_ZONE_UP_K = 1.0
-DEFAULT_ZONE_DOWN_K = 1.0
+    @property
+    def up_k(self) -> float:
+        if self.band_up_k is not None:
+            return self.band_up_k
+        return 2.0 if self.kind is not None else 1.0
+
+    @property
+    def lag_h(self) -> float:
+        """Start value of the delay between a change outside and its effect inside."""
+        return 3.0 if self.kind is ZoneKind.FLOOR else 1.0
 
 
 @dataclass(frozen=True, slots=True)
 class HemsSettings:
     mode: PlannerMode = PlannerMode.OFF
-    tariff: Tariff = Tariff()
-    # open_meteo_solar_forecast: energy_production_today / _tomorrow with the attribute "watts".
-    pv_forecast_today: str | None = None
-    pv_forecast_tomorrow: str | None = None
-    # Power of the whole house in W or kW, including the heat pump.
-    house_power: str | None = None
-    battery_soc: str | None = None
-    battery_capacity_kwh: float | None = None
-    battery_charge_kw: float | None = None
-    battery_min_soc: float = 10.0
-    weather_source: WeatherSource = WeatherSource.HOME_ASSISTANT
+    weather_source: WeatherSource = WeatherSource.OPEN_METEO
     weather_entity: str | None = None
     latitude: float | None = None
     longitude: float | None = None
-    # Zones not listed use the default limits.
-    zones: tuple[ZoneLimits, ...] = ()
-    # Hot water only goes up, to at most this setpoint.
-    dhw_max_c: float = 60.0
-    # Above this expected outdoor temperature the zones are not shifted.
+    # Heat of the day for heating and for hot water (myVAILLANT energy sensors), for learning.
+    heat_heating_entity: str | None = None
+    heat_dhw_entity: str | None = None
+    # Temperature of the buffer tank, shown and recorded.
+    buffer_entity: str | None = None
+    # The house from the static balancing: design outdoor temperature and heat load.
+    design_outdoor_c: float | None = None
+    heat_load_w: float | None = None
+    zones: tuple[ZoneConfig, ...] = ()
+    # Quick veto limits, used from 1.4.0: step and the least time between two changes.
+    step_k: float = 0.5
+    min_interval_min: int = 30
+    # Night setback: local window and the default allowed temperature loss of a room.
+    night_start: time = time(0, 0)
+    night_end: time = time(10, 0)
+    night_loss_k: float = 0.5
+    # Loss allowed when it avoids defrosts (pausing in risk hours).
+    defrost_loss_k: float = 1.0
+    # Goal for the compressor's starts per day.
+    target_starts: int = 10
+    # Days with a mean outdoor temperature above this are not heated.
     heating_limit_c: float = 15.0
+    # Block operation (long runs, long pauses) from this outdoor temperature up.
+    block_above_c: float = 5.0
+    # Commands to the Vaillant cloud per day (from 1.4.0): warning at 80 %, then only fallback.
+    cloud_commands_max: int = 100
+    # The user's automation: floor heating off below this power of the heat pump, on above.
+    zone1_threshold_w: float = 30.0
 
-    def zone_limits(self, zone_id: str) -> ZoneLimits:
-        return next(
-            (limits for limits in self.zones if limits.zone_id == zone_id),
-            ZoneLimits(zone_id=zone_id, up_k=DEFAULT_ZONE_UP_K, down_k=DEFAULT_ZONE_DOWN_K),
-        )
+    def zone(self, zone_id: str) -> ZoneConfig:
+        return next((zone for zone in self.zones if zone.zone_id == zone_id), ZoneConfig(zone_id=zone_id))
 
     def entities(self) -> frozenset[str]:
-        """The Home Assistant entities the planner reads."""
-        chosen = [
-            self.tariff.price_entity if self.tariff.kind is TariffKind.DYNAMIC else None,
-            self.pv_forecast_today,
-            self.pv_forecast_tomorrow,
-            self.house_power,
-            self.battery_soc,
-        ]
+        """The Home Assistant entities the energy management reads besides the rooms."""
+        chosen = [self.heat_heating_entity, self.heat_dhw_entity, self.buffer_entity]
+        for zone in self.zones:
+            chosen += [zone.flow_entity, zone.flow_setpoint_entity]
         return frozenset(entity for entity in chosen if entity)
 
 
@@ -147,62 +150,80 @@ def hems_from_json(raw: Any) -> HemsSettings:
         _LOGGER.warning("Settings: hems is not an object, using the defaults")
         return HemsSettings()
     defaults = HemsSettings()
+    mode = _enum(raw, "mode", PlannerMode, defaults.mode)
+    if mode not in AVAILABLE_MODES:
+        # A planner of 1.1/1.2 in "control": this version only previews.
+        _LOGGER.warning("Settings: planner stage %s is not available in this version, using preview", mode)
+        mode = PlannerMode.PREVIEW
+    weather_source = raw.get("weather_source")
     return HemsSettings(
-        mode=_enum(raw, "mode", PlannerMode, defaults.mode),
-        tariff=_tariff(raw.get("tariff")),
-        pv_forecast_today=_entity(raw, "pv_forecast_today"),
-        pv_forecast_tomorrow=_entity(raw, "pv_forecast_tomorrow"),
-        house_power=_entity(raw, "house_power"),
-        battery_soc=_entity(raw, "battery_soc"),
-        battery_capacity_kwh=_number(raw, "battery_capacity_kwh", BATTERY_KWH),
-        battery_charge_kw=_number(raw, "battery_charge_kw", BATTERY_KW),
-        battery_min_soc=_value(raw, "battery_min_soc", PERCENT, defaults.battery_min_soc),
-        weather_source=_enum(raw, "weather_source", WeatherSource, defaults.weather_source),
+        mode=mode,
+        weather_source=(
+            _enum(raw, "weather_source", WeatherSource, defaults.weather_source)
+            if weather_source is not None
+            else defaults.weather_source
+        ),
         weather_entity=_entity(raw, "weather_entity"),
         latitude=_number(raw, "latitude", LATITUDE),
         longitude=_number(raw, "longitude", LONGITUDE),
+        heat_heating_entity=_sensor(raw, "heat_heating_entity"),
+        heat_dhw_entity=_sensor(raw, "heat_dhw_entity"),
+        buffer_entity=_sensor(raw, "buffer_entity"),
+        design_outdoor_c=_number(raw, "design_outdoor_c", DESIGN_OUTDOOR_C),
+        heat_load_w=_number(raw, "heat_load_w", HEAT_LOAD_W),
         zones=_zones(raw.get("zones")),
-        dhw_max_c=_value(raw, "dhw_max_c", DHW_MAX_C, defaults.dhw_max_c),
+        step_k=_value(raw, "step_k", STEP_K, defaults.step_k, step=0.5),
+        min_interval_min=int(_value(raw, "min_interval_min", INTERVAL_MIN, defaults.min_interval_min, step=1)),
+        night_start=_time(raw, "night_start", defaults.night_start),
+        night_end=_time(raw, "night_end", defaults.night_end),
+        night_loss_k=_value(raw, "night_loss_k", LOSS_K, defaults.night_loss_k, step=0.1),
+        defrost_loss_k=_value(raw, "defrost_loss_k", LOSS_K, defaults.defrost_loss_k, step=0.1),
+        target_starts=int(_value(raw, "target_starts", TARGET_STARTS, defaults.target_starts, step=1)),
         heating_limit_c=_value(raw, "heating_limit_c", HEATING_LIMIT_C, defaults.heating_limit_c),
+        block_above_c=_value(raw, "block_above_c", BLOCK_ABOVE_C, defaults.block_above_c),
+        cloud_commands_max=int(_value(raw, "cloud_commands_max", CLOUD_COMMANDS, defaults.cloud_commands_max, step=1)),
+        zone1_threshold_w=_value(raw, "zone1_threshold_w", ZONE1_THRESHOLD_W, defaults.zone1_threshold_w),
     )
 
 
 def hems_to_json(settings: HemsSettings) -> dict[str, Any]:
-    tariff = settings.tariff
     return {
         "mode": settings.mode.value,
-        "tariff": {
-            "kind": tariff.kind.value,
-            "price_ct": tariff.price_ct,
-            "price_entity": tariff.price_entity,
-            "surcharge_ct": tariff.surcharge_ct,
-            "vat_percent": tariff.vat_percent,
-            "high_price_ct": tariff.high_price_ct,
-            "low_price_ct": tariff.low_price_ct,
-            "high_windows": [_window_to_json(window) for window in tariff.high_windows],
-            "low_windows": [_window_to_json(window) for window in tariff.low_windows],
-            "feed_in_ct": tariff.feed_in_ct,
-        },
-        "pv_forecast_today": settings.pv_forecast_today,
-        "pv_forecast_tomorrow": settings.pv_forecast_tomorrow,
-        "house_power": settings.house_power,
-        "battery_soc": settings.battery_soc,
-        "battery_capacity_kwh": settings.battery_capacity_kwh,
-        "battery_charge_kw": settings.battery_charge_kw,
-        "battery_min_soc": settings.battery_min_soc,
         "weather_source": settings.weather_source.value,
         "weather_entity": settings.weather_entity,
         "latitude": settings.latitude,
         "longitude": settings.longitude,
-        "zones": [{"zone_id": zone.zone_id, "up_k": zone.up_k, "down_k": zone.down_k} for zone in settings.zones],
-        "dhw_max_c": settings.dhw_max_c,
+        "heat_heating_entity": settings.heat_heating_entity,
+        "heat_dhw_entity": settings.heat_dhw_entity,
+        "buffer_entity": settings.buffer_entity,
+        "design_outdoor_c": settings.design_outdoor_c,
+        "heat_load_w": settings.heat_load_w,
+        "zones": [zone_to_json(zone) for zone in settings.zones],
+        "step_k": settings.step_k,
+        "min_interval_min": settings.min_interval_min,
+        "night_start": settings.night_start.strftime("%H:%M"),
+        "night_end": settings.night_end.strftime("%H:%M"),
+        "night_loss_k": settings.night_loss_k,
+        "defrost_loss_k": settings.defrost_loss_k,
+        "target_starts": settings.target_starts,
         "heating_limit_c": settings.heating_limit_c,
+        "block_above_c": settings.block_above_c,
+        "cloud_commands_max": settings.cloud_commands_max,
+        "zone1_threshold_w": settings.zone1_threshold_w,
     }
 
 
-def valid_shift(value: float) -> bool:
-    steps = value / SHIFT_STEP_K
-    return SHIFT_K[0] <= value <= SHIFT_K[1] and abs(steps - round(steps)) < 1e-9
+def zone_to_json(zone: ZoneConfig) -> dict[str, Any]:
+    return {
+        "zone_id": zone.zone_id,
+        "kind": zone.kind.value if zone.kind is not None else None,
+        "flow_entity": zone.flow_entity,
+        "flow_setpoint_entity": zone.flow_setpoint_entity,
+        "design_flow_c": zone.design_flow_c,
+        "design_return_c": zone.design_return_c,
+        "band_down_k": zone.band_down_k,
+        "band_up_k": zone.band_up_k,
+    }
 
 
 def parse_time(text: str) -> time | None:
@@ -211,73 +232,41 @@ def parse_time(text: str) -> time | None:
     return time(int(match.group(1)), int(match.group(2))) if match else None
 
 
-def _tariff(raw: Any) -> Tariff:
-    if raw is None:
-        return Tariff()
-    if not isinstance(raw, dict):
-        _LOGGER.warning("Settings: hems.tariff is not an object, using the defaults")
-        return Tariff()
-    defaults = Tariff()
-    return Tariff(
-        kind=_enum(raw, "kind", TariffKind, defaults.kind),
-        price_ct=_number(raw, "price_ct", PRICE_CT),
-        price_entity=_entity(raw, "price_entity"),
-        surcharge_ct=_value(raw, "surcharge_ct", PRICE_CT, 0.0),
-        vat_percent=_value(raw, "vat_percent", VAT_PERCENT, 0.0),
-        high_price_ct=_number(raw, "high_price_ct", PRICE_CT),
-        low_price_ct=_number(raw, "low_price_ct", PRICE_CT),
-        high_windows=_windows(raw.get("high_windows")),
-        low_windows=_windows(raw.get("low_windows")),
-        feed_in_ct=_number(raw, "feed_in_ct", FEED_IN_CT),
-    )
+def in_window(moment: time, start: time, end: time) -> bool:
+    """Local time of day in [start, end); an end before the start crosses midnight."""
+    if start == end:
+        return False
+    if start < end:
+        return start <= moment < end
+    return moment >= start or moment < end
 
 
-def _windows(raw: Any) -> tuple[TimeWindow, ...]:
-    if raw is None:
-        return ()
-    if not isinstance(raw, list):
-        _LOGGER.warning("Settings: time windows %r are not a list, ignored", raw)
-        return ()
-    windows: list[TimeWindow] = []
-    for item in raw[:WINDOWS_MAX]:
-        start = end = None
-        if isinstance(item, dict) and isinstance(item.get("start"), str) and isinstance(item.get("end"), str):
-            start, end = parse_time(item["start"]), parse_time(item["end"])
-        if start is None or end is None or start == end:
-            _LOGGER.warning("Settings: invalid time window %r ignored", item)
-            continue
-        windows.append(TimeWindow(start=start, end=end))
-    return tuple(windows)
-
-
-def _window_to_json(window: TimeWindow) -> dict[str, str]:
-    return {"start": window.start.strftime("%H:%M"), "end": window.end.strftime("%H:%M")}
-
-
-def _zones(raw: Any) -> tuple[ZoneLimits, ...]:
+def _zones(raw: Any) -> tuple[ZoneConfig, ...]:
     if raw is None:
         return ()
     if not isinstance(raw, list):
         _LOGGER.warning("Settings: hems.zones is not a list, ignored")
         return ()
-    zones: list[ZoneLimits] = []
-    for item in raw:
-        zone = None
-        if isinstance(item, dict):
-            zone_id, up_k, down_k = item.get("zone_id"), item.get("up_k"), item.get("down_k")
-            if (
-                isinstance(zone_id, str)
-                and ZONE_ID.match(zone_id)
-                and _is_number(up_k)
-                and _is_number(down_k)
-                and valid_shift(float(up_k))
-                and valid_shift(float(down_k))
-            ):
-                zone = ZoneLimits(zone_id=zone_id, up_k=float(up_k), down_k=float(down_k))
-        if zone is None:
-            _LOGGER.warning("Settings: invalid zone limits %r ignored", item)
-        elif all(other.zone_id != zone.zone_id for other in zones):
-            zones.append(zone)
+    zones: list[ZoneConfig] = []
+    for item in raw[:ZONES_MAX]:
+        if not isinstance(item, dict) or not isinstance(item.get("zone_id"), str) or not ZONE_ID.match(item["zone_id"]):
+            _LOGGER.warning("Settings: invalid zone %r ignored", item)
+            continue
+        if any(zone.zone_id == item["zone_id"] for zone in zones):
+            continue
+        kind = item.get("kind")
+        zones.append(
+            ZoneConfig(
+                zone_id=item["zone_id"],
+                kind=ZoneKind(kind) if kind in {member.value for member in ZoneKind} else None,
+                flow_entity=_sensor(item, "flow_entity"),
+                flow_setpoint_entity=_sensor(item, "flow_setpoint_entity"),
+                design_flow_c=_number(item, "design_flow_c", FLOW_C),
+                design_return_c=_number(item, "design_return_c", FLOW_C),
+                band_down_k=_number(item, "band_down_k", BAND_K, step=0.5),
+                band_up_k=_number(item, "band_up_k", BAND_K, step=0.5),
+            )
+        )
     return tuple(zones)
 
 
@@ -302,22 +291,48 @@ def _entity(raw: dict[str, Any], key: str) -> str | None:
     return None
 
 
-def _number(raw: dict[str, Any], key: str, allowed: tuple[float, float]) -> float | None:
+def _sensor(raw: dict[str, Any], key: str) -> str | None:
+    value = _entity(raw, key)
+    if value is not None and not SENSOR_ENTITY.match(value):
+        _LOGGER.warning("Settings: %r for hems.%s is not a sensor, ignored", value, key)
+        return None
+    return value
+
+
+def _time(raw: dict[str, Any], key: str, default: time) -> time:
+    value = raw.get(key)
+    if value is None:
+        return default
+    parsed = parse_time(value) if isinstance(value, str) else None
+    if parsed is None:
+        _LOGGER.warning("Settings: invalid time %r for hems.%s, using the default", value, key)
+        return default
+    return parsed
+
+
+def on_step(value: float, step: float) -> bool:
+    steps = value / step
+    return abs(steps - round(steps)) < 1e-6
+
+
+def _number(raw: dict[str, Any], key: str, allowed: tuple[float, float], *, step: float | None = None) -> float | None:
     """An optional number; None when it is missing or invalid."""
     value = raw.get(key)
     if value is None:
         return None
-    if _is_number(value) and allowed[0] <= float(value) <= allowed[1]:
+    if is_number(value) and allowed[0] <= float(value) <= allowed[1] and (step is None or on_step(float(value), step)):
         return float(value)
     _LOGGER.warning("Settings: hems.%s %r is out of range, ignored", key, value)
     return None
 
 
-def _value(raw: dict[str, Any], key: str, allowed: tuple[float, float], default: float) -> float:
+def _value(
+    raw: dict[str, Any], key: str, allowed: tuple[float, float], default: float, *, step: float | None = None
+) -> float:
     """A number with a default for when it is missing or invalid."""
-    value = _number(raw, key, allowed)
+    value = _number(raw, key, allowed, step=step)
     return default if value is None else value
 
 
-def _is_number(value: Any) -> TypeIs[int | float]:
+def is_number(value: Any) -> TypeIs[int | float]:
     return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)

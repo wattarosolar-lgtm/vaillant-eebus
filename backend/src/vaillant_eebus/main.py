@@ -152,7 +152,7 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> bool:
     zone = local_zone(config.time_zone)
     energy = EnergyMeter(state, config.data_dir, zone=zone)
     home_assistant = HomeAssistant(settings, state, energy, log, ha_client)
-    hems = HemsService(settings, state, gate, energy, home_assistant, log, config.data_dir, zone=zone)
+    hems = HemsService(settings, state, home_assistant, log, config.data_dir, zone=zone)
     restart = asyncio.Event()
     app = create_app(
         pairing,

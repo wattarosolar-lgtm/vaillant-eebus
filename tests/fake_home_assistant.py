@@ -4,8 +4,10 @@ Serves the parts of the REST and WebSocket API the app uses: states, the
 app's own sensors, the history of an entity, the home location, the service
 weather.get_forecasts, authentication,
 subscribe_trigger for state changes, subscribe_events for
-homeassistant_started, and a restart that drops every connection and every
-state the app set (the history stays, as in the recorder).
+homeassistant_started, the recorder's long-term statistics
+(recorder/statistics_during_period), and a restart that drops every connection
+and every state the app set (the history stays, as in the recorder). It also
+stands in for Open-Meteo (/v1/dwd-icon) with the hours in open_meteo.
 
 add_myvaillant() adds the entities of the myVAILLANT integration like the
 real installation (two zones, hot water, outdoor temperature, power); the
@@ -62,6 +64,13 @@ class FakeHomeAssistant:
         self.service_calls: list[tuple[str, dict[str, Any], dict[str, str]]] = []
         # domain.service -> HTTP status to answer instead of carrying the call out.
         self.service_status: dict[str, int] = {}
+        # Long-term statistics per entity: rows with "start" (datetime) and mean/min/max/change.
+        self.statistics: dict[str, list[dict[str, Any]]] = {}
+        # Every statistics request: (statistic IDs, start, end).
+        self.statistics_requests: list[tuple[list[str], datetime, datetime]] = []
+        # Open-Meteo stand-in: hourly values {"time": [unix seconds], "temperature_2m": [...], ...}.
+        self.open_meteo: dict[str, list[Any]] | None = None
+        self.open_meteo_requests: list[dict[str, str]] = []
         # Climate entity -> the setpoint of its time program (shown again after a quick veto).
         self.programs: dict[str, float] = {}
         # Seconds the Vaillant cloud lags behind: set, a device service shows the new value at
@@ -84,6 +93,7 @@ class FakeHomeAssistant:
         app.router.add_get("/api/config", self._get_config)
         app.router.add_post("/api/services/{domain}/{service}", self._call_service)
         app.router.add_get("/websocket", self._websocket)
+        app.router.add_get("/v1/dwd-icon", self._open_meteo)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         await web.TCPSite(self._runner, "127.0.0.1", port).start()
@@ -261,6 +271,12 @@ class FakeHomeAssistant:
         rows += [{"state": state, "last_changed": moment.isoformat()} for moment, state in items[1:]]
         return web.json_response([rows])
 
+    async def _open_meteo(self, request: web.Request) -> web.Response:
+        self.open_meteo_requests.append(dict(request.query))
+        if self.open_meteo is None:
+            return web.json_response({"error": True, "reason": "not available"}, status=400)
+        return web.json_response({"latitude": 52.52, "longitude": 13.4, "hourly": self.open_meteo})
+
     async def _get_config(self, request: web.Request) -> web.Response:
         if not self._authorized(request):
             return web.json_response({"message": "Unauthorized"}, status=401)
@@ -392,6 +408,26 @@ class FakeHomeAssistant:
             socket.subscriptions[command_id] = frozenset([entity_ids] if isinstance(entity_ids, str) else entity_ids)
         elif kind == "unsubscribe_events":
             socket.subscriptions.pop(command["subscription"], None)
+        elif kind == "recorder/statistics_during_period":
+            start = datetime.fromisoformat(command["start_time"])
+            end = datetime.fromisoformat(command["end_time"])
+            ids = list(command["statistic_ids"])
+            self.statistics_requests.append((ids, start, end))
+            result = {
+                entity_id: [
+                    {
+                        **{key: value for key, value in row.items() if key != "start"},
+                        "start": row["start"].timestamp() * 1000,
+                        "end": (row["start"] + timedelta(hours=1)).timestamp() * 1000,
+                    }
+                    for row in self.statistics[entity_id]
+                    if start <= row["start"] < end
+                ]
+                for entity_id in ids
+                if entity_id in self.statistics
+            }
+            await socket.ws.send_json({"id": command_id, "type": "result", "success": True, "result": result})
+            return
         else:
             await socket.ws.send_json(
                 {

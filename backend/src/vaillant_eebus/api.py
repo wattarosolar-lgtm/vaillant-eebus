@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from pathlib import Path, PurePath
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 import grpc
 from fastapi import FastAPI, Query, Request, Response
@@ -28,30 +28,49 @@ from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.ha_client import WEATHER_ENTITY, HomeAssistantUnavailable
 from vaillant_eebus.ha_import import HomeAssistantState
 from vaillant_eebus.hems.config import (
-    BATTERY_KW,
-    BATTERY_KWH,
-    DHW_MAX_C,
-    FEED_IN_CT,
+    BAND_K,
+    BLOCK_ABOVE_C,
+    CLOUD_COMMANDS,
+    DESIGN_OUTDOOR_C,
+    FLOW_C,
+    HEAT_LOAD_W,
     HEATING_LIMIT_C,
+    INTERVAL_MIN,
     LATITUDE,
     LONGITUDE,
-    PERCENT,
-    PRICE_CT,
-    SHIFT_K,
-    VAT_PERCENT,
-    WINDOWS_MAX,
+    LOSS_K,
+    STEP_K,
+    TARGET_STARTS,
+    ZONE1_THRESHOLD_W,
+    ZONES_MAX,
     PlannerMode,
-    TariffKind,
     WeatherSource,
+    ZoneKind,
     hems_from_json,
-    valid_shift,
+    on_step,
 )
-from vaillant_eebus.hems.service import HemsService, HemsStatus
+from vaillant_eebus.hems.service import HemsService, HemsStatus, ModeNotAvailable, PlanView, RoomsView, plan_csv
 from vaillant_eebus.history import PowerHistory
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
 from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID, is_own_entity
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore, csv_document
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
+from vaillant_eebus.room_data import (
+    COMFORT_K,
+    DESIGN_C,
+    EMERGENCY_C,
+    FLOW_LPH,
+    PRESETTING_MAX,
+    RATED_W,
+    ROOM_HEAT_LOAD_W,
+    ROOM_LOSS_K,
+    ROOM_SETPOINT_C,
+    SCHEDULE_MAX,
+    SURFACES_MAX,
+    RatedBasis,
+    SurfaceKind,
+    details_from_json,
+)
 from vaillant_eebus.settings import (
     HEAT_SENSORS_MAX,
     MYVAILLANT_ZONES_MAX,
@@ -152,6 +171,8 @@ class CompressorRequest(WriteRequest):
 # A zone's ID: the SPINE address of the zone's room entity (EEBUS, e.g. "5.1.1")
 # or its climate entity (myVAILLANT).
 ZoneId = Annotated[str, PathParam(pattern=ZONE_ID.pattern)]
+# A room: the entity of its temperature.
+RoomId = Annotated[str, PathParam(pattern=ENTITY_ID.pattern)]
 
 
 class MyVaillantModel(BaseModel):
@@ -193,46 +214,80 @@ class SettingsRequest(BaseModel):
 HHMM = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
 
 
-class TimeWindowModel(BaseModel):
-    start: str = Field(pattern=HHMM)
-    end: str = Field(pattern=HHMM)
+def _range(limits: tuple[float, float], default: float | None = None) -> Any:
+    return Field(default=default, allow_inf_nan=False, ge=limits[0], le=limits[1])
 
 
-class TariffModel(BaseModel):
-    kind: TariffKind
-    price_ct: float | None = Field(default=None, allow_inf_nan=False, ge=PRICE_CT[0], le=PRICE_CT[1])
-    price_entity: str | None = Field(default=None, pattern=ENTITY_ID.pattern)
-    surcharge_ct: float = Field(default=0.0, allow_inf_nan=False, ge=PRICE_CT[0], le=PRICE_CT[1])
-    vat_percent: float = Field(default=0.0, allow_inf_nan=False, ge=VAT_PERCENT[0], le=VAT_PERCENT[1])
-    high_price_ct: float | None = Field(default=None, allow_inf_nan=False, ge=PRICE_CT[0], le=PRICE_CT[1])
-    low_price_ct: float | None = Field(default=None, allow_inf_nan=False, ge=PRICE_CT[0], le=PRICE_CT[1])
-    high_windows: list[TimeWindowModel] = Field(default=[], max_length=WINDOWS_MAX)
-    low_windows: list[TimeWindowModel] = Field(default=[], max_length=WINDOWS_MAX)
-    feed_in_ct: float | None = Field(default=None, allow_inf_nan=False, ge=FEED_IN_CT[0], le=FEED_IN_CT[1])
-
-
-class ZoneLimitsModel(BaseModel):
+class ZoneConfigModel(BaseModel):
     zone_id: str = Field(pattern=ZONE_ID.pattern)
-    up_k: float = Field(allow_inf_nan=False, ge=SHIFT_K[0], le=SHIFT_K[1])
-    down_k: float = Field(allow_inf_nan=False, ge=SHIFT_K[0], le=SHIFT_K[1])
+    kind: ZoneKind | None = None
+    flow_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    flow_setpoint_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    design_flow_c: float | None = _range(FLOW_C)
+    design_return_c: float | None = _range(FLOW_C)
+    band_down_k: float | None = _range(BAND_K)
+    band_up_k: float | None = _range(BAND_K)
 
 
 class HemsSettingsRequest(BaseModel):
-    tariff: TariffModel
-    pv_forecast_today: str | None = Field(default=None, pattern=ENTITY_ID.pattern)
-    pv_forecast_tomorrow: str | None = Field(default=None, pattern=ENTITY_ID.pattern)
-    house_power: str | None = Field(default=None, pattern=ENTITY_ID.pattern)
-    battery_soc: str | None = Field(default=None, pattern=ENTITY_ID.pattern)
-    battery_capacity_kwh: float | None = Field(default=None, allow_inf_nan=False, ge=BATTERY_KWH[0], le=BATTERY_KWH[1])
-    battery_charge_kw: float | None = Field(default=None, allow_inf_nan=False, ge=BATTERY_KW[0], le=BATTERY_KW[1])
-    battery_min_soc: float = Field(default=10.0, allow_inf_nan=False, ge=PERCENT[0], le=PERCENT[1])
     weather_source: WeatherSource
     weather_entity: str | None = Field(default=None, pattern=WEATHER_ENTITY.pattern)
-    latitude: float | None = Field(default=None, allow_inf_nan=False, ge=LATITUDE[0], le=LATITUDE[1])
-    longitude: float | None = Field(default=None, allow_inf_nan=False, ge=LONGITUDE[0], le=LONGITUDE[1])
-    zones: list[ZoneLimitsModel] = Field(default=[], max_length=10)
-    dhw_max_c: float = Field(allow_inf_nan=False, ge=DHW_MAX_C[0], le=DHW_MAX_C[1])
-    heating_limit_c: float = Field(allow_inf_nan=False, ge=HEATING_LIMIT_C[0], le=HEATING_LIMIT_C[1])
+    latitude: float | None = _range(LATITUDE)
+    longitude: float | None = _range(LONGITUDE)
+    heat_heating_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    heat_dhw_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    buffer_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    design_outdoor_c: float | None = _range(DESIGN_OUTDOOR_C)
+    heat_load_w: float | None = _range(HEAT_LOAD_W)
+    zones: list[ZoneConfigModel] = Field(default=[], max_length=ZONES_MAX)
+    step_k: float = _range(STEP_K, 0.5)
+    min_interval_min: int = Field(default=30, ge=INTERVAL_MIN[0], le=INTERVAL_MIN[1])
+    night_start: str = Field(default="00:00", pattern=HHMM)
+    night_end: str = Field(default="10:00", pattern=HHMM)
+    night_loss_k: float = _range(LOSS_K, 0.5)
+    defrost_loss_k: float = _range(LOSS_K, 1.0)
+    target_starts: int = Field(default=10, ge=TARGET_STARTS[0], le=TARGET_STARTS[1])
+    heating_limit_c: float = _range(HEATING_LIMIT_C, 15.0)
+    block_above_c: float = _range(BLOCK_ABOVE_C, 5.0)
+    cloud_commands_max: int = Field(default=100, ge=CLOUD_COMMANDS[0], le=CLOUD_COMMANDS[1])
+    zone1_threshold_w: float = _range(ZONE1_THRESHOLD_W, 30.0)
+
+
+class SurfaceModel(BaseModel):
+    kind: SurfaceKind = SurfaceKind.RADIATOR
+    rated_w: float | None = _range(RATED_W)
+    rated_basis: RatedBasis = RatedBasis.T75_65
+    flow_lph: float | None = _range(FLOW_LPH)
+    presetting: str = Field(default="", max_length=PRESETTING_MAX)
+
+
+class ScheduleModel(BaseModel):
+    start: str = Field(pattern=HHMM)
+    end: str = Field(pattern=HHMM)
+    setpoint_c: float = _range(ROOM_SETPOINT_C, 20.0)
+
+
+class RoomDetailsRequest(BaseModel):
+    heat_load_w: float | None = _range(ROOM_HEAT_LOAD_W)
+    design_c: float | None = _range(DESIGN_C)
+    surfaces: list[SurfaceModel] = Field(default=[], max_length=SURFACES_MAX)
+    trv_entity: str | None = Field(default=None, pattern=CLIMATE_ENTITY.pattern)
+    valve_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    humidity_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    setpoint_c: float = _range(ROOM_SETPOINT_C, 20.0)
+    schedule: list[ScheduleModel] = Field(default=[], max_length=SCHEDULE_MAX)
+    comfort_down_k: float = _range(COMFORT_K, 0.5)
+    comfort_up_k: float = _range(COMFORT_K, 0.5)
+    night_loss_k: float | None = _range(ROOM_LOSS_K)
+    defrost_loss_k: float | None = _range(ROOM_LOSS_K)
+    throttle: bool = True
+    emergency_c: float | None = _range(EMERGENCY_C)
+
+
+def _check_steps(values: dict[str, float | None], step: float, unit: str) -> None:
+    for name, value in values.items():
+        if value is not None and not on_step(value, step):
+            raise WriteRejected(422, f"{name} geht nur in Schritten von {f'{step:g}'.replace('.', ',')} {unit}.")
 
 
 class HemsModeRequest(BaseModel):
@@ -451,8 +506,6 @@ def create_app(
         home_assistant.change_myvaillant(entities)
         before = home_assistant.settings.connection
         if request.connection is not gate.connection:
-            if hems is not None:
-                await hems.release("Wechsel der Anbindung")
             if gate.mode is OperatingMode.LIVE:
                 # The new way is checked in demo mode first; live needs a new confirmation.
                 gate.set_mode(OperatingMode.DEMO, confirm=False)
@@ -505,9 +558,6 @@ def create_app(
 
     @app.post("/api/mode")
     async def set_mode(request: ModeRequest) -> ModeStatus:
-        if request.mode is OperatingMode.DEMO and gate.mode is OperatingMode.LIVE and hems is not None:
-            # In demo mode nothing is sent any more, so the planner returns to the base values first.
-            await hems.release("Wechsel in den Demo-Betrieb")
         return ModeStatus(mode=gate.set_mode(request.mode, confirm=request.confirm))
 
     @app.post("/api/zones/{zone_id}/setpoint")
@@ -581,7 +631,16 @@ def create_app(
     @app.get("/api/ha/entities")
     async def get_ha_entities(
         kind: Literal[
-            "temperature", "energy", "power", "battery", "price", "pv_forecast", "weather", "climate", "water_heater"
+            "temperature",
+            "energy",
+            "power",
+            "percent",
+            "humidity",
+            "room",
+            "thermostat",
+            "weather",
+            "climate",
+            "water_heater",
         ],
         q: Annotated[str, Query(max_length=100)] = "",
     ) -> list[EntityChoice]:
@@ -601,12 +660,19 @@ def create_app(
     @app.put("/api/hems/settings")
     async def put_hems_settings(request: HemsSettingsRequest) -> HemsStatus:
         service = energy_management()
-        if not all(valid_shift(zone.up_k) and valid_shift(zone.down_k) for zone in request.zones):
-            raise WriteRejected(422, "Die Verschiebung der Zonen geht nur in Schritten von 0,5 K.")
+        _check_steps({"Die Schrittweite": request.step_k}, 0.5, "K")
+        for zone_config in request.zones:
+            _check_steps({"Das Band einer Zone": zone_config.band_down_k}, 0.5, "K")
+            _check_steps({"Das Band einer Zone": zone_config.band_up_k}, 0.5, "K")
+        _check_steps(
+            {"Der Verlust": request.night_loss_k, "Der Verlust bei Abtaurisiko": request.defrost_loss_k}, 0.1, "K"
+        )
         if len({zone.zone_id for zone in request.zones}) != len(request.zones):
             raise WriteRejected(422, "Jede Zone kann nur einmal eingestellt werden.")
-        if request.battery_soc is not None and not (request.battery_capacity_kwh and request.battery_charge_kw):
-            raise WriteRejected(422, "Für den Akku fehlen Kapazität oder Ladeleistung.")
+        if request.night_start == request.night_end:
+            raise WriteRejected(422, "Das Nachtfenster braucht verschiedene Zeiten für Beginn und Ende.")
+        if request.weather_source is WeatherSource.HOME_ASSISTANT and request.weather_entity is None:
+            raise WriteRejected(422, "Für die Wetter-Entität von Home Assistant bitte eine Entität wählen.")
         service.change_settings(hems_from_json(request.model_dump(mode="json")))
         await service.plan_now()
         return service.status()
@@ -614,9 +680,68 @@ def create_app(
     @app.post("/api/hems/mode")
     async def set_hems_mode(request: HemsModeRequest) -> HemsStatus:
         service = energy_management()
-        await service.set_mode(request.mode)
+        try:
+            await service.set_mode(request.mode)
+        except ModeNotAvailable:
+            raise WriteRejected(
+                409, "„Steuern“ kommt mit Version 1.4.0; diese Version beobachtet und plant nur."
+            ) from None
         await service.plan_now()
         return service.status()
+
+    @app.get("/api/hems/plan")
+    async def get_plan() -> PlanView:
+        return energy_management().plan_view()
+
+    @app.get("/api/hems/plan/export")
+    async def download_plan() -> Response:
+        filename = f"vaillant-eebus-plan-{datetime.now(zone):%Y%m%d-%H%M}.csv"
+        return Response(
+            content=plan_csv(energy_management().plan_view(), zone),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/rooms")
+    async def get_rooms() -> RoomsView:
+        return energy_management().rooms_view()
+
+    @app.put("/api/rooms/{entity_id}")
+    async def put_room(entity_id: RoomId, request: RoomDetailsRequest) -> RoomsView:
+        service = energy_management()
+        _check_steps(
+            {
+                "Das Raum-Soll": request.setpoint_c,
+                "Das Auslegungs-Soll": request.design_c,
+                "Der Notfallwert": request.emergency_c,
+                **{
+                    f"Das Soll im Zeitfenster {index}": window.setpoint_c
+                    for index, window in enumerate(request.schedule, 1)
+                },
+            },
+            0.5,
+            "°C",
+        )
+        _check_steps(
+            {
+                "Das Komfortband": request.comfort_down_k,
+                "Das Komfortband nach oben": request.comfort_up_k,
+                "Der Verlust nachts": request.night_loss_k,
+                "Der Verlust bei Abtaurisiko": request.defrost_loss_k,
+            },
+            0.1,
+            "K",
+        )
+        if any(window.start == window.end for window in request.schedule):
+            raise WriteRejected(422, "Ein Zeitfenster braucht verschiedene Zeiten für Beginn und Ende.")
+        try:
+            home_assistant.change_room(entity_id, details_from_json(request.model_dump(mode="json")))
+        except KeyError:
+            raise WriteRejected(
+                404, "Diesen Raum gibt es nicht (mehr). Räume legen Sie in den Einstellungen an."
+            ) from None
+        service.wake()
+        return service.rooms_view()
 
     @app.get("/api/history/power")
     async def get_power_history() -> PowerHistory:

@@ -9,10 +9,11 @@ heat pump through the myVAILLANT integration's entities. Those are called
 only by the write gate (write_gate.py through myvaillant.py; a test checks it).
 
 One WebSocket connection carries the state changes of the watched entities
-and the "homeassistant_started" event; the REST API serves single states, the
-history of an entity and the app's own sensors. Watched entities are also read again every few
-minutes, because a value reported unchanged moves only last_reported, which
-triggers no event.
+and the "homeassistant_started" event, and answers the reading of the
+recorder's long-term statistics (hourly means and changes, read only); the
+REST API serves single states, the history of an entity and the app's own
+sensors. Watched entities are also read again every few minutes, because a
+value reported unchanged moves only last_reported, which triggers no event.
 """
 
 from __future__ import annotations
@@ -54,6 +55,10 @@ DEVICE_SERVICES: dict[tuple[str, str], re.Pattern[str]] = {
 REFRESH_INTERVAL = 300.0
 # Seconds to wait for an answer of Home Assistant.
 REQUEST_TIMEOUT = 10.0
+# Reading a month of hourly statistics can take a while on a small machine.
+STATISTICS_TIMEOUT = 60.0
+# Statistics are read a month at a time; the answers can be large.
+WS_MAX_MESSAGE = 32 * 1024 * 1024
 # A device service waits for the Vaillant cloud and the integration's refresh after it.
 DEVICE_SERVICE_TIMEOUT = 30.0
 # Answers that mean Home Assistant refused the call before the integration acted.
@@ -77,6 +82,18 @@ class ServiceCallFailed(Exception):
         self.executed = executed
         # Short reason for the protocol, e.g. "HTTP 500" or "TIMEOUT".
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class StatisticRow:
+    """One hour (or day) of the recorder's long-term statistics."""
+
+    start: datetime
+    mean: float | None = None
+    min: float | None = None
+    max: float | None = None
+    # Increase of a counter within the period (energy sensors).
+    change: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +155,7 @@ class HomeAssistantClient:
         self._results: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._ids = itertools.count(1)
         self._connected = False
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
 
     async def __aenter__(self) -> HomeAssistantClient:
         # No session-wide timeout: it would also cut the long-lived WebSocket.
@@ -326,14 +344,16 @@ class HomeAssistantClient:
             raise HomeAssistantUnavailable("client not started")
         ws_url = re.sub(r"^http", "ws", self._url) + "/websocket"
         async with asyncio.timeout(REQUEST_TIMEOUT):
-            ws = await self._session.ws_connect(ws_url, heartbeat=30)
+            ws = await self._session.ws_connect(ws_url, heartbeat=30, max_msg_size=WS_MAX_MESSAGE)
         async with ws:
             await self._authenticate(ws)
             reader = asyncio.create_task(self._read(ws))
+            self._ws = ws
             try:
                 await self._command(ws, {"type": "subscribe_events", "event_type": "homeassistant_started"})
                 await self._follow(ws, reader)
             finally:
+                self._ws = None
                 reader.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await reader
@@ -398,16 +418,65 @@ class HomeAssistantClient:
 
     async def _command(self, ws: aiohttp.ClientWebSocketResponse, payload: dict[str, Any]) -> int:
         """Send a command and wait for its result; returns the command's ID."""
+        command_id, _ = await self._exchange(ws, payload, REQUEST_TIMEOUT)
+        return command_id
+
+    async def _exchange(
+        self, ws: aiohttp.ClientWebSocketResponse, payload: dict[str, Any], seconds: float
+    ) -> tuple[int, Any]:
+        """Send a command and wait for its result; returns the command's ID and the result."""
         command_id = next(self._ids)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._results[command_id] = future
-        await ws.send_json({"id": command_id, **payload})
-        async with asyncio.timeout(REQUEST_TIMEOUT):
-            result = await future
+        try:
+            await ws.send_json({"id": command_id, **payload})
+            async with asyncio.timeout(seconds):
+                result = await future
+        finally:
+            self._results.pop(command_id, None)
         if not result.get("success"):
             error = result.get("error") or {}
             raise HomeAssistantUnavailable(f"{payload['type']} refused: {error.get('message', error)}")
-        return command_id
+        return command_id, result.get("result")
+
+    async def statistics(
+        self, statistic_ids: Iterable[str], start: datetime, end: datetime, *, period: str = "hour"
+    ) -> dict[str, list[StatisticRow]]:
+        """The recorder's long-term statistics of these entities between start and end.
+
+        Reads only (recorder/statistics_during_period). Entities without
+        long-term statistics are missing from the answer.
+        """
+        ws = self._ws
+        if ws is None or not self._connected:
+            raise HomeAssistantUnavailable("not connected")
+        ids = sorted(set(statistic_ids))
+        if not ids:
+            return {}
+        try:
+            _, result = await self._exchange(
+                ws,
+                {
+                    "type": "recorder/statistics_during_period",
+                    "start_time": start.astimezone(UTC).isoformat(),
+                    "end_time": end.astimezone(UTC).isoformat(),
+                    "statistic_ids": ids,
+                    "period": period,
+                    "types": ["mean", "min", "max", "change"],
+                },
+                STATISTICS_TIMEOUT,
+            )
+        except (TimeoutError, aiohttp.ClientError, ConnectionError) as err:
+            raise HomeAssistantUnavailable(f"statistics: {err!r}") from err
+        if not isinstance(result, dict):
+            raise HomeAssistantUnavailable("unexpected answer to recorder/statistics_during_period")
+        rows: dict[str, list[StatisticRow]] = {}
+        for statistic_id, items in result.items():
+            if statistic_id not in ids or not isinstance(items, list):
+                continue
+            parsed = [row for item in items if (row := _statistic_row(item)) is not None]
+            rows[statistic_id] = sorted(parsed, key=lambda row: row.start)
+        return rows
 
     async def _read(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         async for message in ws:
@@ -451,6 +520,30 @@ class HomeAssistantClient:
     def _record(self, message: str, *, problem: bool = False) -> None:
         if self._log is not None:
             self._log.add(LogCategory.CONNECTION, message, problem=problem)
+
+
+def _statistic_row(item: Any) -> StatisticRow | None:
+    if not isinstance(item, dict):
+        return None
+    start = item.get("start")
+    # Milliseconds since 1970 (HA 2023.3+), earlier an ISO string.
+    moment = (
+        datetime.fromtimestamp(start / 1000, UTC)
+        if isinstance(start, int | float) and not isinstance(start, bool)
+        else _time(start)
+    )
+    if moment is None:
+        return None
+
+    def number(key: str) -> float | None:
+        value = item.get(key)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        return float(value) if value == value and abs(value) != float("inf") else None
+
+    return StatisticRow(
+        start=moment, mean=number("mean"), min=number("min"), max=number("max"), change=number("change")
+    )
 
 
 def _check_own(entity_id: str) -> None:

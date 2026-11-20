@@ -16,11 +16,12 @@ from vaillant_eebus.energy import EnergyMeter, EnergyToday
 from vaillant_eebus.ha_client import EntityState, HomeAssistantClient, HomeAssistantUnavailable
 from vaillant_eebus.ha_export import PREFIX, HomeAssistantExport
 from vaillant_eebus.ha_import import HeatToday, HomeAssistantImport, HomeAssistantState, ValueStatus
-from vaillant_eebus.hems.inputs import HemsEntities
+from vaillant_eebus.hems.sources import HemsSources
 from vaillant_eebus.history import HistoryGap, PowerHistory, bucket_means, first_bucket
 from vaillant_eebus.ids import is_own_entity
 from vaillant_eebus.log_store import LogCategory, LogStore
-from vaillant_eebus.myvaillant import MyVaillantState, discover, zone_label
+from vaillant_eebus.myvaillant import MyVaillantState, discover, is_zone, zone_label
+from vaillant_eebus.room_data import RoomDetails
 from vaillant_eebus.settings import Connection, ExportGroup, MyVaillantEntities, Room, Settings, SettingsStore
 from vaillant_eebus.state import StateHub
 
@@ -33,18 +34,18 @@ POWER_SENSOR = f"sensor.{PREFIX}power"
 # The history is read from Home Assistant at most this often; several open pages share it.
 HISTORY_CACHE = timedelta(seconds=60)
 
-# Units that make a sensor a candidate for a room, the heat of the day, the house's power or the battery.
+# Units that make a sensor a candidate for a room, the heat of the day, a power or a valve position.
 _KIND_UNITS = {
     "temperature": frozenset({"°C", "°F"}),
     "energy": frozenset({"Wh", "kWh", "MWh"}),
     "power": frozenset({"W", "kW"}),
-    "battery": frozenset({"%"}),
+    "percent": frozenset({"%"}),
 }
-# Kinds recognized by an attribute: epex_spot prices and open_meteo_solar_forecast forecasts.
-_KIND_ATTRIBUTES = {"price": ("data", list), "pv_forecast": ("watts", dict)}
 # Entity domains offered as they are: the weather forecast and the myVAILLANT zones and hot water.
 _KIND_DOMAINS = {"weather": "weather.", "climate": "climate.", "water_heater": "water_heater."}
-ENTITY_KINDS = (*_KIND_UNITS, *_KIND_ATTRIBUTES, *_KIND_DOMAINS)
+# A room's temperature: a temperature sensor or a radiator thermostat; a thermostat; the humidity.
+_KIND_SPECIAL = ("room", "thermostat", "humidity")
+ENTITY_KINDS = (*_KIND_UNITS, *_KIND_DOMAINS, *_KIND_SPECIAL)
 MAX_CHOICES = 200
 
 _EXPORT_NAMES = {
@@ -67,14 +68,33 @@ class EntityChoice:
     unit: str | None
 
 
+def _is_thermostat(entity: EntityState) -> bool:
+    """A climate entity that is not a myVAILLANT zone, e.g. a radiator thermostat."""
+    return entity.entity_id.startswith("climate.") and not is_zone(entity)
+
+
+def _is_humidity(entity: EntityState) -> bool:
+    return entity.attributes.get("unit_of_measurement") == "%" and (
+        entity.attributes.get("device_class") == "humidity"
+        or any(name in entity.entity_id for name in ("humidity", "feuchte"))
+    )
+
+
 def _is_kind(entity: EntityState, kind: str) -> bool:
     if kind in _KIND_DOMAINS:
         return entity.entity_id.startswith(_KIND_DOMAINS[kind])
+    if kind in ("room", "thermostat") and _is_thermostat(entity):
+        return True
     if not entity.entity_id.startswith("sensor.") or entity.entity_id.startswith(f"sensor.{PREFIX}"):
         return False
-    if kind in _KIND_ATTRIBUTES:
-        attribute, kind_type = _KIND_ATTRIBUTES[kind]
-        return isinstance(entity.attributes.get(attribute), kind_type)
+    if kind == "room":
+        return entity.attributes.get("unit_of_measurement") in _KIND_UNITS["temperature"]
+    if kind == "humidity":
+        return _is_humidity(entity)
+    if kind == "percent":
+        return entity.attributes.get("unit_of_measurement") == "%" and not _is_humidity(entity)
+    if kind == "thermostat":
+        return False
     return entity.attributes.get("unit_of_measurement") in _KIND_UNITS[kind]
 
 
@@ -113,7 +133,7 @@ class HomeAssistant:
         self._clock = clock
         self._history: tuple[datetime, PowerHistory] | None = None
         self.importer = HomeAssistantImport(settings, available=client is not None, on_change=state.republish)
-        self.hems_entities = HemsEntities(settings)
+        self.hems_sources = HemsSources(settings)
         self.exporter = (
             HomeAssistantExport(client, state, energy, self.importer, settings) if client is not None else None
         )
@@ -121,7 +141,7 @@ class HomeAssistant:
         self.device = state if isinstance(state, MyVaillantState) else None
         if client is not None:
             client.add_listener(self.importer)
-            client.add_listener(self.hems_entities)
+            client.add_listener(self.hems_sources)
             if self.device is not None:
                 client.add_listener(self.device)
             if self.exporter is not None:
@@ -138,14 +158,14 @@ class HomeAssistant:
         return self._client
 
     def watch(self) -> None:
-        """Follow the entities of the current settings: rooms, heat, the planner's inputs and the
-        myVAILLANT entities."""
+        """Follow the entities of the current settings: rooms, heat, the energy management's inputs and
+        the myVAILLANT entities."""
         if self._client is not None:
             device = self.device.watched() if self.device is not None else frozenset()
-            self._client.watch(self.importer.watched() | self.hems_entities.watched() | device)
+            self._client.watch(self.importer.watched() | self.hems_sources.watched() | device)
 
     def entity_state(self, entity_id: str | None) -> EntityState | None:
-        return self.hems_entities.get(entity_id)
+        return self.hems_sources.get(entity_id)
 
     async def history(self, entity_id: str, start: datetime, end: datetime) -> list[tuple[datetime, str]]:
         """Recorded states of any entity, read a day at a time to keep the answers small."""
@@ -177,8 +197,8 @@ class HomeAssistant:
             tasks.create_task(self.exporter.run())
 
     async def entities(self, kind: str, query: str) -> list[EntityChoice]:
-        """Entities to choose from: temperatures for rooms, energy for the heat of the day, and the
-        planner's inputs (power, battery, prices, PV forecast, weather)."""
+        """Entities to choose from: rooms, energy for the heat of the day, the myVAILLANT entities and
+        the energy management's inputs (thermostats, humidity, valves, weather)."""
         if self._client is None:
             raise HomeAssistantUnavailable("no Supervisor token")
         needle = query.strip().lower()
@@ -332,9 +352,15 @@ class HomeAssistant:
     ) -> Settings:
         """Save the user's Home Assistant choices and follow them at once."""
         before = self._settings.current
-        # The UI edits the zones of the current connection; each room keeps its zone for the other one.
-        others = {room.entity_id: room.other_zone_id for room in before.rooms}
-        rooms = tuple(replace(room, other_zone_id=others.get(room.entity_id)) for room in rooms)
+        # The UI edits the zones of the current connection; each room keeps its zone for the other one
+        # and what the user entered for it on the page "Räume".
+        known = {room.entity_id: room for room in before.rooms}
+        rooms = tuple(
+            replace(room, other_zone_id=known[room.entity_id].other_zone_id, details=known[room.entity_id].details)
+            if room.entity_id in known
+            else room
+            for room in rooms
+        )
         after = self._settings.update(
             lambda settings: replace(settings, rooms=rooms, heat_energy_entities=heat_energy_entities, export=export)
         )
@@ -351,6 +377,24 @@ class HomeAssistant:
             self.exporter.refresh()
         self._state.republish()
         return after
+
+    def change_room(self, entity_id: str, details: RoomDetails) -> Room:
+        """Save what the user entered for one room (page "Räume"); KeyError for an unknown room."""
+        before = self._settings.current
+        room = next((room for room in before.rooms if room.entity_id == entity_id), None)
+        if room is None:
+            raise KeyError(entity_id)
+        if room.details == details:
+            return room
+        changed = replace(room, details=details)
+        self._settings.update(
+            lambda settings: replace(
+                settings, rooms=tuple(changed if item.entity_id == entity_id else item for item in settings.rooms)
+            )
+        )
+        self._log.add(LogCategory.SETTINGS, f"Raumdaten geändert: {room.name}.")
+        self.watch()
+        return changed
 
     def _describe_rooms(self, rooms: tuple[Room, ...]) -> str:
         heat_pump = self._state.current

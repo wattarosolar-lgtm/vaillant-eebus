@@ -5,6 +5,10 @@ average of a zone's valid rooms stands in for the gateway's room temperature,
 which is unreliable on the real installation. Optionally a sensor with the
 heat produced today. A value counts only while it is a number in a known unit,
 not unavailable and reported within the last 30 minutes.
+
+A room without a sensor takes its temperature from its radiator thermostat
+(climate entity, current_temperature). That value is measured at the radiator,
+too warm while it heats, so it is shown but left out of the zone's average.
 """
 
 from __future__ import annotations
@@ -111,10 +115,11 @@ class HomeAssistantImport(HomeAssistantListener):
         now = self._clock()
         settings = self._settings.current
         rooms = [self._room(room.entity_id, room.name, room.zone_id, now) for room in settings.rooms]
+        at_thermostat = {room.entity_id for room in settings.rooms if room.measured_at_thermostat}
         zone_ids = sorted({room.zone_id for room in settings.rooms if room.zone_id is not None})
         zones = []
         for zone_id in zone_ids:
-            assigned = [room for room in rooms if room.zone_id == zone_id]
+            assigned = [room for room in rooms if room.zone_id == zone_id and room.entity_id not in at_thermostat]
             valid = [room.celsius for room in assigned if room.status is ValueStatus.OK and room.celsius is not None]
             zones.append(
                 ZoneAverage(
@@ -161,9 +166,7 @@ class HomeAssistantImport(HomeAssistantListener):
 
     def _room(self, entity_id: str, name: str, zone_id: str | None, now: datetime) -> RoomReading:
         state = self._states.get(entity_id)
-        value = _number(state)
-        convert = _TO_CELSIUS.get(str(state.attributes.get("unit_of_measurement"))) if state else None
-        celsius = round(convert(value), 2) if convert is not None and value is not None else None
+        celsius = room_celsius(state)
         reported_at = state.last_reported if state else None
         return RoomReading(
             entity_id=entity_id,
@@ -216,6 +219,27 @@ class HomeAssistantImport(HomeAssistantListener):
 
 
 _SEVERITY = {ValueStatus.OK: 0, ValueStatus.STALE: 1, ValueStatus.UNAVAILABLE: 2}
+
+
+def room_celsius(state: EntityState | None) -> float | None:
+    """A room's temperature: a sensor's value, or a thermostat's current_temperature."""
+    if state is None:
+        return None
+    if state.entity_id.startswith("climate."):
+        if state.state in ("unavailable", "unknown", ""):
+            return None
+        value = _finite(state.attributes.get("current_temperature"))
+        return round(value, 2) if value is not None else None
+    value = _number(state)
+    convert = _TO_CELSIUS.get(str(state.attributes.get("unit_of_measurement")))
+    return round(convert(value), 2) if convert is not None and value is not None else None
+
+
+def _finite(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    return number if number == number and abs(number) != float("inf") else None
 
 
 def _number(state: EntityState | None) -> float | None:

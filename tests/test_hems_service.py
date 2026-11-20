@@ -1,337 +1,544 @@
-"""The energy management end to end: Home Assistant inputs, weather, the plan, the API and the sensors."""
+"""The energy management end to end with the fake Home Assistant: statistics, forecast, plan, API, sensors."""
 
 from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import json
-from collections.abc import AsyncIterator
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta, timezone
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-from aiohttp import web
 
-from tests.fake_bridge import GATEWAY_SKI, FakeBridge
-from tests.fake_home_assistant import TOKEN, FakeHomeAssistant
+from tests.fake_home_assistant import MV_HOT_WATER, MV_OUTDOOR, MV_POWER, MV_ZONE_1, MV_ZONE_2, TOKEN, FakeHomeAssistant
 from tests.support import eventually
 from vaillant_eebus import ha_client as ha_client_module
+from vaillant_eebus import hems as hems_package
 from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_client import Backoff, BridgeClient
 from vaillant_eebus.energy import EnergyMeter
 from vaillant_eebus.ha_client import HomeAssistantClient
-from vaillant_eebus.hems.config import HemsSettings, PlannerMode, Tariff, TariffKind, WeatherSource
-from vaillant_eebus.hems.days import DayRecorder
-from vaillant_eebus.hems.planner import Action, Block, Plan
+from vaillant_eebus.hems.config import HemsSettings, PlannerMode, WeatherSource, ZoneConfig, ZoneKind
 from vaillant_eebus.hems.service import HemsService
-from vaillant_eebus.hems.weather import WeatherForecasts
 from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogCategory, LogStore
-from vaillant_eebus.pairing import PairingService
-from vaillant_eebus.settings import ExportGroup, OperatingMode, SettingsStore
+from vaillant_eebus.myvaillant import MyVaillantLink, MyVaillantState
+from vaillant_eebus.pairing import ConnectionState, PairingService
+from vaillant_eebus.room_data import RoomDetails
+from vaillant_eebus.settings import Connection, ExportGroup, MyVaillantEntities, Room, SettingsStore
 from vaillant_eebus.state import StateService
 from vaillant_eebus.write_gate import WriteGate
 
-BERLIN = timezone(timedelta(hours=2), "CEST")
-# Wednesday 21.10.2026, 07:00 local.
-NOW = datetime(2026, 10, 21, 5, 0, tzinfo=UTC)
+HEAT = "sensor.heat_heating"
+HEAT_DHW = "sensor.heat_dhw"
+ROOM_A = "sensor.room_a_temperature"
+ROOM_A_HUMIDITY = "sensor.room_a_humidity"
+ROOM_A_VALVE = "sensor.trv_room_a_position"
+ROOM_A_TRV = "climate.trv_room_a"
+BATH_TRV = "climate.trv_bath"
+FLOW_2 = "sensor.circuit_1_flow_temperature"
 
 
 class Clock:
     def __init__(self) -> None:
-        self.now = NOW
+        self.now = datetime.now(UTC).replace(microsecond=0)
 
     def __call__(self) -> datetime:
         return self.now
 
 
-@pytest.fixture
-def clock() -> Clock:
-    return Clock()
+@dataclass
+class App:
+    fake: FakeHomeAssistant
+    settings: SettingsStore
+    device: MyVaillantState
+    home: HomeAssistant
+    hems: HemsService
+    log: LogStore
+    clock: Clock
+    http: httpx.AsyncClient
 
 
-@pytest.fixture
-async def ha_client(fake_ha: FakeHomeAssistant, log_store: LogStore) -> AsyncIterator[HomeAssistantClient]:
-    async with HomeAssistantClient(
-        fake_ha.url, TOKEN, log=log_store, backoff=Backoff(initial=0.05, maximum=0.2)
-    ) as client:
-        yield client
-
-
-@pytest.fixture
-async def connected(pairing: PairingService, fake_bridge: FakeBridge, state: StateService) -> StateService:
-    await pairing.pair(GATEWAY_SKI)
-    fake_bridge.device.connect(GATEWAY_SKI)
-    await state.refresh(GATEWAY_SKI)
-    return state
-
-
-def forecast_hours(start: datetime, celsius: float, hours: int = 72) -> list[dict[str, Any]]:
+def statistics_rows(now: datetime, days: int, value: Any) -> list[dict[str, Any]]:
+    start = (now - timedelta(days=days)).replace(minute=0, second=0, microsecond=0)
     return [
-        {"datetime": (start + timedelta(hours=hour)).isoformat(), "temperature": celsius, "condition": "cloudy"}
-        for hour in range(hours)
+        {"start": start + timedelta(hours=hour), **value(start + timedelta(hours=hour))} for hour in range(days * 24)
     ]
 
 
-def sunny_forecast(day: str) -> dict[str, float]:
-    """PV power over a day: 3 kW from 11:00 to 15:00 local."""
+def open_meteo_hours(now: datetime, celsius: float = 4.0) -> dict[str, list[Any]]:
+    start = int((now - timedelta(days=7)).replace(minute=0, second=0, microsecond=0).timestamp())
+    hours = 10 * 24
     return {
-        f"{day}T10:00:00+02:00": 0.0,
-        f"{day}T11:00:00+02:00": 3000.0,
-        f"{day}T15:00:00+02:00": 3000.0,
-        f"{day}T16:00:00+02:00": 0.0,
+        "time": [start + 3600 * hour for hour in range(hours)],
+        "temperature_2m": [celsius] * hours,
+        "relative_humidity_2m": [85.0] * hours,
+        "dew_point_2m": [1.5] * hours,
+        "wind_speed_10m": [3.0] * hours,
+        "shortwave_radiation": [0.0] * hours,
+        "cloud_cover": [90.0] * hours,
+        "precipitation": [0.0] * hours,
+        "snowfall": [0.0] * hours,
     }
 
 
-def configure(fake_ha: FakeHomeAssistant, settings: SettingsStore, **changes: Any) -> None:
-    """Home Assistant with PV forecast, house power and weather, and settings that use them."""
-    fake_ha.set("sensor.pv_today", "8.5", unit="kWh", attributes={"watts": sunny_forecast("2026-10-21")})
-    fake_ha.set("sensor.pv_tomorrow", "9.1", unit="kWh", attributes={"watts": sunny_forecast("2026-10-22")})
-    fake_ha.set("sensor.house", "600", unit="W", reported=NOW - timedelta(days=8))
-    fake_ha.history["sensor.house"] = [(NOW - timedelta(days=8), "600")]
-    fake_ha.set("weather.home", "cloudy", attributes={"temperature_unit": "°C"})
-    fake_ha.forecasts["weather.home"] = forecast_hours(NOW.replace(minute=0), 6.0)
+def prepare(fake: FakeHomeAssistant, now: datetime) -> None:
+    """Rooms, thermostats, statistics of 20 days and Open-Meteo, all invented."""
+    fake.add_myvaillant()
+    fake.set(ROOM_A, "21.0", unit="°C", name="Raum A Temperatur")
+    fake.set(ROOM_A_HUMIDITY, "48", unit="%", name="Raum A Feuchte", attributes={"device_class": "humidity"})
+    fake.set(ROOM_A_VALVE, "35", unit="%", name="Thermostat Raum A Ventil")
+    fake.set(
+        ROOM_A_TRV, "heat", name="Thermostat Raum A", attributes={"temperature": 21.0, "current_temperature": 21.4}
+    )
+    fake.set(BATH_TRV, "heat", name="Thermostat Bad", attributes={"temperature": 22.0, "current_temperature": 22.6})
+    fake.set(HEAT, "8.5", unit="kWh", name="Wärme Heizen")
+    fake.set(HEAT_DHW, "1.5", unit="kWh", name="Wärme Warmwasser")
+    fake.set(FLOW_2, "33.0", unit="°C", name="Vorlauf Kreis 1")
+
+    def outdoor_at(hour: datetime) -> float:
+        # A cold and a mild week, so the heat loss can be learned.
+        return 2.0 + (hour.day % 7) * 1.5
+
+    fake.statistics[MV_OUTDOOR] = statistics_rows(now, 20, lambda hour: {"mean": outdoor_at(hour)})
+    fake.statistics[ROOM_A] = statistics_rows(now, 20, lambda _hour: {"mean": 21.0})
+    # 160 W/K, no gains: kWh per hour = 0.16 * (21 - outside).
+    fake.statistics[HEAT] = statistics_rows(now, 20, lambda hour: {"change": 0.16 * (21.0 - outdoor_at(hour))})
+    fake.statistics[HEAT_DHW] = statistics_rows(now, 20, lambda hour: {"change": 0.08})
+    fake.statistics[MV_POWER] = statistics_rows(
+        now, 20, lambda hour: {"mean": 160 * (21.0 - outdoor_at(hour)) / (2.5 + 0.1 * outdoor_at(hour))}
+    )
+    fake.statistics[FLOW_2] = statistics_rows(now, 20, lambda hour: {"mean": 37.0 - 0.5 * outdoor_at(hour)})
+    fake.open_meteo = open_meteo_hours(now)
+
+
+def configure(settings: SettingsStore, **changes: Any) -> None:
     hems = HemsSettings(
         mode=PlannerMode.PREVIEW,
-        tariff=Tariff(kind=TariffKind.FIXED, price_ct=30.0, feed_in_ct=8.0),
-        pv_forecast_today="sensor.pv_today",
-        pv_forecast_tomorrow="sensor.pv_tomorrow",
-        house_power="sensor.house",
-        weather_source=WeatherSource.HOME_ASSISTANT,
-        weather_entity="weather.home",
+        weather_source=WeatherSource.OPEN_METEO,
+        latitude=52.5234,
+        longitude=13.4049,
+        heat_heating_entity=HEAT,
+        heat_dhw_entity=HEAT_DHW,
+        zones=(
+            ZoneConfig(MV_ZONE_1, kind=ZoneKind.FLOOR),
+            ZoneConfig(MV_ZONE_2, kind=ZoneKind.RADIATOR, flow_entity=FLOW_2),
+        ),
     )
-    settings.update(lambda current: replace(current, hems=replace(hems, **changes)))
-
-
-def service(
-    settings: SettingsStore,
-    state: StateService,
-    gate: WriteGate,
-    energy: EnergyMeter,
-    home_assistant: HomeAssistant,
-    log: LogStore,
-    data_dir: Path,
-    clock: Clock,
-    *,
-    open_meteo_url: str = "http://127.0.0.1:9/never",
-) -> HemsService:
-    return HemsService(
-        settings,
-        state,
-        gate,
-        energy,
-        home_assistant,
-        log,
-        data_dir,
-        zone=BERLIN,
-        clock=clock,
-        open_meteo_url=open_meteo_url,
+    rooms = (
+        Room(
+            entity_id=ROOM_A,
+            name="Raum A",
+            zone_id=MV_ZONE_2,
+            details=RoomDetails(
+                heat_load_w=600,
+                trv_entity=ROOM_A_TRV,
+                valve_entity=ROOM_A_VALVE,
+                humidity_entity=ROOM_A_HUMIDITY,
+                setpoint_c=21.0,
+                night_loss_k=1.0,
+            ),
+        ),
+        Room(entity_id=BATH_TRV, name="Bad", zone_id=MV_ZONE_2),
+    )
+    settings.update(
+        lambda current: replace(
+            current,
+            connection=Connection.MYVAILLANT,
+            myvaillant=MyVaillantEntities(
+                zones=(MV_ZONE_1, MV_ZONE_2), hot_water=MV_HOT_WATER, outdoor_temperature=MV_OUTDOOR, power=MV_POWER
+            ),
+            rooms=rooms,
+            hems=replace(hems, **changes),
+        )
     )
 
 
 @pytest.fixture
-def ha_with_client(
-    settings_store: SettingsStore,
-    connected: StateService,
-    energy_meter: EnergyMeter,
-    log_store: LogStore,
-    ha_client: HomeAssistantClient,
-) -> HomeAssistant:
-    return HomeAssistant(settings_store, connected, energy_meter, log_store, ha_client)
-
-
-async def follow(home_assistant: HomeAssistant, ha_client: HomeAssistantClient) -> asyncio.Task[None]:
-    """Start the client and wait until the planner's entities are read."""
-    home_assistant.watch()
-    task = asyncio.create_task(ha_client.run())
-    await eventually(lambda: home_assistant.entity_state("sensor.pv_tomorrow") is not None)
-    return task
-
-
-# --- the plan from Home Assistant's data ---------------------------------------------
-
-
-async def test_a_sunny_forecast_plans_hot_water_and_preheating(
+async def app(
     fake_ha: FakeHomeAssistant,
     settings_store: SettingsStore,
-    connected: StateService,
-    gate: WriteGate,
-    energy_meter: EnergyMeter,
-    ha_with_client: HomeAssistant,
-    ha_client: HomeAssistantClient,
     log_store: LogStore,
+    bridge_client: BridgeClient,
+    pairing: PairingService,
     tmp_path: Path,
-    clock: Clock,
-) -> None:
-    configure(fake_ha, settings_store)
-    hems = service(settings_store, connected, gate, energy_meter, ha_with_client, log_store, tmp_path, clock)
-    task = await follow(ha_with_client, ha_client)
-    try:
-        await hems.plan_now()
-    finally:
+) -> AsyncIterator[App]:
+    clock = Clock()
+    prepare(fake_ha, clock.now)
+    configure(settings_store)
+    async with HomeAssistantClient(
+        fake_ha.url, TOKEN, log=log_store, backoff=Backoff(initial=0.05, maximum=0.2), refresh_interval=60
+    ) as client:
+        device = MyVaillantState(settings_store, available=True)
+        energy = EnergyMeter(device, tmp_path)
+        home = HomeAssistant(settings_store, device, energy, log_store, client)
+        hems = HemsService(
+            settings_store,
+            device,
+            home,
+            log_store,
+            tmp_path,
+            clock=clock,
+            open_meteo_url=f"{fake_ha.url}/v1/dwd-icon",
+        )
+        gate = WriteGate(
+            bridge_client,
+            pairing,
+            device,
+            settings_store,
+            log_store,
+            link=MyVaillantLink(client, device, settings_store),
+        )
+        task = asyncio.create_task(client.run())
+        await eventually(lambda: device.connection_state() is ConnectionState.CONNECTED)
+        await eventually(lambda: home.hems_sources.get(ROOM_A_VALVE) is not None)
+        api = create_app(
+            pairing,
+            device,
+            gate,
+            log_store,
+            energy,
+            home,
+            static_dir=None,
+            trusted_clients=frozenset({INGRESS_CLIENT}),
+            hems=hems,
+        )
+        transport = httpx.ASGITransport(app=api, client=(INGRESS_CLIENT, 1))
+        async with httpx.AsyncClient(transport=transport, base_url="http://x") as http:
+            yield App(fake_ha, settings_store, device, home, hems, log_store, clock, http)
         task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        hems.samples.close()
 
-    status = hems.status()
+
+async def messages(log: LogStore, category: LogCategory | None = None) -> list[str]:
+    return [entry.message for entry in (await log.page(category=category)).entries]
+
+
+# --- planning from Home Assistant's data ------------------------------------------------------
+
+
+async def test_the_preview_plans_from_open_meteo_and_learns_from_the_statistics(app: App) -> None:
+    await app.hems.plan_now()
+
+    status = app.hems.status()
     assert status.problems == []
-    assert status.plan is not None
-    controls = {(block.control, block.action.value) for block in status.plan.blocks}
-    # Zone 2 runs in "on"; Zone 1 in auto is left alone.
-    assert controls == {("dhw", "charge"), ("6.1.1", "raise")}
-    assert status.plan.notes["5.1.1"] == "Der Planer verschiebt Zonen nur in der Betriebsart Ein."
-    assert status.next_action is not None
-    assert status.next_action.text == "Zone 2 +1 K"
-    log = [entry.message for entry in (await log_store.page(category=LogCategory.HEMS)).entries]
-    assert log[0].startswith(
-        "Plan: 10:30 bis 15:30 Zone 2 +1 K (PV-Überschuss 2,2 kW erwartet); "
-        "11:00 bis 12:30 Warmwasser auf 60 °C und Einmalladung (PV-Überschuss 2,4 kW erwartet);"
-    )
-    assert fake_ha.service_calls == [
-        ("weather.get_forecasts", {"entity_id": "weather.home", "type": "hourly"}, {"return_response": ""})
+    assert app.hems.plan is not None
+    assert len(app.hems.plan.hours) == 48
+    # Coordinates rounded to about 1 km; the past days calibrate the forecast.
+    request = app.fake.open_meteo_requests[0]
+    assert (request["latitude"], request["longitude"]) == ("52.52", "13.40")
+    assert request["past_days"] == "7"
+    assert status.forecast.source is WeatherSource.OPEN_METEO
+    house = status.house
+    assert house is not None and house.learned
+    assert house.loss_w_per_k == pytest.approx(160.0, rel=0.05)
+    assert house.cop is not None
+    assert status.statistics_days >= 19
+    # Read a month at a time, only reading.
+    assert {tuple(ids) for ids, _start, _end in app.fake.statistics_requests} >= {
+        tuple(sorted([HEAT, HEAT_DHW, MV_OUTDOOR, MV_POWER, ROOM_A, FLOW_2]))
+    }
+    assert status.demand and status.demand[0].heat_kwh > 0
+    log = await messages(app.log, LogCategory.HEMS)
+    assert any(message.startswith("Plan (Vorschau):") for message in log)
+
+
+async def test_open_meteo_is_asked_at_most_hourly(app: App) -> None:
+    await app.hems.plan_now()
+    app.clock.now += timedelta(minutes=30)
+    await app.hems.plan_now()
+    app.clock.now += timedelta(minutes=31)
+    await app.hems.plan_now()
+
+    assert len(app.fake.open_meteo_requests) == 2
+
+
+async def test_the_weather_entity_steps_in_when_open_meteo_fails(app: App) -> None:
+    app.fake.open_meteo = None
+    app.fake.set("weather.home", "cloudy", attributes={"temperature_unit": "°C", "wind_speed_unit": "km/h"})
+    app.fake.forecasts["weather.home"] = [
+        {"datetime": (app.clock.now + timedelta(hours=hour)).isoformat(), "temperature": 3.0} for hour in range(60)
     ]
+    configure(app.settings, weather_entity="weather.home")
+
+    await app.hems.plan_now()
+
+    status = app.hems.status()
+    assert status.forecast.source is WeatherSource.HOME_ASSISTANT
+    assert "Open-Meteo antwortet gerade nicht. Die Prognose kommt aus Home Assistant." in status.problems
+    assert app.hems.plan is not None
 
 
-async def test_missing_inputs_are_named(
-    settings_store: SettingsStore,
-    connected: StateService,
-    gate: WriteGate,
-    energy_meter: EnergyMeter,
-    home_assistant: HomeAssistant,
-    log_store: LogStore,
-    tmp_path: Path,
-    clock: Clock,
-) -> None:
-    settings_store.update(
-        lambda current: replace(
-            current, hems=HemsSettings(mode=PlannerMode.PREVIEW, tariff=Tariff(kind=TariffKind.DYNAMIC))
-        )
+async def test_switched_off_there_is_no_plan_but_counting_goes_on(app: App) -> None:
+    configure(app.settings, mode=PlannerMode.OFF)
+
+    await app.hems.plan_now()
+
+    assert app.hems.plan is None
+    assert app.hems.changes(5) == []
+
+
+# --- observing ---------------------------------------------------------------------------------
+
+
+async def test_a_defrost_and_the_frost_protection_are_logged_in_preview(app: App) -> None:
+    start = app.clock.now
+    # Colder than 4 °C for five hours already.
+    app.hems.cycles.feed_outdoor(start - timedelta(hours=5), 2.0)
+    app.fake.change(MV_OUTDOOR, "2.0")
+    profile = [(0, 700.0), (10, 720.0), (20, 450.0), (25, 1800.0), (40, 900.0), (60, 0.0)]
+    for minute, watts in profile:
+        app.clock.now = start + timedelta(minutes=minute)
+        app.fake.change(MV_POWER, f"{watts:g}")
+        await eventually(reported(app, watts))
+        app.hems.observe(app.device.current)
+    # The defrost shows once the recovery is seen; detection runs at most once a minute.
+    app.clock.now += timedelta(minutes=2)
+    app.hems.observe(app.device.current)
+
+    stats = app.hems.cycles.stats()
+    assert stats.today.defrosts == 1
+    log = await messages(app.log, LogCategory.HEMS)
+    assert any(message.startswith("Abtauung erkannt:") for message in log)
+    assert any(message.startswith("Frostschutz der Wärmepumpe aktiv") for message in log)
+    assert app.hems.status().frost.active
+
+
+def reported(app: App, watts: float) -> Callable[[], bool]:
+    return lambda: power(app) == watts and outdoor(app) == 2.0
+
+
+def power(app: App) -> float | None:
+    current = app.device.current
+    reading = current.measurements.get("power_consumption") if current is not None else None
+    return reading.value if reading is not None else None
+
+
+def outdoor(app: App) -> float | None:
+    current = app.device.current
+    reading = current.measurements.get("outdoor_temperature") if current is not None else None
+    return reading.value if reading is not None else None
+
+
+async def test_the_zone_1_logic_is_shown_as_would(app: App) -> None:
+    app.hems.observe(app.device.current)
+    app.fake.change(MV_POWER, "12")
+    await eventually(
+        lambda: app.device.current is not None and app.device.current.measurements["power_consumption"].value == 12
     )
-    hems = service(settings_store, connected, gate, energy_meter, home_assistant, log_store, tmp_path, clock)
+    app.hems.observe(app.device.current)
+    app.clock.now += timedelta(minutes=2)
+    app.hems.observe(app.device.current)
 
-    await hems.plan_now()
-
-    assert hems.status().problems == [
-        "Ohne Home Assistant fehlen Preise und Prognosen.",
-        "Es ist kein Preis-Sensor gewählt.",
-        "Es ist keine PV-Prognose gewählt.",
-        "Es ist kein Hausverbrauch gewählt.",
-        "Ohne Home Assistant gibt es keine Wetter-Entität.",
-    ]
+    zone1 = app.hems.status().zone1
+    assert zone1 is not None
+    assert zone1.zone_id == MV_ZONE_1
+    assert zone1.would == "off"
+    assert zone1.switches_today == 1
 
 
-async def test_a_battery_from_older_settings_without_charging_power_is_named(
-    settings_store: SettingsStore,
-    connected: StateService,
-    gate: WriteGate,
-    energy_meter: EnergyMeter,
-    home_assistant: HomeAssistant,
-    log_store: LogStore,
-    tmp_path: Path,
-    clock: Clock,
-) -> None:
-    settings_store.update(
-        lambda current: replace(
-            current,
-            hems=HemsSettings(mode=PlannerMode.PREVIEW, battery_soc="sensor.battery", battery_capacity_kwh=10.0),
-        )
+async def test_an_open_window_is_logged_as_would(app: App) -> None:
+    app.fake.change(ROOM_A, "21.0")
+    app.fake.change(ROOM_A_HUMIDITY, "50")
+    await eventually(lambda: app.home.hems_sources.number(ROOM_A_HUMIDITY) == 50)
+    app.hems._source_changed(ROOM_A, app.home.hems_sources.get(ROOM_A))
+    app.clock.now += timedelta(minutes=5)
+    app.fake.set(ROOM_A_HUMIDITY, "45", unit="%", attributes={"device_class": "humidity"})
+    app.fake.set(ROOM_A, "20.5", unit="°C")
+    await eventually(lambda: app.home.hems_sources.number(ROOM_A) == 20.5)
+
+    await eventually(lambda: any(room.window_open for room in app.hems.rooms_view().rooms))
+    log = await messages(app.log, LogCategory.ROOMS)
+    assert any(message.startswith("Fenster offen erkannt (würde): Raum A") for message in log)
+
+
+async def test_samples_feed_the_room_status(app: App) -> None:
+    await app.hems.sample()
+    await app.hems.plan_now()
+
+    view = app.hems.rooms_view()
+    room = next(item for item in view.rooms if item.entity_id == ROOM_A)
+    bath = next(item for item in view.rooms if item.entity_id == BATH_TRV)
+    assert room.temperature_c == 21.0
+    assert room.valve == 35.0
+    assert room.trv_setpoint_c == 21.0
+    assert room.humidity == 48.0
+    assert room.model is not None and room.model.learning
+    assert room.minutes_to_lower is not None
+    assert bath.measured_at_thermostat
+    assert bath.temperature_c == 22.6
+    assert app.hems.samples.series(["outdoor"], app.clock.now - timedelta(minutes=1))["outdoor"]
+
+
+# --- API ------------------------------------------------------------------------------------
+
+
+async def test_the_settings_are_checked_and_saved_over_the_api(app: App) -> None:
+    body = {
+        "weather_source": "open_meteo",
+        "latitude": 50.0,
+        "longitude": 8.0,
+        "heat_heating_entity": HEAT,
+        "zones": [{"zone_id": MV_ZONE_2, "kind": "radiator", "band_down_k": 1.5, "band_up_k": 2}],
+        "night_start": "23:00",
+        "night_end": "06:00",
+        "night_loss_k": 0.7,
+        "target_starts": 8,
+    }
+    saved = await app.http.put("/api/hems/settings", json=body)
+    bad_band = await app.http.put(
+        "/api/hems/settings", json={**body, "zones": [{"zone_id": MV_ZONE_2, "band_down_k": 0.7}]}
     )
-    hems = service(settings_store, connected, gate, energy_meter, home_assistant, log_store, tmp_path, clock)
+    bad_window = await app.http.put("/api/hems/settings", json={**body, "night_end": "23:00"})
+    no_entity = await app.http.put("/api/hems/settings", json={**body, "weather_source": "home_assistant"})
+    not_a_sensor = await app.http.put("/api/hems/settings", json={**body, "buffer_entity": "climate.buffer"})
 
-    await hems.plan_now()
-
-    assert "Die Ladeleistung des Akkus fehlt in den Einstellungen." in hems.status().problems
-
-
-async def test_switched_off_there_is_no_plan(
-    settings_store: SettingsStore,
-    connected: StateService,
-    gate: WriteGate,
-    energy_meter: EnergyMeter,
-    home_assistant: HomeAssistant,
-    log_store: LogStore,
-    tmp_path: Path,
-    clock: Clock,
-) -> None:
-    hems = service(settings_store, connected, gate, energy_meter, home_assistant, log_store, tmp_path, clock)
-
-    await hems.plan_now()
-
-    assert hems.status().plan is None
-    assert hems.status().mode is PlannerMode.OFF
+    assert saved.status_code == 200
+    assert saved.json()["settings"]["night_start"] == "23:00"
+    assert app.settings.current.hems.zones[0].band_down_k == 1.5
+    assert app.settings.current.hems.mode is PlannerMode.PREVIEW
+    assert bad_band.status_code == 422
+    assert bad_band.json()["detail"] == "Das Band einer Zone geht nur in Schritten von 0,5 K."
+    assert bad_window.status_code == 422
+    assert no_entity.status_code == 422
+    assert not_a_sensor.status_code == 422
+    assert "Einstellungen des Energiemanagements geändert." in await messages(app.log)
 
 
-# --- weather ----------------------------------------------------------------------------
+async def test_control_comes_with_a_later_version(app: App) -> None:
+    refused = await app.http.post("/api/hems/mode", json={"mode": "control"})
+    off = await app.http.post("/api/hems/mode", json={"mode": "off"})
+
+    assert refused.status_code == 409
+    assert "1.4.0" in refused.json()["detail"]
+    assert off.json()["mode"] == "off"
+    assert off.json()["available_modes"] == ["off", "preview"]
+    assert "Energiemanagement ausgeschaltet." in await messages(app.log)
 
 
-async def test_a_forecast_in_fahrenheit_is_converted(
-    fake_ha: FakeHomeAssistant, settings_store: SettingsStore, ha_client: HomeAssistantClient, clock: Clock
-) -> None:
-    fake_ha.set("weather.us", "sunny", attributes={"temperature_unit": "°F"})
-    fake_ha.forecasts["weather.us"] = forecast_hours(NOW, 50.0, hours=2)
-    settings_store.update(lambda current: replace(current, hems=HemsSettings(weather_entity="weather.us")))
+async def test_the_plan_and_its_csv_come_over_the_api(app: App) -> None:
+    await app.hems.plan_now()
 
-    forecast = await WeatherForecasts(settings_store, ha_client, clock=clock).forecast()
+    plan = await app.http.get("/api/hems/plan")
+    export = await app.http.get("/api/hems/plan/export")
 
-    assert forecast is not None
-    assert forecast.at(NOW + timedelta(minutes=45)) == 10.0
-
-
-async def test_open_meteo_is_asked_with_the_entered_location_at_most_hourly(
-    settings_store: SettingsStore, clock: Clock
-) -> None:
-    requests: list[dict[str, str]] = []
-
-    async def answer(request: web.Request) -> web.Response:
-        requests.append(dict(request.query))
-        return web.json_response(
-            {"hourly": {"time": ["2026-10-21T05:00", "2026-10-21T06:00"], "temperature_2m": [4.2, None]}}
-        )
-
-    app = web.Application()
-    app.router.add_get("/v1/forecast", answer)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    port = runner.addresses[0][1]
-    try:
-        settings_store.update(
-            lambda current: replace(
-                current,
-                hems=HemsSettings(weather_source=WeatherSource.OPEN_METEO, latitude=52.52, longitude=13.405),
-            )
-        )
-        weather = WeatherForecasts(
-            settings_store, None, open_meteo_url=f"http://127.0.0.1:{port}/v1/forecast", clock=clock
-        )
-
-        first = await weather.forecast()
-        clock.now += timedelta(minutes=30)
-        await weather.forecast()
-    finally:
-        await runner.cleanup()
-
-    assert first is not None
-    assert first.hours == {NOW: 4.2}
-    assert requests == [
-        {
-            "latitude": "52.5200",
-            "longitude": "13.4050",
-            "hourly": "temperature_2m",
-            "forecast_days": "3",
-            "timezone": "GMT",
-        }
-    ]
+    assert plan.status_code == 200
+    body = plan.json()
+    assert len(body["hours"]) == 48
+    assert body["labels"] == {MV_ZONE_1: "Zone 1", MV_ZONE_2: "Zone 2"}
+    assert body["rooms"] == {ROOM_A: "Raum A", BATH_TRV: "Bad"}
+    assert len(body["history"]) == 24
+    text = export.content.decode("utf-8")
+    assert text.startswith("﻿Zeit;Art;Zone 1 Verschiebung K;")
+    assert "Raum A Soll °C" in text.splitlines()[0]
+    assert text.count("\r\n") == 49
+    assert export.headers["content-disposition"].startswith('attachment; filename="vaillant-eebus-plan-')
 
 
-async def test_without_a_location_open_meteo_is_not_asked(settings_store: SettingsStore, clock: Clock) -> None:
-    settings_store.update(lambda current: replace(current, hems=HemsSettings(weather_source=WeatherSource.OPEN_METEO)))
-    weather = WeatherForecasts(settings_store, None, clock=clock)
+async def test_room_details_are_saved_and_kept_when_the_room_list_is_saved(app: App) -> None:
+    details = {
+        "heat_load_w": 450,
+        "design_c": 20,
+        "surfaces": [{"kind": "radiator", "rated_w": 1600, "rated_basis": "75/65", "flow_lph": 15, "presetting": "3"}],
+        "trv_entity": ROOM_A_TRV,
+        "valve_entity": ROOM_A_VALVE,
+        "humidity_entity": ROOM_A_HUMIDITY,
+        "setpoint_c": 20.5,
+        "schedule": [{"start": "06:00", "end": "22:00", "setpoint_c": 21}],
+        "comfort_down_k": 0.5,
+        "comfort_up_k": 0.5,
+        "night_loss_k": 1.0,
+        "throttle": True,
+        "emergency_c": 20,
+    }
+    saved = await app.http.put(f"/api/rooms/{ROOM_A}", json=details)
+    bad_step = await app.http.put(f"/api/rooms/{ROOM_A}", json={**details, "setpoint_c": 20.3})
+    unknown = await app.http.put("/api/rooms/sensor.nowhere", json=details)
+    rooms = await app.http.put(
+        "/api/settings",
+        json={
+            "rooms": [
+                {"entity_id": ROOM_A, "name": "Raum A neu", "zone_id": MV_ZONE_2},
+                {"entity_id": BATH_TRV, "name": "Bad", "zone_id": MV_ZONE_2},
+            ],
+            "heat_energy_entities": [],
+            "export": ["status"],
+        },
+    )
 
-    assert await weather.forecast() is None
-    assert weather.problem == "Für Open-Meteo fehlt der Standort in den Einstellungen."
+    assert saved.status_code == 200
+    assert next(room for room in saved.json()["rooms"] if room["entity_id"] == ROOM_A)["details"]["setpoint_c"] == 20.5
+    assert bad_step.status_code == 422
+    assert unknown.status_code == 404
+    assert rooms.status_code == 200
+    room = app.settings.current.rooms[0]
+    assert room.name == "Raum A neu"
+    assert room.details.heat_load_w == 450
+    assert room.details.schedule[0].setpoint_c == 21.0
+    assert "Raumdaten geändert: Raum A." in await messages(app.log)
+
+
+async def test_rooms_without_a_sensor_measure_at_the_thermostat_and_stay_out_of_the_average(app: App) -> None:
+    snapshot = app.home.snapshot()
+
+    bath = next(room for room in snapshot.rooms if room.entity_id == BATH_TRV)
+    zone = next(zone for zone in snapshot.zones if zone.zone_id == MV_ZONE_2)
+    assert bath.celsius == 22.6
+    assert (zone.celsius, zone.rooms, zone.of) == (21.0, 1, 1)
+
+
+async def test_the_entity_choice_knows_rooms_thermostats_humidity_and_valves(app: App) -> None:
+    rooms = await app.http.get("/api/ha/entities", params={"kind": "room"})
+    thermostats = await app.http.get("/api/ha/entities", params={"kind": "thermostat"})
+    humidity = await app.http.get("/api/ha/entities", params={"kind": "humidity"})
+    valves = await app.http.get("/api/ha/entities", params={"kind": "percent"})
+
+    room_ids = {item["entity_id"] for item in rooms.json()}
+    assert {ROOM_A, ROOM_A_TRV, BATH_TRV} <= room_ids
+    # The myVAILLANT zones are no room thermostats.
+    assert MV_ZONE_1 not in room_ids
+    assert {item["entity_id"] for item in thermostats.json()} == {ROOM_A_TRV, BATH_TRV}
+    assert [item["entity_id"] for item in humidity.json()] == [ROOM_A_HUMIDITY]
+    assert [item["entity_id"] for item in valves.json()] == [ROOM_A_VALVE]
+
+
+# --- sensors ----------------------------------------------------------------------------------
+
+
+async def test_the_energy_management_is_reported_as_sensors(app: App) -> None:
+    await app.hems.plan_now()
+
+    sensors = {sensor.entity_id: sensor for sensor in app.hems.sensors()}
+
+    assert sensors["sensor.vaillant_eebus_hems_status"].state == "Vorschau"
+    assert sensors["sensor.vaillant_eebus_starts_today"].state == "0"
+    assert sensors["sensor.vaillant_eebus_defrosts_today"].state == "0"
+    assert sensors["binary_sensor.vaillant_eebus_frost_protection"].state == "off"
+    plan = sensors["sensor.vaillant_eebus_hems_plan"]
+    assert plan.state == str(len(plan.attributes["änderungen"]))
+    assert ExportGroup.HEMS in app.settings.current.export
+
+
+# --- safety ------------------------------------------------------------------------------------
+
+
+def test_the_energy_management_never_reaches_the_write_gate() -> None:
+    package = Path(hems_package.__file__).parent
+    for source in package.rglob("*.py"):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        imported = {
+            node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None
+        } | {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+        assert not any("write_gate" in name or "bridge_client" in name for name in imported), source.name
+        names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        assert not names & {"submit", "send_command", "call_device_service", "set_state"}, source.name
 
 
 def test_the_app_calls_only_the_weather_forecast_and_the_device_services() -> None:
@@ -351,224 +558,57 @@ def test_the_app_calls_only_the_weather_forecast_and_the_device_services() -> No
     assert services == {"ha_client.py": {"/api/services/weather/get_forecasts", "/api/services/"}}
 
 
-# --- daily values -------------------------------------------------------------------------
+def test_the_websocket_only_reads() -> None:
+    tree = ast.parse(Path(ha_client_module.__file__).read_text(encoding="utf-8"))
+    types = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if isinstance(key, ast.Constant) and key.value == "type" and isinstance(value, ast.Constant):
+                    types.add(value.value)
 
-
-def test_the_demand_model_needs_ten_complete_heating_days(
-    connected: StateService, settings_store: SettingsStore, tmp_path: Path, clock: Clock
-) -> None:
-    days: dict[str, Any] = {}
-    energy: dict[str, Any] = {}
-    for offset in range(1, 13):
-        day = (NOW - timedelta(days=offset)).date().isoformat()
-        outdoor = 10.0 - offset
-        days[day] = {"outdoor_sum": outdoor * 86400, "outdoor_s": 86400, "indoor_sum": 21.0 * 86400, "indoor_s": 86400}
-        # 0.5 kWh per kelvin plus 2 kWh for hot water.
-        energy[day] = {"wh": (0.5 * (21.0 - outdoor) + 2.0) * 1000, "incomplete": offset == 12}
-    (tmp_path / "hems_days.json").write_text(json.dumps({"version": 1, "days": days}), encoding="utf-8")
-    (tmp_path / "energy.json").write_text(json.dumps({"version": 1, "days": energy, "last": None}), encoding="utf-8")
-    meter = EnergyMeter(connected, tmp_path, clock=clock)
-    importer = HomeAssistant(settings_store, connected, meter, LogStore(tmp_path / "log"), None).importer
-
-    recorder = DayRecorder(connected, importer, meter, tmp_path, clock=clock)
-    model = recorder.model(15.0)
-
-    assert model is not None
-    assert model.days == 11
-    assert model.kwh_per_k == pytest.approx(0.5)
-    assert model.base_kwh == pytest.approx(2.0)
-    assert model.predict(21.0, 1.0) == pytest.approx(12.0)
-
-
-# --- API and sensors -----------------------------------------------------------------------
-
-
-def http_client(
-    pairing: PairingService,
-    state: StateService,
-    gate: WriteGate,
-    log: LogStore,
-    energy: EnergyMeter,
-    home_assistant: HomeAssistant,
-    hems: HemsService,
-) -> httpx.AsyncClient:
-    app = create_app(
-        pairing,
-        state,
-        gate,
-        log,
-        energy,
-        home_assistant,
-        static_dir=None,
-        trusted_clients=frozenset({INGRESS_CLIENT}),
-        hems=hems,
-    )
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(INGRESS_CLIENT, 1)), base_url="http://x")
-
-
-async def test_the_settings_and_the_stage_are_changed_over_the_api(
-    pairing: PairingService,
-    connected: StateService,
-    gate: WriteGate,
-    energy_meter: EnergyMeter,
-    home_assistant: HomeAssistant,
-    log_store: LogStore,
-    settings_store: SettingsStore,
-    tmp_path: Path,
-    clock: Clock,
-) -> None:
-    hems = service(settings_store, connected, gate, energy_meter, home_assistant, log_store, tmp_path, clock)
-    body = {
-        "tariff": {"kind": "fixed", "price_ct": 31.2, "feed_in_ct": 7.9},
-        "weather_source": "open_meteo",
-        "latitude": 52.52,
-        "longitude": 13.405,
-        "zones": [{"zone_id": "6.1.1", "up_k": 1.5, "down_k": 0.5}],
-        "dhw_max_c": 60,
-        "heating_limit_c": 15,
+    # "hourly" is the forecast type of weather.get_forecasts (REST), not a WebSocket command.
+    assert types == {
+        "auth",
+        "subscribe_events",
+        "unsubscribe_events",
+        "subscribe_trigger",
+        "recorder/statistics_during_period",
+        "hourly",
     }
-    async with http_client(pairing, connected, gate, log_store, energy_meter, home_assistant, hems) as http:
-        saved = await http.put("/api/hems/settings", json=body)
-        bad_step = await http.put(
-            "/api/hems/settings", json={**body, "zones": [{"zone_id": "6.1.1", "up_k": 0.7, "down_k": 0}]}
-        )
-        too_hot = await http.put("/api/hems/settings", json={**body, "dhw_max_c": 80})
-        battery_without_power = await http.put(
-            "/api/hems/settings", json={**body, "battery_soc": "sensor.battery", "battery_capacity_kwh": 10}
-        )
-        stage = await http.post("/api/hems/mode", json={"mode": "preview"})
-        status = await http.get("/api/hems")
-
-    assert saved.status_code == 200
-    assert saved.json()["settings"]["tariff"]["price_ct"] == 31.2
-    assert saved.json()["settings"]["zones"] == [{"zone_id": "6.1.1", "up_k": 1.5, "down_k": 0.5}]
-    assert bad_step.status_code == 422
-    assert bad_step.json()["detail"] == "Die Verschiebung der Zonen geht nur in Schritten von 0,5 K."
-    assert too_hot.status_code == 422
-    assert battery_without_power.status_code == 422
-    assert battery_without_power.json()["detail"] == "Für den Akku fehlen Kapazität oder Ladeleistung."
-    assert settings_store.current.hems.battery_soc is None
-    assert stage.json()["mode"] == "preview"
-    assert status.json()["plan"] is not None
-    assert settings_store.current.hems.mode is PlannerMode.PREVIEW
-    log = [entry.message for entry in (await log_store.page()).entries]
-    assert "Planer auf Vorschau: Er plant und zeigt, was er senden würde, sendet aber nichts." in log
-    assert "Einstellungen des Energiemanagements geändert." in log
 
 
-async def test_switching_to_demo_first_returns_to_the_base_values(
-    pairing: PairingService,
-    connected: StateService,
-    bridge_client: BridgeClient,
-    energy_meter: EnergyMeter,
+async def test_a_shift_left_by_the_old_planner_is_named_once(
+    settings_store: SettingsStore,
+    log_store: LogStore,
+    tmp_path: Path,
     home_assistant: HomeAssistant,
-    log_store: LogStore,
-    settings_store: SettingsStore,
-    fake_bridge: FakeBridge,
-    tmp_path: Path,
-    clock: Clock,
+    state: StateService,
 ) -> None:
-    gate = WriteGate(bridge_client, pairing, connected, settings_store, log_store, clock=lambda: clock.now.timestamp())
-    gate.set_mode(OperatingMode.LIVE, confirm=True)
-    settings_store.update(lambda current: replace(current, hems=HemsSettings(mode=PlannerMode.CONTROL)))
-    hems = service(settings_store, connected, gate, energy_meter, home_assistant, log_store, tmp_path, clock)
-    raised = Block("6.1.1", Action.RAISE, NOW, NOW + timedelta(hours=1), 1.0, None, "Test")
-    await hems.executor.step(Plan(created_at=NOW, slots=[], blocks=[raised]))
-    await connected.refresh(GATEWAY_SKI)
+    saved = {
+        "version": 1,
+        "controls": {"6.1.1": {"base": 23.0, "applied": 24.0}, "dhw": {"base": 50.0, "applied": 50.0}},
+    }
+    (tmp_path / "hems.json").write_text(json.dumps(saved), encoding="utf-8")
 
-    clock.now += timedelta(seconds=10)
-    async with http_client(pairing, connected, gate, log_store, energy_meter, home_assistant, hems) as http:
-        response = await http.post("/api/mode", json={"mode": "demo"})
+    hems = HemsService(settings_store, state, home_assistant, log_store, tmp_path)
+    hems.samples.close()
 
-    assert response.json() == {"mode": "demo"}
-    values = [getattr(request, "value_celsius", None) for _name, request in fake_bridge.device.write_calls]
-    assert values == [24.0, 23.0]
-    assert gate.mode is OperatingMode.DEMO
+    log = await messages(log_store)
+    assert any("noch eine Verschiebung offen (6.1.1)" in message for message in log)
+    assert not (tmp_path / "hems.json").exists()
+    assert (tmp_path / "hems.json.old").exists()
 
 
-async def test_stopping_the_app_returns_to_the_base_values_even_when_cancelled_again(
-    pairing: PairingService,
-    connected: StateService,
-    bridge_client: BridgeClient,
-    energy_meter: EnergyMeter,
-    home_assistant: HomeAssistant,
-    log_store: LogStore,
-    settings_store: SettingsStore,
-    fake_bridge: FakeBridge,
-    tmp_path: Path,
-    clock: Clock,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    gate = WriteGate(bridge_client, pairing, connected, settings_store, log_store, clock=lambda: clock.now.timestamp())
-    gate.set_mode(OperatingMode.LIVE, confirm=True)
-    settings_store.update(lambda current: replace(current, hems=HemsSettings(mode=PlannerMode.CONTROL)))
-    hems = service(settings_store, connected, gate, energy_meter, home_assistant, log_store, tmp_path, clock)
-    blocks = [
-        Block("6.1.1", Action.RAISE, NOW, NOW + timedelta(hours=1), 1.0, None, "Test"),
-        Block("dhw", Action.CHARGE, NOW, NOW + timedelta(hours=1.5), None, 60.0, "Test"),
-    ]
-    await hems.executor.step(Plan(created_at=NOW, slots=[], blocks=blocks))
-    await connected.refresh(GATEWAY_SKI)
-    clock.now += timedelta(seconds=10)
+async def test_the_look_back_survives_a_restart(app: App, tmp_path: Path) -> None:
+    await app.hems.plan_now()
+    app.clock.now += timedelta(hours=1)
 
-    async def idle() -> None:
-        await asyncio.Event().wait()
-
-    # Only the stop is under test; planning and carrying out would return to the base values themselves.
-    monkeypatch.setattr(hems, "_planning", idle)
-    monkeypatch.setattr(hems, "_executing", idle)
-    in_flight = most = 0
-
-    async def slow_device() -> None:
-        nonlocal in_flight, most
-        in_flight += 1
-        most = max(most, in_flight)
-        await asyncio.sleep(0.2)
-        in_flight -= 1
-
-    fake_bridge.device.before_write = slow_device
-    task = asyncio.create_task(hems.run())
-    await asyncio.sleep(0.05)
-    task.cancel()
-    await asyncio.sleep(0.05)
-    # uvicorn passes SIGTERM on after its own shutdown: the stop cancels a second time.
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    returned = [
-        (name, request.value_celsius)
-        for name, request in fake_bridge.device.write_calls[-2:]
-        if hasattr(request, "value_celsius")
-    ]
-    assert sorted(returned) == [("SetDHWSetpoint", 55.0), ("SetRoomHeatingTemperature", 23.0)]
-    assert most == 2
-    assert hems.executor.shifted() == {}
-
-
-async def test_the_planner_is_reported_as_sensors(
-    fake_ha: FakeHomeAssistant,
-    settings_store: SettingsStore,
-    connected: StateService,
-    gate: WriteGate,
-    energy_meter: EnergyMeter,
-    ha_with_client: HomeAssistant,
-    ha_client: HomeAssistantClient,
-    log_store: LogStore,
-    tmp_path: Path,
-    clock: Clock,
-) -> None:
-    configure(fake_ha, settings_store)
-    hems = service(settings_store, connected, gate, energy_meter, ha_with_client, log_store, tmp_path, clock)
-    task = await follow(ha_with_client, ha_client)
+    again = HemsService(app.settings, app.device, app.home, app.log, tmp_path, clock=app.clock)
     try:
-        await hems.plan_now()
-        sensors = {sensor.entity_id: sensor for sensor in hems.sensors()}
+        history = again.plan_view().history
     finally:
-        task.cancel()
+        again.samples.close()
 
-    assert ExportGroup.HEMS in settings_store.current.export
-    assert sensors["sensor.vaillant_eebus_hems_status"].state == "Vorschau"
-    assert sensors["sensor.vaillant_eebus_hems_next_action"].state == "Zone 2 +1 K"
-    assert sensors["sensor.vaillant_eebus_hems_plan"].state == "4"
-    assert sensors["sensor.vaillant_eebus_hems_demand_tomorrow"].state == "unavailable"
+    assert history[-1].planned is not None
+    assert history[-1].planned.zones

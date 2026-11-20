@@ -15,6 +15,7 @@ from typing import Any
 
 from vaillant_eebus.hems.config import HemsSettings, hems_from_json, hems_to_json
 from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID
+from vaillant_eebus.room_data import RoomDetails, details_from_json, details_to_json
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,7 +72,11 @@ HEAT_SENSORS_MAX = 4
 
 @dataclass(frozen=True, slots=True)
 class Room:
-    """A Home Assistant temperature sensor the user chose for a room."""
+    """A room: the Home Assistant entity with its temperature and what the user entered for it.
+
+    The entity is a temperature sensor, or - for a room without one - the radiator
+    thermostat's climate entity (its current_temperature, measured at the radiator).
+    """
 
     entity_id: str
     # Shown in the UI, e.g. "Wohnzimmer".
@@ -81,6 +86,12 @@ class Room:
     # The room's zone with the other connection (EEBUS or myVAILLANT), whose zones have
     # other IDs; it comes back when the user switches back.
     other_zone_id: str | None = None
+    details: RoomDetails = field(default_factory=RoomDetails)
+
+    @property
+    def measured_at_thermostat(self) -> bool:
+        """The room's temperature comes from its thermostat, at the radiator."""
+        return CLIMATE_ENTITY.match(self.entity_id) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,7 +299,13 @@ def _rooms(raw: Any) -> tuple[Room, ...]:
                 and isinstance(name, str)
                 and all(zone is None or isinstance(zone, str) for zone in (zone_id, other_zone_id))
             ):
-                room = Room(entity_id=entity_id, name=name, zone_id=zone_id, other_zone_id=other_zone_id)
+                room = Room(
+                    entity_id=entity_id,
+                    name=name,
+                    zone_id=zone_id,
+                    other_zone_id=other_zone_id,
+                    details=details_from_json(item.get("details")),
+                )
         if room is None or not valid_room(room):
             _LOGGER.warning("Settings: invalid room %r ignored", item)
             continue
@@ -337,6 +354,7 @@ def _to_json(settings: Settings) -> dict[str, Any]:
                 "name": room.name,
                 "zone_id": room.zone_id,
                 "other_zone_id": room.other_zone_id,
+                "details": details_to_json(room.details),
             }
             for room in settings.rooms
         ],
