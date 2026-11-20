@@ -1,5 +1,5 @@
 name: Vaillant EEBUS
-version: "1.2.0"
+version: "1.2.1"
 slug: vaillant_eebus
 description: Vaillant-Wärmepumpe über myVAILLANT in Home Assistant oder lokal über EEBUS steuern.
 url: https://github.com/wattarosolar-lgtm/vaillant-eebus

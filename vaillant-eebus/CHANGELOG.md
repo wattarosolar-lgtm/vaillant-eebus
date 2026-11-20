@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.1 (noch nicht veröffentlicht)
+## 1.2.1
 
 Korrekturen aus der Abnahme von 1.2.0 an der Anlage (Anbindung myVAILLANT):
 
