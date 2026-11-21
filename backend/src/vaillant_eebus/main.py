@@ -24,9 +24,10 @@ from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
 from vaillant_eebus.myvaillant import MyVaillantLink, MyVaillantState
 from vaillant_eebus.pairing import PairingService
+from vaillant_eebus.rooms.service import RoomControl
 from vaillant_eebus.settings import Connection, SettingsStore
 from vaillant_eebus.state import StateHub, StateService
-from vaillant_eebus.write_gate import WriteGate
+from vaillant_eebus.write_gate import RoomGate, WriteGate
 
 _LOGGER = logging.getLogger("vaillant_eebus")
 
@@ -153,6 +154,10 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> bool:
     energy = EnergyMeter(state, config.data_dir, zone=zone)
     home_assistant = HomeAssistant(settings, state, energy, log, ha_client)
     hems = HemsService(settings, state, home_assistant, log, config.data_dir, zone=zone)
+    # The radiator thermostats: their own write gate, decided by the room control on the energy
+    # management's samples.
+    room_gate = RoomGate(ha_client, settings, home_assistant.hems_sources, log, config.data_dir, zone=zone)
+    rooms = RoomControl(settings, state, hems, room_gate, home_assistant, log, config.data_dir, zone=zone)
     restart = asyncio.Event()
     app = create_app(
         pairing,
@@ -165,6 +170,7 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> bool:
         trusted_clients=config.trusted_clients,
         zone=zone,
         hems=hems,
+        rooms=rooms,
         restart=restart.set,
     )
     server = uvicorn.Server(
@@ -195,6 +201,9 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> bool:
                 tasks.create_task(energy.run()),
                 tasks.create_task(home_assistant.run()),
                 tasks.create_task(hems.run()),
+                tasks.create_task(room_gate.run()),
+                # On its way out it hands the thermostats back (emergency values), at most 15 s.
+                tasks.create_task(rooms.run()),
                 tasks.create_task(stop_for_restart()),
             ]
             if not myvaillant:

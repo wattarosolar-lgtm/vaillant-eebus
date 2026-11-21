@@ -10,7 +10,7 @@ import json
 import logging
 import math
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from pathlib import Path, PurePath
 from typing import Annotated, Any, Literal, Protocol
@@ -49,7 +49,7 @@ from vaillant_eebus.hems.config import (
     hems_from_json,
     on_step,
 )
-from vaillant_eebus.hems.service import HemsService, HemsStatus, ModeNotAvailable, PlanView, RoomsView, plan_csv
+from vaillant_eebus.hems.service import HemsService, HemsStatus, ModeNotAvailable, PlanView, plan_csv
 from vaillant_eebus.history import PowerHistory
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
 from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID, is_own_entity
@@ -57,9 +57,14 @@ from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore, 
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
 from vaillant_eebus.room_data import (
     COMFORT_K,
+    CORRECTION_LIMIT_K,
+    DEADBAND_K,
     DESIGN_C,
     EMERGENCY_C,
     FLOW_LPH,
+    MAX_COMMANDS,
+    MIN_INTERVAL_MIN,
+    OFFSET_K,
     PRESETTING_MAX,
     RATED_W,
     ROOM_HEAT_LOAD_W,
@@ -67,10 +72,14 @@ from vaillant_eebus.room_data import (
     ROOM_SETPOINT_C,
     SCHEDULE_MAX,
     SURFACES_MAX,
+    ProbePair,
     RatedBasis,
+    RoomControlMode,
+    RoomStage,
     SurfaceKind,
     details_from_json,
 )
+from vaillant_eebus.rooms.service import RoomControl, RoomControlStatus
 from vaillant_eebus.settings import (
     HEAT_SENSORS_MAX,
     MYVAILLANT_ZONES_MAX,
@@ -285,6 +294,33 @@ class RoomDetailsRequest(BaseModel):
     defrost_loss_k: float | None = _range(ROOM_LOSS_K)
     throttle: bool = True
     emergency_c: float | None = _range(EMERGENCY_C)
+    correction_limit_k: float = _range(CORRECTION_LIMIT_K, 5.0)
+    offset_k: float = _range(OFFSET_K, 0.0)
+    deadband_k: float = _range(DEADBAND_K, 0.5)
+    min_interval_min: int = Field(default=15, ge=MIN_INTERVAL_MIN[0], le=MIN_INTERVAL_MIN[1])
+    max_commands: int = Field(default=24, ge=MAX_COMMANDS[0], le=MAX_COMMANDS[1])
+
+
+class RoomControlRequest(BaseModel):
+    mode: RoomControlMode
+    # "Steuern" needs the user's explicit confirmation.
+    confirm: bool = False
+
+
+class RoomStageRequest(BaseModel):
+    stage: RoomStage
+    confirm: bool = False
+
+
+class TestRunRequest(BaseModel):
+    action: Literal["arm", "cancel"]
+    confirm: bool = False
+
+
+class ProbeRequest(BaseModel):
+    flow_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    return_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    room_id: str | None = Field(default=None, pattern=ENTITY_ID.pattern)
 
 
 def _check_steps(values: dict[str, float | None], step: float, unit: str) -> None:
@@ -369,6 +405,20 @@ class ModeStatus:
     mode: OperatingMode
 
 
+@dataclass(frozen=True, slots=True)
+class RoomsPage:
+    """The page "Räume": what the energy management knows of the rooms and the room control."""
+
+    rooms: list[Any]
+    zones: list[Any]
+    control: RoomControlStatus | None
+
+
+@dataclass(frozen=True, slots=True)
+class Automation:
+    yaml: str
+
+
 class _Client(Protocol):
     async def is_disconnected(self) -> bool: ...
 
@@ -419,6 +469,7 @@ def create_app(
     trusted_clients: frozenset[str],
     zone: tzinfo = UTC,
     hems: HemsService | None = None,
+    rooms: RoomControl | None = None,
     restart: Callable[[], None] | None = None,
 ) -> FastAPI:
     """zone is Home Assistant's time zone: protocol days and downloaded times are local.
@@ -452,6 +503,22 @@ def create_app(
         if hems is None:
             raise WriteRejected(503, "Das Energiemanagement läuft nicht.")
         return hems
+
+    def room_control() -> RoomControl:
+        if rooms is None:
+            raise WriteRejected(503, "Die Raumregelung läuft nicht.")
+        return rooms
+
+    def rooms_page() -> RoomsPage:
+        view = energy_management().rooms_view()
+        return RoomsPage(
+            rooms=list(view.rooms), zones=list(view.zones), control=rooms.status() if rooms is not None else None
+        )
+
+    async def to_demo() -> None:
+        """Before demo mode: the room control hands the thermostats back while still live."""
+        if rooms is not None and gate.mode is OperatingMode.LIVE:
+            await rooms.before_demo()
 
     async def api_state(heat_pump: HeatPumpState | None) -> ApiState:
         electricity = energy.today()
@@ -512,6 +579,7 @@ def create_app(
         if request.connection is not gate.connection:
             if gate.mode is OperatingMode.LIVE:
                 # The new way is checked in demo mode first; live needs a new confirmation.
+                await to_demo()
                 gate.set_mode(OperatingMode.DEMO, confirm=False)
             # The zones have other IDs on the new way: the rooms take theirs along.
             current = state.current
@@ -562,6 +630,8 @@ def create_app(
 
     @app.post("/api/mode")
     async def set_mode(request: ModeRequest) -> ModeStatus:
+        if request.mode is OperatingMode.DEMO:
+            await to_demo()
         return ModeStatus(mode=gate.set_mode(request.mode, confirm=request.confirm))
 
     @app.post("/api/zones/{zone_id}/setpoint")
@@ -688,7 +758,7 @@ def create_app(
             await service.set_mode(request.mode)
         except ModeNotAvailable:
             raise WriteRejected(
-                409, "„Steuern“ kommt mit Version 1.4.0; diese Version beobachtet und plant nur."
+                409, "„Steuern“ der Zonen kommt mit Version 1.5.0; diese Version plant die Zonen nur."
             ) from None
         await service.plan_now()
         return service.status()
@@ -707,11 +777,41 @@ def create_app(
         )
 
     @app.get("/api/rooms")
-    async def get_rooms() -> RoomsView:
-        return energy_management().rooms_view()
+    async def get_rooms() -> RoomsPage:
+        return rooms_page()
+
+    @app.put("/api/rooms/control")
+    async def put_room_control(request: RoomControlRequest) -> RoomsPage:
+        await room_control().set_mode(request.mode, confirm=request.confirm)
+        return rooms_page()
+
+    @app.put("/api/rooms/probe")
+    async def put_probe(request: ProbeRequest) -> RoomsPage:
+        await room_control().set_probe(
+            ProbePair(flow_entity=request.flow_entity, return_entity=request.return_entity, room_id=request.room_id)
+        )
+        return rooms_page()
+
+    @app.get("/api/rooms/automation")
+    async def get_automation() -> Automation:
+        return Automation(yaml=room_control().automation())
+
+    @app.put("/api/rooms/{entity_id}/stage")
+    async def put_room_stage(entity_id: RoomId, request: RoomStageRequest) -> RoomsPage:
+        await room_control().set_stage(entity_id, request.stage, confirm=request.confirm)
+        return rooms_page()
+
+    @app.post("/api/rooms/{entity_id}/test")
+    async def room_test(entity_id: RoomId, request: TestRunRequest) -> RoomsPage:
+        control = room_control()
+        if request.action == "arm":
+            await control.arm_test(entity_id, confirm=request.confirm)
+        else:
+            await control.cancel_test(entity_id)
+        return rooms_page()
 
     @app.put("/api/rooms/{entity_id}")
-    async def put_room(entity_id: RoomId, request: RoomDetailsRequest) -> RoomsView:
+    async def put_room(entity_id: RoomId, request: RoomDetailsRequest) -> RoomsPage:
         service = energy_management()
         _check_steps(
             {
@@ -736,16 +836,35 @@ def create_app(
             0.1,
             "K",
         )
+        _check_steps(
+            {
+                "Die Grenze der Korrektur": request.correction_limit_k,
+                "Der feste Ausgleich": request.offset_k,
+                "Die Totzone": request.deadband_k,
+            },
+            0.5,
+            "K",
+        )
         if any(window.start == window.end for window in request.schedule):
             raise WriteRejected(422, "Ein Zeitfenster braucht verschiedene Zeiten für Beginn und Ende.")
-        try:
-            home_assistant.change_room(entity_id, details_from_json(request.model_dump(mode="json")))
-        except KeyError:
-            raise WriteRejected(
-                404, "Diesen Raum gibt es nicht (mehr). Räume legen Sie in den Einstellungen an."
-            ) from None
+        current = home_assistant.settings
+        known = next((room for room in current.rooms if room.entity_id == entity_id), None)
+        if known is None:
+            raise WriteRejected(404, "Diesen Raum gibt es nicht (mehr). Räume legen Sie in den Einstellungen an.")
+        trv = request.trv_entity
+        if trv is not None and trv in current.myvaillant.zones:
+            raise WriteRejected(422, "Diese Klima-Entität ist eine Zone von myVAILLANT, kein Heizkörper-Thermostat.")
+        if trv is not None and any(
+            room.details.trv_entity == trv for room in current.rooms if room.entity_id != entity_id
+        ):
+            raise WriteRejected(422, "Dieses Thermostat gehört schon zu einem anderen Raum.")
+        if known.details.stage is RoomStage.CONTROL and trv != known.details.trv_entity:
+            raise WriteRejected(409, "Der Raum steht auf „Steuern“; das Thermostat erst nach „Vorschau“ wechseln.")
+        details = details_from_json(request.model_dump(mode="json"))
+        # The stage is changed on its own (with confirmation); the editor keeps it.
+        home_assistant.change_room(entity_id, replace(details, stage=known.details.stage))
         service.wake()
-        return service.rooms_view()
+        return rooms_page()
 
     @app.get("/api/history/power")
     async def get_power_history() -> PowerHistory:

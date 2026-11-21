@@ -12,6 +12,12 @@ stands in for Open-Meteo (/v1/dwd-icon) with the hours in open_meteo.
 add_myvaillant() adds the entities of the myVAILLANT integration like the
 real installation (two zones, hot water, outdoor temperature, power); the
 services on them change the states as the integration does.
+
+add_thermostats() adds radiator thermostats as Zigbee2MQTT shows them (an
+Aqara W600 and a Eurotronic Comet with their other entities, invented IEEE
+addresses), a room sensor and the pair of pipe sensors; climate.set_temperature
+on a thermostat sets its setpoint (at once, after trv_lag seconds, or never for
+the ones in trv_silent).
 """
 
 from __future__ import annotations
@@ -33,6 +39,18 @@ MV_ZONE_2 = "climate.zuhause_zone_2_climate"
 MV_HOT_WATER = "water_heater.zuhause_domestic_hot_water_0"
 MV_OUTDOOR = "sensor.zuhause_outdoor_temperature"
 MV_POWER = "sensor.zuhause_device_0_arotherm_split_plus_current_power"
+# Zigbee2MQTT thermostats and sensors (invented IEEE addresses).
+AQARA = "0x00158d0000000a01"
+COMET = "0x00158d0000000b02"
+TRV_OFFICE = f"climate.{AQARA}"
+TRV_OFFICE_VALVE = f"sensor.{AQARA}_position"
+TRV_BATH = f"climate.{COMET}"
+TRV_BATH_VALVE = f"sensor.{COMET}_pi_heating_demand"
+TRV_BATH_TEMPERATURE = f"sensor.{COMET}_local_temperature"
+OFFICE = "sensor.office_temperature"
+OFFICE_HUMIDITY = "sensor.office_humidity"
+PROBE_FLOW = "sensor.0xa4c1380000000c03_temperature"
+PROBE_RETURN = "sensor.0xa4c1380000000d04_temperature"
 # The integration's default length of a quick veto.
 QUICK_VETO_HOURS = 3.0
 _DHW_OPERATIONS = ["Manual", "Time Controlled", "Off", "Cylinder Boost"]
@@ -77,6 +95,10 @@ class FakeHomeAssistant:
         # once, falls back to the old one before it returns (the integration's refresh still
         # gets the cloud's old data) and shows the new one again after this long.
         self.cloud_lag: float | None = None
+        # Zigbee2MQTT thermostats: a setpoint arrives after trv_lag seconds, never for trv_silent.
+        self.trvs: set[str] = set()
+        self.trv_lag: float | None = None
+        self.trv_silent: set[str] = set()
         self.connections = 0
         self.refuse_auth = False
         self._sockets: list[_Socket] = []
@@ -184,6 +206,52 @@ class FakeHomeAssistant:
         )
         self.set(MV_OUTDOOR, "4.5", unit="°C", name="Zuhause Outdoor Temperature")
         self.set(MV_POWER, "850", unit="W", name="Zuhause Device 0 aroTHERM Split plus Current Power")
+
+    def add_thermostats(self) -> None:
+        """An Aqara W600 in the office (room sensor with humidity), a Comet in the bathroom, the probe pair."""
+        self.trvs |= {TRV_OFFICE, TRV_BATH}
+        self.set(
+            TRV_OFFICE,
+            "heat",
+            name="Thermostat Büro",
+            attributes={
+                "hvac_modes": ["off", "heat"],
+                "preset_mode": "none",
+                "preset_modes": ["none", "away"],
+                "min_temp": 5,
+                "max_temp": 30,
+                "target_temp_step": 0.5,
+                "temperature": 21.0,
+                "current_temperature": 21.5,
+            },
+        )
+        self.set(f"select.{AQARA}_sensor", "internal", name="Thermostat Büro Sensor")
+        self.set(f"switch.{AQARA}_window_detection", "off", name="Thermostat Büro Fenstererkennung")
+        self.set(f"lock.{AQARA}_child_lock", "locked", name="Thermostat Büro Kindersicherung")
+        self.set(f"binary_sensor.{AQARA}_valve_alarm", "off", name="Thermostat Büro Ventilalarm")
+        self.set(f"sensor.{AQARA}_battery", "90", unit="%", name="Thermostat Büro Batterie")
+        self.set(TRV_OFFICE_VALVE, "30", unit="%", name="Thermostat Büro Ventil")
+        self.set(
+            TRV_BATH,
+            "auto",
+            name="Thermostat Bad",
+            attributes={
+                "hvac_modes": ["off", "auto", "heat"],
+                "min_temp": 8,
+                "max_temp": 28,
+                "target_temp_step": 0.5,
+                "temperature": 22.0,
+                "current_temperature": 22.5,
+            },
+        )
+        self.set(f"select.{COMET}_trv_mode", "2", name="Thermostat Bad trv_mode")
+        self.set(TRV_BATH_VALVE, "40", unit="%", name="Thermostat Bad Wärmebedarf")
+        self.set(TRV_BATH_TEMPERATURE, "22.5", unit="°C", name="Thermostat Bad Temperatur")
+        self.set(f"sensor.{COMET}_battery", "80", unit="%", name="Thermostat Bad Batterie")
+        self.set(OFFICE, "21.0", unit="°C", name="Büro Temperatur")
+        self.set(OFFICE_HUMIDITY, "48", unit="%", name="Büro Feuchte", attributes={"device_class": "humidity"})
+        self.set(PROBE_FLOW, "40.0", unit="°C", name="Fühler A")
+        self.set(PROBE_RETURN, "30.0", unit="°C", name="Fühler B")
 
     def change(self, entity_id: str, state: str | None = None, **attributes: Any) -> None:
         """Change an entity's state or some of its attributes, keeping the rest."""
@@ -299,6 +367,8 @@ class FakeHomeAssistant:
         self.service_calls.append((service, body, dict(request.query)))
         if service in self.service_status:
             return web.json_response({"message": "Failed"}, status=self.service_status[service])
+        if service == "climate.set_temperature" and body.get("entity_id") in self.trvs:
+            return self._thermostat(body)
         if service in _DEVICE_SERVICES:
             entity_id = body.get("entity_id")
             if entity_id not in self.states:
@@ -350,6 +420,20 @@ class FakeHomeAssistant:
                 operation = body["operation_mode"]
                 attributes = {} if operation == "Cylinder Boost" else {"operation_mode": operation}
                 self.change(entity_id, operation, **attributes)
+
+    def _thermostat(self, body: dict[str, Any]) -> web.Response:
+        """What Zigbee2MQTT does: the thermostat takes the setpoint and reports it back."""
+        if set(body) != {"entity_id", "temperature"}:
+            return web.json_response({"message": "extra keys not allowed"}, status=400)
+        entity_id = body["entity_id"]
+        celsius = float(body["temperature"])
+        if entity_id in self.trv_silent:
+            return web.json_response([])
+        if self.trv_lag is None:
+            self.change(entity_id, temperature=celsius)
+        else:
+            asyncio.get_running_loop().call_later(self.trv_lag, lambda: self.change(entity_id, temperature=celsius))
+        return web.json_response([])
 
     def _restore(self, entity_id: str, saved: dict[str, Any]) -> None:
         self.set(entity_id, saved["state"], attributes=saved["attributes"])

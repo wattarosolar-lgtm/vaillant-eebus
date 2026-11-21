@@ -4,18 +4,21 @@ Kept in settings.json with each room (key "details"). The values of the static
 hydraulic balancing are start values for learning; the app never sends any of
 them anywhere. Every value is checked on its own: an invalid one falls back to
 its default and is logged.
+
+Also here: the switch of the room control (1.4.0, key "room_control") with the
+pair of flow and return sensors for the test runs, and each room's stage.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import time
+from datetime import datetime, time
 from enum import StrEnum
 from typing import Any
 
 from vaillant_eebus.hems.config import in_window, is_number, on_step, parse_time
-from vaillant_eebus.ids import CLIMATE_ENTITY, SENSOR_ENTITY
+from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,7 +26,7 @@ ROOM_HEAT_LOAD_W = (0.0, 10000.0)
 DESIGN_C = (10.0, 30.0)
 RATED_W = (0.0, 20000.0)
 FLOW_LPH = (0.0, 2000.0)
-# Room setpoints the app plans with; the thermostats' own limits come on top (1.5.0).
+# Room setpoints the app plans with; the thermostats' own limits come on top.
 ROOM_SETPOINT_C = (12.0, 26.0)
 COMFORT_K = (0.0, 2.0)
 ROOM_LOSS_K = (0.0, 3.0)
@@ -32,6 +35,67 @@ SURFACES_MAX = 4
 SCHEDULE_MAX = 4
 PRESETTING_MAX = 20
 DEFAULT_SETPOINT_C = 20.0
+# Room control (punkt1-trv-regelung.md 3 and 3a): how far the thermostat's setpoint may differ from
+# the room's, the fixed offset of a room measured at its thermostat, and how the valves are spared.
+CORRECTION_LIMIT_K = (0.5, 10.0)
+OFFSET_K = (-1.0, 3.0)
+DEADBAND_K = (0.5, 3.0)
+MIN_INTERVAL_MIN = (5, 240)
+MAX_COMMANDS = (4, 96)
+
+
+class RoomStage(StrEnum):
+    """A room's stage in the room control; the switch for all rooms caps it."""
+
+    # Reads and learns; window and supply only as "würde" (as 1.3.0).
+    OBSERVE = "observe"
+    # Computes the thermostat's setpoint and logs what it would send.
+    PREVIEW = "preview"
+    # Sends the setpoint to the thermostat (live mode, after a test run).
+    CONTROL = "control"
+
+
+class RoomControlMode(StrEnum):
+    """The switch of the room control for all rooms."""
+
+    OFF = "off"
+    OBSERVE = "observe"
+    PREVIEW = "preview"
+    CONTROL = "control"
+
+
+_ORDER = (RoomControlMode.OFF, RoomControlMode.OBSERVE, RoomControlMode.PREVIEW, RoomControlMode.CONTROL)
+
+
+def effective_stage(mode: RoomControlMode, stage: RoomStage) -> RoomControlMode:
+    """The lower of the switch for all rooms and the room's own stage."""
+    return min(mode, RoomControlMode(stage.value), key=_ORDER.index)
+
+
+def at_least(stage: RoomControlMode, floor: RoomControlMode) -> bool:
+    return _ORDER.index(stage) >= _ORDER.index(floor)
+
+
+@dataclass(frozen=True, slots=True)
+class ProbePair:
+    """The wandering pair of pipe sensors for the test runs (punkt1-trv-regelung.md 3c)."""
+
+    flow_entity: str | None = None
+    return_entity: str | None = None
+    # The room whose radiator the pair is fixed to; None: somewhere else.
+    room_id: str | None = None
+    # Since when it is fixed there.
+    since: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RoomControlSettings:
+    mode: RoomControlMode = RoomControlMode.OFF
+    probe: ProbePair = ProbePair()
+    # Test runs happen at night: they start from test_start to test_latest_start and end by test_end.
+    test_start: time = time(22, 0)
+    test_latest_start: time = time(1, 0)
+    test_end: time = time(5, 0)
 
 
 class SurfaceKind(StrEnum):
@@ -86,10 +150,18 @@ class RoomDetails:
     # Allowed temperature loss at night and to avoid defrosts; None: the energy management's default.
     night_loss_k: float | None = None
     defrost_loss_k: float | None = None
-    # The room may be throttled to send more water to a cold room (1.5.0).
+    # The room may be throttled to send more water to a cold room.
     throttle: bool = True
-    # The thermostat's setpoint when the app fails (template of the emergency automation, 1.5.0).
+    # The thermostat's setpoint when the app fails (template of the emergency automation).
     emergency_c: float | None = None
+    # Room control: the room's stage, the limit of the correction, the fixed offset of a room without
+    # its own sensor, and how its thermostat's valve is spared (dead band, interval, commands a day).
+    stage: RoomStage = RoomStage.OBSERVE
+    correction_limit_k: float = 5.0
+    offset_k: float = 0.0
+    deadband_k: float = 0.5
+    min_interval_min: int = 15
+    max_commands: int = 24
 
     def setpoint_at(self, moment: time) -> float:
         """The room's setpoint at this local time of day."""
@@ -105,6 +177,15 @@ class RoomDetails:
         design = self.design_c if self.design_c is not None else DEFAULT_SETPOINT_C
         spread = design - design_outdoor_c
         return self.heat_load_w / spread if spread > 1 else None
+
+    def setpoint_range(self) -> tuple[float, float]:
+        """Lowest and highest setpoint of the room over the day."""
+        values = [self.setpoint_c, *(window.setpoint_c for window in self.schedule)]
+        return min(values), max(values)
+
+    def fallback_c(self) -> float:
+        """The thermostat's setpoint when the app lets go: the emergency value, else the room's setpoint."""
+        return self.emergency_c if self.emergency_c is not None else self.setpoint_c
 
 
 def details_from_json(raw: Any) -> RoomDetails:
@@ -130,6 +211,12 @@ def details_from_json(raw: Any) -> RoomDetails:
         defrost_loss_k=_number(raw, "defrost_loss_k", ROOM_LOSS_K, step=0.1),
         throttle=throttle if isinstance(throttle, bool) else defaults.throttle,
         emergency_c=_number(raw, "emergency_c", EMERGENCY_C, step=0.5),
+        stage=_stage(raw.get("stage")),
+        correction_limit_k=_value(raw, "correction_limit_k", CORRECTION_LIMIT_K, defaults.correction_limit_k, step=0.5),
+        offset_k=_value(raw, "offset_k", OFFSET_K, defaults.offset_k, step=0.5),
+        deadband_k=_value(raw, "deadband_k", DEADBAND_K, defaults.deadband_k, step=0.5),
+        min_interval_min=int(_value(raw, "min_interval_min", MIN_INTERVAL_MIN, defaults.min_interval_min, step=1)),
+        max_commands=int(_value(raw, "max_commands", MAX_COMMANDS, defaults.max_commands, step=1)),
     )
 
 
@@ -165,7 +252,79 @@ def details_to_json(details: RoomDetails) -> dict[str, Any]:
         "defrost_loss_k": details.defrost_loss_k,
         "throttle": details.throttle,
         "emergency_c": details.emergency_c,
+        "stage": details.stage.value,
+        "correction_limit_k": details.correction_limit_k,
+        "offset_k": details.offset_k,
+        "deadband_k": details.deadband_k,
+        "min_interval_min": details.min_interval_min,
+        "max_commands": details.max_commands,
     }
+
+
+def room_control_from_json(raw: Any, *, observe: bool) -> RoomControlSettings:
+    """The switch and the probe pair; without saved settings (1.3.x) observe chooses the stage."""
+    if raw is None:
+        return RoomControlSettings(mode=RoomControlMode.OBSERVE if observe else RoomControlMode.OFF)
+    if not isinstance(raw, dict):
+        _LOGGER.warning("Settings: room_control is not an object, ignored")
+        return RoomControlSettings()
+    defaults = RoomControlSettings()
+    mode = raw.get("mode")
+    raw_probe = raw.get("probe")
+    probe: dict[str, Any] = raw_probe if isinstance(raw_probe, dict) else {}
+    since = probe.get("since")
+    parsed_since = None
+    if isinstance(since, str):
+        try:
+            parsed_since = datetime.fromisoformat(since)
+        except ValueError:
+            _LOGGER.warning("Settings: invalid probe time %r ignored", since)
+    room_id = probe.get("room_id")
+    return RoomControlSettings(
+        mode=RoomControlMode(mode) if mode in {member.value for member in RoomControlMode} else defaults.mode,
+        probe=ProbePair(
+            flow_entity=_entity(probe, "flow_entity"),
+            return_entity=_entity(probe, "return_entity"),
+            room_id=room_id if isinstance(room_id, str) and ENTITY_ID.match(room_id) else None,
+            since=parsed_since if parsed_since is not None and parsed_since.tzinfo is not None else None,
+        ),
+        test_start=_time(raw, "test_start", defaults.test_start),
+        test_latest_start=_time(raw, "test_latest_start", defaults.test_latest_start),
+        test_end=_time(raw, "test_end", defaults.test_end),
+    )
+
+
+def room_control_to_json(settings: RoomControlSettings) -> dict[str, Any]:
+    probe = settings.probe
+    return {
+        "mode": settings.mode.value,
+        "probe": {
+            "flow_entity": probe.flow_entity,
+            "return_entity": probe.return_entity,
+            "room_id": probe.room_id,
+            "since": probe.since.isoformat() if probe.since is not None else None,
+        },
+        "test_start": settings.test_start.strftime("%H:%M"),
+        "test_latest_start": settings.test_latest_start.strftime("%H:%M"),
+        "test_end": settings.test_end.strftime("%H:%M"),
+    }
+
+
+def _stage(raw: Any) -> RoomStage:
+    if raw is None:
+        return RoomStage.OBSERVE
+    if raw in {member.value for member in RoomStage}:
+        return RoomStage(raw)
+    _LOGGER.warning("Settings: unknown room stage %r, using observe", raw)
+    return RoomStage.OBSERVE
+
+
+def _time(raw: dict[str, Any], key: str, default: time) -> time:
+    value = raw.get(key)
+    parsed = parse_time(value) if isinstance(value, str) else None
+    if value is not None and parsed is None:
+        _LOGGER.warning("Settings: invalid time %r for room_control.%s, using the default", value, key)
+    return parsed or default
 
 
 def _surfaces(raw: Any) -> tuple[HeatingSurface, ...]:

@@ -35,7 +35,9 @@ class HemsSources(HomeAssistantListener):
             rooms |= {
                 entity for entity in (details.trv_entity, details.valve_entity, details.humidity_entity) if entity
             }
-        return frozenset(rooms) | settings.hems.entities()
+        probe = settings.room_control.probe
+        pair = {entity for entity in (probe.flow_entity, probe.return_entity) if entity}
+        return frozenset(rooms) | settings.hems.entities() | pair
 
     def on_change(self, listener: Callable[[str, EntityState | None], None]) -> None:
         self._listeners.append(listener)

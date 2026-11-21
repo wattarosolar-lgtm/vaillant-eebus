@@ -82,6 +82,8 @@ class Sensor:
     # Energy counters are reported less often.
     energy: bool = False
     group: ExportGroup = ExportGroup.STATUS
+    # Reported whatever the export groups (the room control's life sign for the emergency automation).
+    always: bool = False
 
 
 class HomeAssistantExport(HomeAssistantListener):
@@ -110,13 +112,14 @@ class HomeAssistantExport(HomeAssistantListener):
         self._reported: set[str] = set()
         # Sensors created so far; they stay (as unavailable) when their value goes away.
         self._known: dict[str, Sensor] = {}
-        # More sensors, from the energy management.
+        # More sensors, from the energy management; and those reported in any case.
         self._sources: list[Callable[[], list[Sensor]]] = []
+        self._always: list[Callable[[], list[Sensor]]] = []
         self._wake = asyncio.Event()
 
-    def add_source(self, source: Callable[[], list[Sensor]]) -> None:
-        """Report the sensors of source too, in the group "Energiemanagement"."""
-        self._sources.append(source)
+    def add_source(self, source: Callable[[], list[Sensor]], *, always: bool = False) -> None:
+        """Report the sensors of source too: in the group "Energiemanagement", or with always in any case."""
+        (self._always if always else self._sources).append(source)
 
     def exported(self) -> list[str]:
         """Entity IDs this app currently reports, for the settings page."""
@@ -187,13 +190,13 @@ class HomeAssistantExport(HomeAssistantListener):
         return [
             fresh.get(entity_id) or replace(sensor, state=UNAVAILABLE)
             for entity_id, sensor in self._known.items()
-            if sensor.group in groups
+            if sensor.always or sensor.group in groups
         ]
 
     def _sensors(self, groups: frozenset[ExportGroup]) -> list[Sensor]:
         heat_pump = self._state.current
         reachable = heat_pump is not None and heat_pump.available and heat_pump.connected
-        sensors: list[Sensor] = []
+        sensors: list[Sensor] = [replace(sensor, always=True) for source in self._always for sensor in source()]
         if ExportGroup.STATUS in groups:
             sensors.append(_binary("connected", "Wärmepumpe verbunden", reachable, device_class="connectivity"))
         if ExportGroup.HEMS in groups:

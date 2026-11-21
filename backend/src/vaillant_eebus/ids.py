@@ -17,5 +17,16 @@ SENSOR_ENTITY = re.compile(r"^sensor\.[a-z0-9_]+$")
 OWN_ENTITY = re.compile(r"^(sensor|binary_sensor)\.vaillant_eebus_[a-z0-9_]+$")
 
 
+# Zigbee2MQTT names a device's entities after its IEEE address, e.g. "climate.0x54ef441001881d95"
+# and "sensor.0x54ef441001881d95_position".
+_IEEE = re.compile(r"^[a-z_]+\.(0x[0-9a-f]{16})(?:_[a-z0-9_]+)?$")
+
+
 def is_own_entity(entity_id: str) -> bool:
     return OWN_ENTITY.match(entity_id) is not None
+
+
+def ieee_address(entity_id: str | None) -> str | None:
+    """The Zigbee device an entity belongs to (Zigbee2MQTT naming), e.g. "0x54ef441001881d95"."""
+    match = _IEEE.match(entity_id) if entity_id else None
+    return match.group(1) if match else None

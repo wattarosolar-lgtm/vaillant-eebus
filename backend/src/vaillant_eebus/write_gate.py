@@ -1,4 +1,4 @@
-"""The only place that writes to the heat pump.
+"""The only place that writes to the heat pump and to the radiator thermostats.
 
 Every change - from the UI, the API and the energy management's planner -
 goes through WriteGate.submit(). The gate checks the command against what the
@@ -21,28 +21,39 @@ Two ways lead to the heat pump: the EEBUS bridge, or with the connection
 myVAILLANT a Link that calls the integration's services in Home Assistant
 (myvaillant.py). No other module calls the bridge client's write methods or a
 link's send_command(); tests check that.
+
+RoomGate (1.4.0) is the one way to the radiator thermostats of the rooms: it
+alone calls Home Assistant's room service (climate.set_temperature) and spares
+the valves (dead band, interval, commands a day) whatever the room control
+decides.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
+import os
+import tempfile
 import time
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from enum import StrEnum
+from pathlib import Path
 from typing import Protocol
 
 import grpc
 
 from vaillant_eebus.bridge_client import BridgeClient
-from vaillant_eebus.ha_client import ServiceCallFailed
+from vaillant_eebus.ha_client import EntityState, HomeAssistantClient, ServiceCallFailed
+from vaillant_eebus.hems.sources import HemsSources
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.pairing import NotPairedError, PairingService
-from vaillant_eebus.settings import Connection, OperatingMode, SettingsStore
+from vaillant_eebus.room_data import RoomControlMode, effective_stage
+from vaillant_eebus.settings import Connection, OperatingMode, Room, Settings, SettingsStore
 from vaillant_eebus.state import MODE_NAMES, HeatPumpState, HotWater, Setpoint, StateHub, Zone
 
 _LOGGER = logging.getLogger(__name__)
@@ -1027,3 +1038,563 @@ def _mode_name(mode: str) -> str:
 def _value_part(observed: _Observed) -> str:
     """The value part of an observed text, e.g. "Solltemperatur 23,0 °C"."""
     return observed.text.split(": ", 1)[-1]
+
+
+# --- radiator thermostats (room control, 1.4.0) --------------------------------------------------
+
+# Technical limit between two commands to the same thermostat, whatever the reason.
+ROOM_RATE_LIMIT_S = 5.0
+# Zigbee2MQTT reports a new setpoint within seconds; a battery thermostat may sleep a few minutes.
+ROOM_CONFIRM_TIMEOUT_S = 300.0
+# After this many unconfirmed commands in a row the thermostat gets only window, safety and fallback.
+ROOM_UNCONFIRMED_MAX = 2
+ROOM_UNCONFIRMED_PAUSE = timedelta(hours=1)
+# A test run's own budget per thermostat and day (punkt1-trv-regelung.md 3b); not part of the daily limit.
+TEST_COMMANDS_MAX = 16
+# Step of the thermostats when the entity does not report its own.
+DEFAULT_TRV_STEP = 0.5
+ROOM_GATE_FILE = "room_gate.json"
+_NO_VALUE = frozenset({"unavailable", "unknown", ""})
+
+
+class RoomReason(StrEnum):
+    """Why the room control sets a thermostat; the protocol names it, the valve sparing depends on it."""
+
+    CONTROL = "control"
+    PREHEAT = "preheat"
+    REDISTRIBUTE = "redistribute"
+    WINDOW = "window"
+    MANUAL = "manual"
+    SAFETY = "safety"
+    TEST = "test"
+    FALLBACK = "fallback"
+
+
+ROOM_REASON_NAMES = {
+    RoomReason.CONTROL: "Regelung",
+    RoomReason.PREHEAT: "Vorheizen",
+    RoomReason.REDISTRIBUTE: "Umverteilen",
+    RoomReason.WINDOW: "Fenster",
+    RoomReason.MANUAL: "Handänderung zurückgesetzt",
+    RoomReason.SAFETY: "Sicherheit, Raum zu warm",
+    RoomReason.TEST: "Testlauf",
+    RoomReason.FALLBACK: "Rückfall auf den Notfallwert",
+}
+# Valve sparing (punkt1-trv-regelung.md 3a): these reasons need no dead band and no interval ...
+_FREE_OF_SPARING = frozenset(
+    {RoomReason.WINDOW, RoomReason.MANUAL, RoomReason.SAFETY, RoomReason.FALLBACK, RoomReason.TEST}
+)
+# ... and these still go out when the day's commands are used up.
+_OVER_THE_LIMIT = frozenset({RoomReason.WINDOW, RoomReason.SAFETY, RoomReason.FALLBACK})
+
+
+@dataclass(frozen=True, slots=True)
+class SetThermostatSetpoint:
+    """The setpoint of a room's radiator thermostat: the one chosen for the room in the settings."""
+
+    room_id: str
+    celsius: float
+    reason: RoomReason
+
+
+class Held(StrEnum):
+    """Why a valid command was not sent (valve sparing); the room control tries again later."""
+
+    SAME = "same"
+    DEADBAND = "deadband"
+    INTERVAL = "interval"
+    LIMIT = "limit"
+    PAUSED = "paused"
+
+
+@dataclass(frozen=True, slots=True)
+class RoomWriteResult:
+    sent: bool
+    message: str
+    # Why nothing was sent although the command is allowed; None when it was sent (or would be).
+    held: Held | None = None
+    # The earliest time the next command may go out (interval).
+    retry_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ThermostatLimits:
+    min_c: float
+    max_c: float
+    step: float
+
+    def round(self, celsius: float) -> float:
+        """To the thermostat's step (counted from its minimum) and into its range."""
+        steps = round((celsius - self.min_c) / self.step)
+        return round(min(self.max_c, max(self.min_c, self.min_c + steps * self.step)), 2)
+
+    def on_step(self, celsius: float) -> bool:
+        steps = (celsius - self.min_c) / self.step
+        return abs(steps - round(steps)) <= 1e-6
+
+
+@dataclass(frozen=True, slots=True)
+class ThermostatCommands:
+    """What the gate counts for one thermostat, for the page "Räume"."""
+
+    today: int
+    limit: int
+    test_today: int
+    last_sent: datetime | None
+    # The value the app set last (confirmed or still on its way); None when unknown.
+    expected_c: float | None
+    pending_c: float | None
+    unconfirmed: int
+    paused_until: datetime | None
+
+
+@dataclass
+class _Trv:
+    day: date | None = None
+    count: int = 0
+    test_count: int = 0
+    last_sent: datetime | None = None
+    expected: float | None = None
+    # The app has set this thermostat since it took it over; the fallback may only go to these.
+    touched: bool = False
+    unconfirmed: int = 0
+    paused_until: datetime | None = None
+    pending: float | None = None
+    pending_since: datetime | None = None
+    pending_text: str = ""
+    limit_logged: date | None = None
+
+
+class RoomGate:
+    """The only place that writes to radiator thermostats (punkt1-trv-regelung.md 8).
+
+    One service, climate.set_temperature with only the temperature, on the
+    thermostat a room has in the settings - never on a myVAILLANT zone. A room
+    must be in "Steuern" (switch and room), a test run needs the room control
+    on, the fallback only goes to thermostats the app has set. The value must
+    fit the thermostat's range and step and the room's limits; dead band,
+    interval and the commands a day spare the valves here, not only in the
+    room control. Preview and demo mode send nothing; their counting is
+    simulated separately, so the preview shows what control would send.
+    """
+
+    def __init__(
+        self,
+        client: HomeAssistantClient | None,
+        settings: SettingsStore,
+        sources: HemsSources,
+        log: LogStore,
+        data_dir: Path,
+        *,
+        zone: tzinfo = UTC,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        confirm_timeout_s: float = ROOM_CONFIRM_TIMEOUT_S,
+        rate_limit_s: float = ROOM_RATE_LIMIT_S,
+    ) -> None:
+        self._client = client
+        self._settings = settings
+        self._sources = sources
+        self._log = log
+        self._path = data_dir / ROOM_GATE_FILE
+        self._zone = zone
+        self._clock = clock
+        self._confirm_timeout = timedelta(seconds=confirm_timeout_s)
+        self._rate_limit = timedelta(seconds=rate_limit_s)
+        self._live: dict[str, _Trv] = {}
+        self._preview: dict[str, _Trv] = {}
+        # Last known range of each thermostat, for the fallback when its state is gone (stopping).
+        self._limits: dict[str, ThermostatLimits] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._load()
+        sources.on_change(self._changed)
+
+    # --- for the room control and the page -----------------------------------------------
+
+    def limits(self, trv: str) -> ThermostatLimits | None:
+        """The thermostat's range and step as Home Assistant reports them now."""
+        state = self._sources.get(trv)
+        if state is None or state.state in _NO_VALUE:
+            return None
+        low, high = _finite(state.attributes.get("min_temp")), _finite(state.attributes.get("max_temp"))
+        if low is None or high is None or low >= high:
+            return None
+        step = _finite(state.attributes.get("target_temp_step"))
+        limits = ThermostatLimits(low, high, step if step is not None and step > 0 else DEFAULT_TRV_STEP)
+        self._limits[trv] = limits
+        return limits
+
+    def known_limits(self, trv: str) -> ThermostatLimits | None:
+        """The range now, else the last one known (for the fallback while stopping)."""
+        return self.limits(trv) or self._limits.get(trv)
+
+    def expected(self, trv: str) -> float | None:
+        """The setpoint the app set last on this thermostat (live)."""
+        state = self._live.get(trv)
+        return state.expected if state is not None else None
+
+    def sending(self, trv: str) -> bool:
+        """A command to this thermostat is not confirmed yet."""
+        state = self._live.get(trv)
+        return state is not None and state.pending is not None
+
+    def touched(self) -> list[str]:
+        """Thermostats the app has set and not handed back yet."""
+        return sorted(trv for trv, state in self._live.items() if state.touched)
+
+    def commands(self, trv: str, *, preview: bool = False) -> ThermostatCommands:
+        state = (self._preview if preview else self._live).get(trv) or _Trv()
+        self._new_day(state, self._clock())
+        room = self._room_of(trv)
+        return ThermostatCommands(
+            today=state.count,
+            limit=room.details.max_commands if room is not None else 0,
+            test_today=state.test_count,
+            last_sent=state.last_sent,
+            expected_c=state.expected,
+            pending_c=state.pending,
+            unconfirmed=state.unconfirmed,
+            paused_until=state.paused_until,
+        )
+
+    async def submit(self, command: SetThermostatSetpoint, *, preview: bool = False) -> RoomWriteResult:
+        """Check the command and, in live mode with the room in "Steuern", send it to the thermostat.
+
+        preview checks it and logs what control would send. Raises WriteRejected when
+        the command is not allowed, WriteNotExecuted when Home Assistant refused it and
+        WriteOutcomeUnknown when it is unknown whether it arrived.
+        """
+        settings = self._settings.current
+        room = next((item for item in settings.rooms if item.entity_id == command.room_id), None)
+        if room is None:
+            raise WriteRejected(404, "Diesen Raum gibt es nicht (mehr).")
+        trv = room.details.trv_entity
+        if trv is None:
+            raise WriteRejected(409, f"{room.name}: Es ist kein Thermostat gewählt.")
+        async with self._locks.setdefault(trv, asyncio.Lock()):
+            description = (
+                f"Thermostat {room.name}: Soll {_number(command.celsius, None)} °C "
+                f"({ROOM_REASON_NAMES[command.reason]})"
+            )
+            live = not preview and settings.operating_mode is OperatingMode.LIVE
+            try:
+                self._check_room(room, trv, command, settings, preview=preview)
+                limits = self._value_limits(trv, fallback=command.reason is RoomReason.FALLBACK)
+                _check_room_value(room, command, limits)
+            except WriteRejected as rejected:
+                category = LogCategory.ROOMS if preview else LogCategory.WRITE
+                self._log.add(category, f"Abgelehnt: {description}. {rejected.message}", problem=True)
+                raise
+            now = self._clock()
+            state = (self._live if live else self._preview).setdefault(trv, _Trv())
+            self._new_day(state, now)
+            reported = self._sources.attribute(trv, "temperature")
+            current = reported if live or state.expected is None else state.expected
+            held = self._held(room, trv, state, command, current, now)
+            if held is not None:
+                if command.reason is RoomReason.FALLBACK and held.held is Held.SAME and live:
+                    self._hand_back(state)
+                return held
+            if not live:
+                text = "Vorschau, würde senden" if preview else "Würde senden"
+                message = f"{text}: {description}"
+                self._log.add(LogCategory.ROOMS if preview else LogCategory.WRITE, message)
+                self._count(state, command, now)
+                state.expected = command.celsius
+                return RoomWriteResult(sent=False, message=message)
+            if self._client is None:
+                raise WriteRejected(409, "Ohne Home Assistant kann die App kein Thermostat stellen.")
+            return await self._send(trv, state, command, description, now)
+
+    async def run(self) -> None:
+        """Follow sent setpoints: not reported in time means not confirmed."""
+        while True:
+            await asyncio.sleep(5.0)
+            self.expire()
+
+    def expire(self) -> None:
+        now = self._clock()
+        changed = False
+        for trv, state in self._live.items():
+            since = state.pending_since
+            if state.pending is None or since is None or now - since < self._confirm_timeout:
+                continue
+            reported = self._sources.attribute(trv, "temperature")
+            still = f"; das Thermostat meldet {_number(reported, None)} °C" if reported is not None else ""
+            minutes = self._confirm_timeout.total_seconds() / 60
+            self._log.add(
+                LogCategory.WRITE, f"Nicht bestätigt nach {minutes:.0f} min: {state.pending_text}{still}", problem=True
+            )
+            state.pending = state.pending_since = None
+            state.expected = None
+            state.unconfirmed += 1
+            if state.unconfirmed >= ROOM_UNCONFIRMED_MAX:
+                state.paused_until = now + ROOM_UNCONFIRMED_PAUSE
+                room = self._room_of(trv)
+                self._log.add(
+                    LogCategory.ROOMS,
+                    f"Thermostat {room.name if room else trv} übernimmt die Sollwerte nicht "
+                    f"({state.unconfirmed}-mal nicht bestätigt). Die App sendet ihm eine Stunde lang nur Fenster, "
+                    "Sicherheit und Rückfall. Bitte Batterie und Funkverbindung prüfen.",
+                    problem=True,
+                )
+            changed = True
+        if changed:
+            self._save()
+
+    # --- internals ----------------------------------------------------------------------
+
+    def _check_room(
+        self, room: Room, trv: str, command: SetThermostatSetpoint, settings: Settings, *, preview: bool
+    ) -> None:
+        if trv in settings.myvaillant.zones:
+            raise WriteRejected(409, f"{room.name}: Das Thermostat ist eine Zone von myVAILLANT, kein Heizkörper.")
+        if any(other.details.trv_entity == trv for other in settings.rooms if other.entity_id != room.entity_id):
+            raise WriteRejected(409, f"{room.name}: Das Thermostat ist auch einem anderen Raum zugeordnet.")
+        if preview:
+            return
+        mode = settings.room_control.mode
+        match command.reason:
+            case RoomReason.TEST:
+                if mode is RoomControlMode.OFF:
+                    raise WriteRejected(409, "Die Raumregelung ist aus; ein Testlauf geht erst, wenn sie läuft.")
+            case RoomReason.FALLBACK:
+                state = self._live.get(trv)
+                if settings.operating_mode is OperatingMode.LIVE and (state is None or not state.touched):
+                    raise WriteRejected(409, f"{room.name}: Die App hat dieses Thermostat nicht gestellt.")
+            case _:
+                if effective_stage(mode, room.details.stage) is not RoomControlMode.CONTROL:
+                    raise WriteRejected(409, f"{room.name}: Der Raum steht nicht auf „Steuern“.")
+
+    def _value_limits(self, trv: str, *, fallback: bool) -> ThermostatLimits:
+        limits = self.limits(trv)
+        if limits is None and fallback:
+            limits = self._limits.get(trv)
+        if limits is None:
+            state = self._sources.get(trv)
+            if state is None or state.state in _NO_VALUE:
+                raise WriteRejected(409, "Das Thermostat ist gerade nicht erreichbar.")
+            raise WriteRejected(409, "Das Thermostat meldet keinen Bereich (min_temp/max_temp).")
+        return limits
+
+    def _held(
+        self,
+        room: Room,
+        trv: str,
+        state: _Trv,
+        command: SetThermostatSetpoint,
+        current: float | None,
+        now: datetime,
+    ) -> RoomWriteResult | None:
+        details = room.details
+        reason = command.reason
+        if state.paused_until is not None and now < state.paused_until and reason not in _OVER_THE_LIMIT:
+            return RoomWriteResult(sent=False, message="Thermostat pausiert", held=Held.PAUSED)
+        if state.pending is not None and abs(state.pending - command.celsius) < 0.01:
+            return RoomWriteResult(sent=False, message="Wird schon gesendet", held=Held.SAME)
+        if current is not None and abs(current - command.celsius) < 0.01:
+            return RoomWriteResult(sent=False, message="Bereits eingestellt", held=Held.SAME)
+        if (
+            reason not in _FREE_OF_SPARING
+            and current is not None
+            and abs(current - command.celsius) < details.deadband_k - 1e-6
+        ):
+            return RoomWriteResult(sent=False, message="Innerhalb der Totzone", held=Held.DEADBAND)
+        if state.last_sent is not None and reason is not RoomReason.FALLBACK:
+            # The fallback goes out even right after another command: the app may be stopping.
+            wait = self._rate_limit
+            if reason not in _FREE_OF_SPARING:
+                wait = max(wait, timedelta(minutes=details.min_interval_min))
+            if now - state.last_sent < wait:
+                return RoomWriteResult(
+                    sent=False, message="Mindestabstand", held=Held.INTERVAL, retry_at=state.last_sent + wait
+                )
+        if reason is RoomReason.TEST:
+            if state.test_count >= TEST_COMMANDS_MAX:
+                return RoomWriteResult(sent=False, message="Testlauf-Budget verbraucht", held=Held.LIMIT)
+            return None
+        if state.count >= details.max_commands and reason not in _OVER_THE_LIMIT:
+            if state.limit_logged != state.day and state is self._live.get(trv):
+                state.limit_logged = state.day
+                self._log.add(
+                    LogCategory.ROOMS,
+                    f"Thermostat {room.name}: Höchstzahl von {details.max_commands} Befehlen heute erreicht; bis "
+                    "Mitternacht gehen nur noch Fenster, Sicherheit und Rückfall hinaus.",
+                    problem=True,
+                )
+            return RoomWriteResult(sent=False, message="Höchstzahl erreicht", held=Held.LIMIT)
+        return None
+
+    async def _send(
+        self, trv: str, state: _Trv, command: SetThermostatSetpoint, description: str, now: datetime
+    ) -> RoomWriteResult:
+        assert self._client is not None
+        # In the database before Home Assistant sees the command.
+        await self._log.record(LogCategory.WRITE, f"Wird gesendet: {description}")
+        self._count(state, command, now)
+        state.touched = True
+        state.pending, state.pending_since, state.pending_text = command.celsius, now, description
+        self._save()
+        try:
+            await self._client.call_room_service("climate", "set_temperature", trv, {"temperature": command.celsius})
+        except ServiceCallFailed as err:
+            if err.executed is False:
+                state.pending = state.pending_since = None
+                if command.reason is RoomReason.TEST:
+                    state.test_count -= 1
+                else:
+                    state.count -= 1
+                self._save()
+                self._log.add(LogCategory.WRITE, f"Nicht ausgeführt: {description} ({err.code})", problem=True)
+                raise WriteNotExecuted(err.code) from err
+            state.expected = command.celsius
+            self._save()
+            self._log.add(
+                LogCategory.WRITE,
+                f"Ergebnis unbekannt: {description} ({err.code}); die App prüft, ob das Thermostat den Wert meldet.",
+                problem=True,
+            )
+            raise WriteOutcomeUnknown(err.code) from err
+        except BaseException:
+            state.pending = state.pending_since = None
+            self._save()
+            raise
+        state.expected = command.celsius
+        if command.reason is RoomReason.FALLBACK:
+            self._hand_back(state)
+        self._save()
+        self._log.add(LogCategory.WRITE, f"Gesendet: {description}")
+        return RoomWriteResult(sent=True, message=f"Gesendet: {description}")
+
+    def _hand_back(self, state: _Trv) -> None:
+        state.touched = False
+        self._save()
+
+    def _count(self, state: _Trv, command: SetThermostatSetpoint, now: datetime) -> None:
+        state.last_sent = now
+        if command.reason is RoomReason.TEST:
+            state.test_count += 1
+        else:
+            state.count += 1
+
+    def _new_day(self, state: _Trv, now: datetime) -> None:
+        today = now.astimezone(self._zone).date()
+        if state.day != today:
+            state.day, state.count, state.test_count = today, 0, 0
+
+    def _room_of(self, trv: str) -> Room | None:
+        return next((room for room in self._settings.current.rooms if room.details.trv_entity == trv), None)
+
+    def _changed(self, entity_id: str, entity: EntityState | None) -> None:
+        state = self._live.get(entity_id)
+        if state is None or state.pending is None or entity is None:
+            return
+        reported = _finite(entity.attributes.get("temperature"))
+        if reported is None or abs(reported - state.pending) >= 0.01:
+            return
+        room = self._room_of(entity_id)
+        self._log.add(
+            LogCategory.WRITE,
+            f"Bestätigt vom Thermostat: {room.name if room else entity_id} {_number(reported, None)} °C",
+        )
+        state.expected = state.pending
+        state.pending = state.pending_since = None
+        state.unconfirmed = 0
+        state.paused_until = None
+        self._save()
+
+    def _load(self) -> None:
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as err:
+            _LOGGER.warning("Room gate state %s unreadable (%s); counting starts again", self._path, err)
+            return
+        items = raw.get("thermostats") if isinstance(raw, dict) else None
+        for trv, item in (items or {}).items():
+            if not isinstance(item, dict):
+                continue
+            try:
+                self._live[trv] = _Trv(
+                    day=date.fromisoformat(item["day"]) if item.get("day") else None,
+                    count=int(item.get("count", 0)),
+                    test_count=int(item.get("test_count", 0)),
+                    last_sent=_moment(item.get("last_sent")),
+                    expected=_finite(item.get("expected")),
+                    touched=bool(item.get("touched", False)),
+                    unconfirmed=int(item.get("unconfirmed", 0)),
+                    paused_until=_moment(item.get("paused_until")),
+                )
+            except (TypeError, ValueError):
+                _LOGGER.warning("Room gate state of %s unreadable, ignored", trv)
+
+    def _save(self) -> None:
+        payload = {
+            "thermostats": {
+                trv: {
+                    "day": state.day.isoformat() if state.day else None,
+                    "count": state.count,
+                    "test_count": state.test_count,
+                    "last_sent": state.last_sent.isoformat() if state.last_sent else None,
+                    "expected": state.expected,
+                    "touched": state.touched,
+                    "unconfirmed": state.unconfirmed,
+                    "paused_until": state.paused_until.isoformat() if state.paused_until else None,
+                }
+                for trv, state in self._live.items()
+            }
+        }
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=ROOM_GATE_FILE, suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                json.dump(payload, file)
+            os.replace(tmp, self._path)
+        except OSError as err:
+            _LOGGER.warning("Saving the room gate state failed: %s", err)
+
+
+def _check_room_value(room: Room, command: SetThermostatSetpoint, limits: ThermostatLimits) -> None:
+    celsius = command.celsius
+    if not math.isfinite(celsius):
+        raise WriteRejected(422, "Der Sollwert ist keine Zahl.")
+    if not limits.min_c <= celsius <= limits.max_c:
+        raise WriteRejected(
+            422,
+            f"{room.name}: Das Thermostat nimmt {_number(limits.min_c, None)} bis {_number(limits.max_c, None)} °C an.",
+        )
+    if not limits.on_step(celsius):
+        raise WriteRejected(
+            422, f"{room.name}: Das Thermostat nimmt nur Schritte von {_number(limits.step, None)} °C an."
+        )
+    details = room.details
+    low, high = details.setpoint_range()
+    normal = low - details.correction_limit_k - 1e-6 <= celsius <= high + details.correction_limit_k + 1e-6
+    match command.reason:
+        case RoomReason.TEST:
+            return
+        case RoomReason.WINDOW if abs(celsius - limits.min_c) < 0.01 or normal:
+            return
+        case RoomReason.FALLBACK:
+            allowed = {limits.round(value) for value in (details.fallback_c(), *details.setpoint_range())}
+            if not any(abs(celsius - value) < 0.01 for value in allowed):
+                raise WriteRejected(422, f"{room.name}: Der Rückfall geht nur auf den Notfallwert oder das Raum-Soll.")
+        case _ if not normal:
+            raise WriteRejected(
+                422,
+                f"{room.name}: Der Sollwert liegt weiter als {_number(details.correction_limit_k, None)} K vom "
+                "Raum-Soll entfernt.",
+            )
+
+
+def _finite(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _moment(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    moment = datetime.fromisoformat(value)
+    return moment if moment.tzinfo is not None else None

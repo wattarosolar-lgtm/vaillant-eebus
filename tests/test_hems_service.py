@@ -417,7 +417,7 @@ async def test_control_comes_with_a_later_version(app: App) -> None:
     off = await app.http.post("/api/hems/mode", json={"mode": "off"})
 
     assert refused.status_code == 409
-    assert "1.4.0" in refused.json()["detail"]
+    assert "1.5.0" in refused.json()["detail"]
     assert off.json()["mode"] == "off"
     assert off.json()["available_modes"] == ["off", "preview"]
     assert "Energiemanagement ausgeschaltet." in await messages(app.log)

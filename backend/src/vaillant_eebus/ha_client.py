@@ -2,11 +2,13 @@
 
 The app reads the states of the entities the user chose and reports its own
 sensors: set_state() and remove_state() refuse every entity outside this
-app's prefix. It calls two kinds of services: weather.get_forecasts, which
-reads a weather forecast for the energy management, and - with the
-connection myVAILLANT - the few services in DEVICE_SERVICES that control the
-heat pump through the myVAILLANT integration's entities. Those are called
-only by the write gate (write_gate.py through myvaillant.py; a test checks it).
+app's prefix. It calls three kinds of services: weather.get_forecasts, which
+reads a weather forecast for the energy management; with the connection
+myVAILLANT the few services in DEVICE_SERVICES that control the heat pump
+through the myVAILLANT integration's entities; and ROOM_SERVICES, the one
+service that sets a radiator thermostat's setpoint. Both kinds that change
+something are called only by the write gate (write_gate.py, for the heat pump
+through myvaillant.py; tests check it).
 
 One WebSocket connection carries the state changes of the watched entities
 and the "homeassistant_started" event, and answers the reading of the
@@ -22,6 +24,7 @@ import asyncio
 import contextlib
 import itertools
 import logging
+import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -51,6 +54,12 @@ DEVICE_SERVICES: dict[tuple[str, str], re.Pattern[str]] = {
     ("mypyllant", "set_quick_veto"): CLIMATE_ENTITY,
     ("mypyllant", "cancel_quick_veto"): CLIMATE_ENTITY,
 }
+# The one service that controls a room: a radiator thermostat's setpoint (Zigbee2MQTT climate entity,
+# only the field "temperature"). Which thermostats may be targeted is the write gate's business.
+ROOM_SERVICES: dict[tuple[str, str], re.Pattern[str]] = {
+    ("climate", "set_temperature"): CLIMATE_ENTITY,
+}
+ROOM_SERVICE_FIELDS = frozenset({"temperature"})
 # Seconds between reading the watched entities again.
 REFRESH_INTERVAL = 300.0
 # Seconds to wait for an answer of Home Assistant.
@@ -61,6 +70,8 @@ STATISTICS_TIMEOUT = 60.0
 WS_MAX_MESSAGE = 32 * 1024 * 1024
 # A device service waits for the Vaillant cloud and the integration's refresh after it.
 DEVICE_SERVICE_TIMEOUT = 30.0
+# A thermostat's setpoint only goes to the MQTT broker.
+ROOM_SERVICE_TIMEOUT = 15.0
 # Answers that mean Home Assistant refused the call before the integration acted.
 _REFUSED = frozenset({400, 401, 403, 404, 405})
 
@@ -70,9 +81,9 @@ class HomeAssistantUnavailable(Exception):
 
 
 class ServiceCallFailed(Exception):
-    """A device service failed.
+    """A device or room service failed.
 
-    executed is False when the command certainly did not reach the heat pump
+    executed is False when the command certainly did not reach the device
     (Home Assistant refused it or was not reachable), None when that is unknown
     (an error of the integration or the cloud, or no answer in time).
     """
@@ -217,7 +228,8 @@ class HomeAssistantClient:
         """The hourly forecast of a weather entity.
 
         weather.get_forecasts reads and changes nothing; apart from it the app
-        calls only DEVICE_SERVICES (a test checks that no other service is called).
+        calls only DEVICE_SERVICES and ROOM_SERVICES (a test checks that no other
+        service is called).
         """
         if not WEATHER_ENTITY.match(entity_id):
             raise ValueError(f"{entity_id!r} is not a weather entity")
@@ -245,13 +257,36 @@ class HomeAssistantClient:
             raise ValueError(f"{domain}.{service} is not a service this app may call")
         if not pattern.match(entity_id):
             raise ValueError(f"{domain}.{service} may not target {entity_id!r}")
+        await self._call_service(domain, service, entity_id, data, limit=DEVICE_SERVICE_TIMEOUT)
+
+    async def call_room_service(self, domain: str, service: str, entity_id: str, data: Mapping[str, Any]) -> None:
+        """Call one of ROOM_SERVICES on a radiator thermostat; only the write gate does this.
+
+        Only the fields in ROOM_SERVICE_FIELDS with a finite number. Raises ValueError
+        for anything else, ServiceCallFailed when the call failed.
+        """
+        pattern = ROOM_SERVICES.get((domain, service))
+        if pattern is None:
+            raise ValueError(f"{domain}.{service} is not a room service")
+        if not pattern.match(entity_id):
+            raise ValueError(f"{domain}.{service} may not target {entity_id!r}")
+        if set(data) != ROOM_SERVICE_FIELDS or not all(
+            isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+            for value in data.values()
+        ):
+            raise ValueError(f"{domain}.{service}: only a temperature may be set, not {dict(data)!r}")
+        await self._call_service(domain, service, entity_id, data, limit=ROOM_SERVICE_TIMEOUT)
+
+    async def _call_service(
+        self, domain: str, service: str, entity_id: str, data: Mapping[str, Any], *, limit: float
+    ) -> None:
         if self._session is None:
             raise ServiceCallFailed("client not started", executed=False, code="NOT_STARTED")
         try:
             async with self._session.post(
                 f"{self._url}/api/services/{domain}/{service}",
                 json={"entity_id": entity_id, **data},
-                timeout=aiohttp.ClientTimeout(total=DEVICE_SERVICE_TIMEOUT),
+                timeout=aiohttp.ClientTimeout(total=limit),
             ) as response:
                 if response.status in _REFUSED:
                     raise ServiceCallFailed(

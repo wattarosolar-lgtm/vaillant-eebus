@@ -4,8 +4,10 @@ It watches the heat pump's power and outdoor temperature (starts, runs,
 pauses, defrosts, frost protection), samples the rooms every five minutes
 (room model, windows, supply), reads Home Assistant's long-term statistics
 (house model), fetches the 48-hour forecast and plans every quarter hour by
-rules. In this version it only shows and logs what it would do: it never calls
-the write gate (a test checks that the package does not even import it).
+rules. For the zones it only shows and logs what it would do: it never calls
+the write gate (a test checks that the package does not even import it). The
+room control (package rooms, 1.4.0) runs on its samples - it is called right
+after them - and tells it when a radiator zone really needs a higher flow.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import json
 import logging
 import os
 import statistics
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -76,7 +78,7 @@ from vaillant_eebus.hems.statistics import StatisticsHistory, daily_values, hour
 from vaillant_eebus.hems.windows import WindowDetector, WindowEvent
 from vaillant_eebus.home_assistant import POWER_SENSOR, HomeAssistant
 from vaillant_eebus.log_store import LogCategory, LogStore
-from vaillant_eebus.room_data import details_to_json
+from vaillant_eebus.room_data import RoomControlMode, at_least, details_to_json, effective_stage
 from vaillant_eebus.settings import Connection, ExportGroup, OperatingMode, Room, SettingsStore
 from vaillant_eebus.state import HeatPumpState, StateHub
 
@@ -284,8 +286,9 @@ class _Flow:
     offset_k: float = 0.0
     changed_at: datetime | None = None
     reason: str | None = None
-    # The last hint from the valves (not saved).
+    # The last hint from the valves (not saved), and the room control's word on it.
     hint: FlowHint = FlowHint.UNKNOWN
+    advice: str | None = None
 
 
 @dataclass
@@ -338,6 +341,8 @@ class HemsService:
         self._planned: dict[datetime, PlanHour] = {}
         self._logged_changes: list[tuple[datetime, str]] | None = None
         self._wake = asyncio.Event()
+        self._sampled: list[Callable[[datetime], Awaitable[None]]] = []
+        self._flow_advisor: Callable[[str, FlowHint], tuple[FlowHint, str | None] | None] | None = None
         self._load_state()
         self._load_history()
         self._check_legacy()
@@ -358,6 +363,29 @@ class HemsService:
     def wake(self) -> None:
         """Plan again soon, e.g. after new settings."""
         self._wake.set()
+
+    def on_sampled(self, listener: Callable[[datetime], Awaitable[None]]) -> None:
+        """Called every five minutes right after the samples and the rooms' supply (the room control)."""
+        self._sampled.append(listener)
+
+    def set_flow_advisor(self, advisor: Callable[[str, FlowHint], tuple[FlowHint, str | None] | None]) -> None:
+        """The room control's word on a radiator zone's flow hint: first redistribute, then the flow."""
+        self._flow_advisor = advisor
+
+    def window_open(self, room_id: str) -> bool:
+        window = self._windows.get(room_id)
+        return window is not None and window.open
+
+    def supply_of(self, room_id: str) -> SupplyState:
+        return self._supply.get(room_id, SupplyState(Supply.UNKNOWN, None))
+
+    def room_model(self, room_id: str) -> RoomModel | None:
+        return self._models.rooms.get(room_id)
+
+    def flow_of(self, zone_id: str) -> tuple[FlowHint, str | None] | None:
+        """The zone's flow hint now and its reason."""
+        flow = self._flows.get(zone_id)
+        return (flow.hint, flow.advice or flow.reason) if flow is not None else None
 
     async def run(self) -> None:
         try:
@@ -768,6 +796,7 @@ class HemsService:
                 ("humidity", self.sources.number(details.humidity_entity)),
                 ("valve", self.sources.number(details.valve_entity)),
                 ("trv_setpoint", self.sources.attribute(details.trv_entity, "temperature")),
+                ("trv_temperature", self.sources.attribute(details.trv_entity, "current_temperature")),
             ):
                 if value is not None:
                     values[room_series(room.entity_id, name)] = value
@@ -776,14 +805,20 @@ class HemsService:
                 self._window_event(room, window.tick(now))
         if values:
             await self.samples.add_async(now, values)
-        await self._update_supply(now)
+        recent = await self._update_supply(now)
+        for listener in self._sampled:
+            try:
+                await listener(now)
+            except Exception:
+                _LOGGER.exception("The room control failed after the samples")
+        self._update_flow(now, recent)
 
-    async def _update_supply(self, now: datetime) -> None:
+    async def _update_supply(self, now: datetime) -> dict[str, list[tuple[datetime, float]]]:
         settings = self._settings.current
         rooms = [room for room in settings.rooms if room.details.valve_entity]
         if not rooms:
             self._supply = {}
-            return
+            return {}
         names = [room_series(room.entity_id, value) for room in rooms for value in ("temperature", "valve")]
         series = await self.samples.series_async(names, now - timedelta(hours=1))
         local = now.astimezone(self._zone).time()
@@ -798,6 +833,7 @@ class HemsService:
             before = self._supply.get(room.entity_id)
             if (
                 self.mode is PlannerMode.PREVIEW
+                and self._observed(room)
                 and state.supply in (Supply.UNDER, Supply.OVER)
                 and (before is None or before.supply != state.supply)
             ):
@@ -807,6 +843,15 @@ class HemsService:
                 )
             supplies[room.entity_id] = state
         self._supply = supplies
+        return series
+
+    def _update_flow(self, now: datetime, series: Mapping[str, list[tuple[datetime, float]]]) -> None:
+        """Zone 2's flow hint from the valves ("würde" until the zones are controlled)."""
+        settings = self._settings.current
+        rooms = [room for room in settings.rooms if room.details.valve_entity]
+        if not rooms or not series:
+            return
+        supplies = self._supply
         hems = settings.hems
         for zone_config in hems.zones:
             if zone_config.kind is not ZoneKind.RADIATOR:
@@ -820,6 +865,11 @@ class HemsService:
                 now,
             )
             flow = self._flows.setdefault(zone_config.zone_id, _Flow())
+            flow.advice = None
+            if self._flow_advisor is not None:
+                advice = self._flow_advisor(zone_config.zone_id, hint)
+                if advice is not None:
+                    hint, flow.advice = advice
             flow.hint = hint
             if hint not in (FlowHint.HIGHER, FlowHint.LOWER):
                 continue
@@ -830,7 +880,7 @@ class HemsService:
             if offset == flow.offset_k:
                 continue
             under = [room.name for room in members if supplies[room.entity_id].supply is Supply.UNDER]
-            reason = (
+            reason = flow.advice or (
                 f"Vorlauf höher: {', '.join(under)} unterversorgt"
                 if hint is FlowHint.HIGHER
                 else "Vorlauf tiefer: alle Räume versorgt, kein Ventil weit offen"
@@ -857,8 +907,13 @@ class HemsService:
             detector = self._windows.setdefault(room.entity_id, WindowDetector())
             self._window_event(room, detector.feed(now, temperature, humidity))
 
+    def _observed(self, room: Room) -> bool:
+        """The room is not in the room control's preview or control, which log on their own."""
+        stage = effective_stage(self._settings.current.room_control.mode, room.details.stage)
+        return not at_least(stage, RoomControlMode.PREVIEW) or room.details.trv_entity is None
+
     def _window_event(self, room: Room, event: WindowEvent | None) -> None:
-        if event is None or self.mode is not PlannerMode.PREVIEW:
+        if event is None or self.mode is not PlannerMode.PREVIEW or not self._observed(room):
             return
         if event.opened:
             humidity = f" und {_number(event.drop_g)} g/m³ Feuchte" if event.drop_g is not None else ""

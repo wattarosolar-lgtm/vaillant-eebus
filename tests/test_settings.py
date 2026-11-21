@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from vaillant_eebus.hems.config import HemsSettings, hems_to_json
+from vaillant_eebus.room_data import RoomControlSettings, room_control_to_json
 from vaillant_eebus.settings import (
     Connection,
     ExportGroup,
@@ -38,6 +39,7 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
         "heat_energy_entities": [],
         "export": ["energy", "hems", "hot_water", "status", "temperatures", "zones"],
         "hems": hems_to_json(HemsSettings()),
+        "room_control": room_control_to_json(RoomControlSettings()),
     }
 
 

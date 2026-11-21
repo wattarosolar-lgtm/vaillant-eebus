@@ -13,9 +13,16 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from vaillant_eebus.hems.config import HemsSettings, hems_from_json, hems_to_json
-from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID
-from vaillant_eebus.room_data import RoomDetails, details_from_json, details_to_json
+from vaillant_eebus.hems.config import HemsSettings, PlannerMode, hems_from_json, hems_to_json
+from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID, ieee_address
+from vaillant_eebus.room_data import (
+    RoomControlSettings,
+    RoomDetails,
+    details_from_json,
+    details_to_json,
+    room_control_from_json,
+    room_control_to_json,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,7 +82,8 @@ class Room:
     """A room: the Home Assistant entity with its temperature and what the user entered for it.
 
     The entity is a temperature sensor, or - for a room without one - the radiator
-    thermostat's climate entity (its current_temperature, measured at the radiator).
+    thermostat's climate entity (its current_temperature, measured at the radiator)
+    or another sensor of the same thermostat (e.g. its local temperature).
     """
 
     entity_id: str
@@ -90,8 +98,15 @@ class Room:
 
     @property
     def measured_at_thermostat(self) -> bool:
-        """The room's temperature comes from its thermostat, at the radiator."""
-        return CLIMATE_ENTITY.match(self.entity_id) is not None
+        """The room's temperature comes from its thermostat, at the radiator.
+
+        Either the thermostat's climate entity or a sensor of the same Zigbee device
+        (Zigbee2MQTT names both after the device's IEEE address).
+        """
+        if CLIMATE_ENTITY.match(self.entity_id) is not None:
+            return True
+        device = ieee_address(self.entity_id)
+        return device is not None and device == ieee_address(self.details.trv_entity)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +146,7 @@ class Settings:
     heat_energy_entities: tuple[str, ...] = ()
     export: frozenset[ExportGroup] = DEFAULT_EXPORT
     hems: HemsSettings = field(default_factory=HemsSettings)
+    room_control: RoomControlSettings = field(default_factory=RoomControlSettings)
 
 
 class SettingsStore:
@@ -181,6 +197,7 @@ class SettingsStore:
             mode = data.get("operating_mode", OperatingMode.DEMO)
             if not isinstance(mode, str):
                 raise ValueError("operating_mode is not a string")
+            hems = hems_from_json(data.get("hems"))
             return Settings(
                 connection=_connection(data),
                 myvaillant=myvaillant_from_json(data.get("myvaillant")),
@@ -189,7 +206,9 @@ class SettingsStore:
                 rooms=_rooms(data.get("rooms", [])),
                 heat_energy_entities=_heat_entities(data),
                 export=_export(data.get("export")),
-                hems=hems_from_json(data.get("hems")),
+                hems=hems,
+                # Settings of 1.3.x: the rooms keep showing their "würde" while the energy management previews.
+                room_control=room_control_from_json(data.get("room_control"), observe=hems.mode is PlannerMode.PREVIEW),
             )
         except (ValueError, AttributeError) as err:
             corrupt = self._path.with_name(SETTINGS_FILE + ".corrupt")
@@ -361,4 +380,5 @@ def _to_json(settings: Settings) -> dict[str, Any]:
         "heat_energy_entities": list(settings.heat_energy_entities),
         "export": sorted(group.value for group in settings.export),
         "hems": hems_to_json(settings.hems),
+        "room_control": room_control_to_json(settings.room_control),
     }
