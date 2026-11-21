@@ -219,8 +219,8 @@
       <h3 id="hems-stage-title">Stufe</h3>
       <p class="secondary">
         Das Energiemanagement beobachtet die Wärmepumpe und die Räume, lernt Haus und Räume kennen und plant 48 Stunden
-        voraus: Vorlauf, Vorausschau, Abtauungen, Nachtabsenkung und Takten. In dieser Version zeigt es nur, was es tun
-        würde, und sendet nichts.
+        voraus: Vorlauf, Vorausschau, Abtauungen, Nachtabsenkung und Takten. Für die Zonen zeigt es in dieser Version
+        nur, was es tun würde, und sendet nichts. Die Heizkörperthermostate stellt die Raumregelung (Seite Räume).
       </p>
       <div class="segments stage" role="group" aria-label="Stufe des Energiemanagements">
         {#each MODES as mode (mode)}
@@ -231,7 +231,7 @@
             aria-pressed={status.mode === mode}
             disabled={switching || !available}
             title={available ? undefined : PLANNER_MODE_HINTS[mode]}
-            onclick={() => void switchMode(mode)}>{PLANNER_MODE_LABELS[mode]}{available ? '' : ' (ab 1.4.0)'}</button
+            onclick={() => void switchMode(mode)}>{PLANNER_MODE_LABELS[mode]}{available ? '' : ' (ab 1.5.0)'}</button
           >
         {/each}
       </div>
@@ -465,7 +465,7 @@
             <input type="number" min="5" max="500" step="1" bind:value={draft.zone1_threshold_w} oninput={edited} />
           </label>
         </div>
-        <h4>Quick-Veto (wirkt ab 1.4.0)</h4>
+        <h4>Quick-Veto (wirkt ab 1.5.0)</h4>
         <div class="numbers">
           <label class="field">
             <span class="field-label">Schritt (K)</span>

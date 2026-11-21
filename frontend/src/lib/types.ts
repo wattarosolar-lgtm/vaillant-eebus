@@ -287,7 +287,7 @@ export type EntityKind =
 
 // --- energy management (hems/) ---------------------------------------------------
 
-/** Aus, Vorschau (plans, sends nothing); Steuern comes with 1.4.0. */
+/** Aus, Vorschau (plans, sends nothing); Steuern of the zones comes with 1.5.0. */
 export type PlannerMode = 'off' | 'preview' | 'control';
 export type WeatherSource = 'open_meteo' | 'home_assistant';
 export type ZoneKind = 'floor' | 'radiator';
@@ -555,6 +555,12 @@ export interface RoomDetails {
   defrost_loss_k: number | null;
   throttle: boolean;
   emergency_c: number | null;
+  stage: RoomStage;
+  correction_limit_k: number;
+  offset_k: number;
+  deadband_k: number;
+  min_interval_min: number;
+  max_commands: number;
 }
 
 export interface RoomLearned {
@@ -606,4 +612,142 @@ export interface ZoneRoomsStatus {
 export interface RoomsView {
   rooms: RoomStatus[];
   zones: ZoneRoomsStatus[];
+}
+
+/** The room control (1.4.0): the switch for all rooms and each room's own stage; the lower one counts. */
+export type RoomControlMode = 'off' | 'observe' | 'preview' | 'control';
+export type RoomStage = 'observe' | 'preview' | 'control';
+export type HeatSupply = 'heat_pump' | 'buffer' | 'none' | 'unknown';
+export type TestState = 'armed' | 'running' | 'done' | 'aborted' | 'failed';
+export type TrvModel = 'aqara' | 'comet' | 'other';
+export type RoomMode = 'normal' | 'preheat' | 'window' | 'safety' | 'donor' | 'hold';
+
+export interface ProbeStatus {
+  flow_entity: string | null;
+  return_entity: string | null;
+  room_id: string | null;
+  room_name: string | null;
+  since: string | null;
+  flow_c: number | null;
+  return_c: number | null;
+  flow_age_min: number | null;
+  return_age_min: number | null;
+  report_minutes: number | null;
+  resolution_k: number | null;
+}
+
+export interface TestStatus {
+  state: TestState;
+  state_name: string;
+  message: string;
+  armed_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  phase: string | null;
+  setpoint_c: number | null;
+  commands: number;
+  steps: number;
+  nights: number;
+}
+
+export interface CurveStep {
+  setpoint_c: number;
+  trv_c: number | null;
+  room_c: number | null;
+  offset_k: number | null;
+  valve: number | null;
+  rising: boolean;
+  minutes: number;
+  moved_after_min: number | null;
+  flow_c: number | null;
+  return_c: number | null;
+  heat_w: number | null;
+}
+
+export interface CurveStatus {
+  learned: boolean;
+  runs: number;
+  complete_runs: number;
+  last_at: string | null;
+  last_ending: string | null;
+  opening_k: number | null;
+  full_k: number | null;
+  closing_k: number | null;
+  reaction_min: number | null;
+  levels: number[];
+  steps: CurveStep[];
+}
+
+export interface RoomControlRoom {
+  room_id: string;
+  name: string;
+  zone_id: string | null;
+  stage: RoomStage;
+  effective: RoomControlMode;
+  trv_entity: string | null;
+  model: TrvModel | null;
+  model_name: string | null;
+  at_thermostat: boolean;
+  trv_setpoint_c: number | null;
+  trv_c: number | null;
+  valve: number | null;
+  target_c: number | null;
+  setpoint_c: number | null;
+  mode: RoomMode | null;
+  mode_name: string | null;
+  reason_name: string | null;
+  note: string;
+  correction_k: number;
+  offset_k: number;
+  commands_today: number;
+  commands_limit: number;
+  test_commands_today: number;
+  preview_commands_today: number;
+  movements_today: number;
+  pending_c: number | null;
+  last_sent: string | null;
+  paused_until: string | null;
+  warnings: string[];
+  /** Other Zigbee2MQTT entities of the thermostat by name, e.g. "child_lock". */
+  side: Record<string, string>;
+  test: TestStatus | null;
+  curve: CurveStatus;
+  recommendation: string | null;
+  donor: boolean;
+  cold: boolean;
+  can_control: boolean;
+  control_blocked: string | null;
+}
+
+export interface ZoneControl {
+  zone_id: string;
+  label: string;
+  supply: HeatSupply;
+  supply_name: string;
+  remaining_min: number | null;
+  buffer_c: number | null;
+  redistribution: string;
+  cold_room: string | null;
+  donors: string[];
+  flow_hint: FlowHint | null;
+  flow_text: string | null;
+}
+
+export interface RoomControlStatus {
+  mode: RoomControlMode;
+  app_mode: OperatingMode;
+  lifesign_entity: string;
+  lifesign_at: string | null;
+  test_start: string;
+  test_latest_start: string;
+  test_end: string;
+  probe: ProbeStatus;
+  rooms: RoomControlRoom[];
+  zones: ZoneControl[];
+  problems: string[];
+}
+
+/** The page "Räume": the energy management's view of the rooms and the room control. */
+export interface RoomsPage extends RoomsView {
+  control: RoomControlStatus | null;
 }

@@ -1,19 +1,21 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
+  import RoomControlCard from '../components/RoomControlCard.svelte';
   import RoomEditor from '../components/RoomEditor.svelte';
   import StatusPill from '../components/StatusPill.svelte';
+  import ThermostatPanel from '../components/ThermostatPanel.svelte';
   import { ApiError, getRooms } from '../lib/api';
   import { duration, formatNumber, maybe, moment, signed } from '../lib/format';
   import { FLOW_HINT_LABELS, SUPPLY_LABELS, type Tone } from '../lib/texts';
-  import type { RoomStatus, RoomsView, Supply } from '../lib/types';
+  import type { RoomControlRoom, RoomsPage, RoomStatus, Supply, ZoneControl } from '../lib/types';
   import { hasUnsaved } from '../lib/unsaved';
 
   let { homeAssistantAvailable }: { homeAssistantAvailable: boolean } = $props();
 
   const RELOAD_MS = 60_000;
 
-  let view = $state<RoomsView | null>(null);
+  let view = $state<RoomsPage | null>(null);
   let error = $state<string | null>(null);
   let editing = $state<string | null>(null);
 
@@ -57,6 +59,18 @@
     editing = entityId;
   }
 
+  function controlOf(entityId: string): RoomControlRoom | undefined {
+    return view?.control?.rooms.find((room) => room.room_id === entityId);
+  }
+
+  function zoneControl(zoneId: string | undefined): ZoneControl | undefined {
+    return view?.control?.zones.find((zone) => zone.zone_id === zoneId);
+  }
+
+  const thermostatRooms = $derived(
+    (view?.control?.rooms ?? []).filter((room) => room.trv_entity !== null).map((room) => ({ id: room.room_id, name: room.name })),
+  );
+
   function roomsOf(zoneId: string | null): RoomStatus[] {
     return (view?.rooms ?? []).filter((room) => room.zone_id === zoneId);
   }
@@ -89,9 +103,18 @@
   {:else}
     <p class="secondary">
       Die App lernt jeden Raum kennen: wie schnell er abkühlt und aufheizt und wie weit das Ventil dafür offen steht.
-      Versorgung und Fenster zeigt sie als „würde“; die Thermostate stellt sie erst ab 1.5.0.
+      Mit der Raumregelung stellt sie die Heizkörperthermostate: erst nur als Vorschau, dann Raum für Raum.
     </p>
+    {#if view.control}
+      <RoomControlCard
+        control={view.control}
+        rooms={thermostatRooms}
+        {homeAssistantAvailable}
+        onChange={(next) => (view = next)}
+      />
+    {/if}
     {#each groups as group (group.zone?.zone_id ?? 'none')}
+      {@const zoneState = zoneControl(group.zone?.zone_id)}
       <section class="zone" aria-label={group.zone?.label ?? 'Ohne Zone'}>
         <div class="zone-head">
           <h3>{group.zone?.label ?? 'Ohne Zone'}</h3>
@@ -106,9 +129,25 @@
               {#if group.zone.flow.bottleneck}· Engpass {group.zone.flow.bottleneck} ({maybe(group.zone.flow.max_valve, 0, '%')}){/if}
             </span>
           {/if}
+          {#if zoneState && view.control && view.control.mode !== 'off'}
+            <span class="hint">
+              {zoneState.supply_name}{zoneState.remaining_min !== null ? `, noch etwa ${duration(zoneState.remaining_min)}` : ''}
+              · Umverteilen: {zoneState.redistribution}{zoneState.cold_room ? ` (für ${zoneState.cold_room})` : ''}
+              {#if zoneState.donors.length > 0}· gedrosselt: {zoneState.donors.join(', ')}{/if}
+            </span>
+            {#if zoneState.flow_hint === 'higher'}
+              <p class="banner warn">
+                {zoneState.flow_text ?? 'Vorlauf höher nötig'}. Die App hebt den Vorlauf erst mit dem Zonen-Release (1.5.0)
+                an; bis dahin geht es von Hand in myVAILLANT.
+              </p>
+            {:else if zoneState.flow_text}
+              <span class="hint">Vorlauf: {zoneState.flow_text}</span>
+            {/if}
+          {/if}
         </div>
         <div class="rooms">
           {#each group.rooms as room (room.entity_id)}
+            {@const thermostat = controlOf(room.entity_id)}
             <article class="card room" aria-labelledby={`room-${room.entity_id}`}>
               <div class="room-head">
                 <h4 id={`room-${room.entity_id}`}>{room.name}</h4>
@@ -185,11 +224,24 @@
                 {/if}
               </details>
 
+              {#if thermostat && thermostat.trv_entity && view.control && view.control.mode !== 'off'}
+                <ThermostatPanel
+                  room={thermostat}
+                  appMode={view.control.app_mode}
+                  probeHere={view.control.probe.room_id === room.entity_id &&
+                    view.control.probe.flow_entity !== null &&
+                    view.control.probe.return_entity !== null}
+                  testStart={view.control.test_start}
+                  onChange={(next) => (view = next)}
+                />
+              {/if}
+
               {#if editing === room.entity_id}
                 <RoomEditor
                   entityId={room.entity_id}
                   name={room.name}
                   details={room.details}
+                  atThermostat={room.measured_at_thermostat}
                   {homeAssistantAvailable}
                   onSaved={(next) => {
                     view = next;

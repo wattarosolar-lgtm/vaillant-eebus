@@ -7,6 +7,8 @@ import type {
   LogCategory,
   PlannerMode,
   RiskLevel,
+  RoomControlMode,
+  RoomStage,
   Supply,
   ValueStatus,
   WeatherSource,
@@ -136,7 +138,7 @@ export const PLANNER_MODE_HINTS: Record<PlannerMode, string> = {
   off: 'Das Energiemanagement plant nicht. Takte, Abtauungen und Raumwerte zählt und lernt die App trotzdem.',
   preview:
     'Das Energiemanagement plant 48 Stunden voraus und zeigt, was es tun würde. Es sendet nichts, auch im Live-Betrieb.',
-  control: 'Steuern kommt mit Version 1.4.0 (erst die Zonen, mit 1.5.0 die Thermostate).',
+  control: 'Steuern der Zonen kommt mit Version 1.5.0; die Thermostate steuert die Raumregelung (Seite Räume).',
 };
 
 export const RISK_LABELS: Record<RiskLevel, string> = {
@@ -152,6 +154,23 @@ export const SUPPLY_LABELS: Record<Supply, string> = {
   under: 'unterversorgt',
   over: 'überversorgt',
 };
+
+export const ROOM_CONTROL_LABELS: Record<RoomControlMode, string> = {
+  off: 'Aus',
+  observe: 'Beobachten',
+  preview: 'Vorschau',
+  control: 'Steuern',
+};
+
+export const ROOM_CONTROL_HINTS: Record<RoomControlMode, string> = {
+  off: 'Die Raumregelung ist aus. Die Thermostate regeln selbst, wie bisher.',
+  observe: 'Die App lernt die Räume und zeigt Fenster und Versorgung als „würde“. Sie stellt kein Thermostat.',
+  preview: 'Die App rechnet für jeden Raum den Sollwert des Thermostats und schreibt ins Protokoll, was sie senden würde.',
+  control:
+    'Räume auf „Steuern“ bekommen ihre Sollwerte (nur im Live-Betrieb). Die anderen Räume zeigen nur, was die App tun würde.',
+};
+
+export const ROOM_STAGES: RoomStage[] = ['observe', 'preview', 'control'];
 
 export const FLOW_HINT_LABELS: Record<FlowHint, string> = {
   unknown: 'noch keine Aussage (Ventilstellungen fehlen oder zu neu)',

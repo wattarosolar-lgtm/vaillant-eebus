@@ -21,7 +21,9 @@ import type {
   PowerHistory,
   Room,
   RoomDetails,
-  RoomsView,
+  RoomControlMode,
+  RoomsPage,
+  RoomStage,
   WriteResult,
 } from './types';
 
@@ -185,18 +187,57 @@ export async function getPlan(): Promise<PlanView> {
   return (await send('api/hems/plan')).json() as Promise<PlanView>;
 }
 
-export async function getRooms(): Promise<RoomsView> {
-  return (await send('api/rooms')).json() as Promise<RoomsView>;
+export async function getRooms(): Promise<RoomsPage> {
+  return (await send('api/rooms')).json() as Promise<RoomsPage>;
 }
 
-/** Saves what the user entered for one room. */
-export async function saveRoom(entityId: string, details: RoomDetails): Promise<RoomsView> {
+/** Saves what the user entered for one room (its stage is changed on its own). */
+export async function saveRoom(entityId: string, details: RoomDetails): Promise<RoomsPage> {
   const response = await send(`api/rooms/${encodeURIComponent(entityId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(details),
   });
-  return response.json() as Promise<RoomsView>;
+  return response.json() as Promise<RoomsPage>;
+}
+
+async function putJson(path: string, body: unknown, method = 'PUT'): Promise<RoomsPage> {
+  const response = await send(path, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return response.json() as Promise<RoomsPage>;
+}
+
+/** The switch of the room control; "control" needs confirm. */
+export async function setRoomControl(mode: RoomControlMode, confirm: boolean): Promise<RoomsPage> {
+  return putJson('api/rooms/control', { mode, confirm });
+}
+
+/** One room's stage; "control" needs confirm and a complete test run. */
+export async function setRoomStage(entityId: string, stage: RoomStage, confirm: boolean): Promise<RoomsPage> {
+  return putJson(`api/rooms/${encodeURIComponent(entityId)}/stage`, { stage, confirm });
+}
+
+/** The pair of pipe sensors for the test runs and the room whose radiator it is fixed to. */
+export async function saveProbe(
+  flowEntity: string | null,
+  returnEntity: string | null,
+  roomId: string | null,
+): Promise<RoomsPage> {
+  return putJson('api/rooms/probe', { flow_entity: flowEntity, return_entity: returnEntity, room_id: roomId });
+}
+
+/** Arm a test run for the coming night, or cancel it. */
+export async function roomTest(entityId: string, action: 'arm' | 'cancel', confirm: boolean): Promise<RoomsPage> {
+  return putJson(`api/rooms/${encodeURIComponent(entityId)}/test`, { action, confirm }, 'POST');
+}
+
+/** The emergency automation for Home Assistant, as YAML. */
+export async function getAutomation(): Promise<string> {
+  const body = (await (await send('api/rooms/automation')).json()) as { yaml: string };
+  return body.yaml;
 }
 
 function logParams(filter: LogFilter): URLSearchParams {

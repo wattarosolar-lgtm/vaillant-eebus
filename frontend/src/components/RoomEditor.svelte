@@ -2,7 +2,7 @@
   import { onMount, untrack } from 'svelte';
 
   import { ApiError, saveRoom } from '../lib/api';
-  import type { EntityKind, HeatingSurface, RatedBasis, RoomDetails, RoomsView, SurfaceKind } from '../lib/types';
+  import type { EntityKind, HeatingSurface, RatedBasis, RoomDetails, RoomsPage, SurfaceKind } from '../lib/types';
   import { guardUnsaved } from '../lib/unsaved';
   import EntityPicker from './EntityPicker.svelte';
 
@@ -10,6 +10,7 @@
     entityId,
     name,
     details,
+    atThermostat,
     homeAssistantAvailable,
     onSaved,
     onCancel,
@@ -17,8 +18,10 @@
     entityId: string;
     name: string;
     details: RoomDetails;
+    /** The room has no sensor of its own: its temperature comes from the thermostat. */
+    atThermostat: boolean;
     homeAssistantAvailable: boolean;
-    onSaved: (view: RoomsView) => void;
+    onSaved: (view: RoomsPage) => void;
     onCancel: () => void;
   } = $props();
 
@@ -39,7 +42,16 @@
 
   const changed = $derived(JSON.stringify(draft) !== initial);
   const complete = $derived(
-    [draft.setpoint_c, draft.comfort_down_k, draft.comfort_up_k].every(
+    [
+      draft.setpoint_c,
+      draft.comfort_down_k,
+      draft.comfort_up_k,
+      draft.correction_limit_k,
+      draft.offset_k,
+      draft.deadband_k,
+      draft.min_interval_min,
+      draft.max_commands,
+    ].every(
       (value) => typeof value === 'number' && Number.isFinite(value),
     ) && draft.schedule.every((window) => window.start !== '' && window.end !== '' && Number.isFinite(window.setpoint_c)),
   );
@@ -140,8 +152,8 @@
       <div><button type="button" class="button small" onclick={addWindow}>Zeitfenster hinzufügen</button></div>
     {/if}
     <p class="hint">
-      Außerhalb der Zeitfenster gilt das Raum-Soll, jeden Tag gleich. In dieser Version nutzt nur die Vorschau diese
-      Werte; die Thermostate stellt die App erst ab 1.5.0.
+      Außerhalb der Zeitfenster gilt das Raum-Soll, jeden Tag gleich. Die Raumregelung heizt vor einem wärmeren
+      Zeitfenster rechtzeitig vor (höchstens 3 h vorher).
     </p>
   </fieldset>
 
@@ -186,8 +198,47 @@
     </div>
     <label class="check">
       <input type="checkbox" bind:checked={draft.throttle} />
-      <span>Darf gedrosselt werden, damit ein kalter Raum mehr Wasser bekommt (ab 1.5.0)</span>
+      <span>Darf gedrosselt werden, damit ein kalter Raum mehr Wasser bekommt</span>
     </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Raumregelung</legend>
+    <div class="numbers">
+      {#if atThermostat}
+        <label class="field">
+          <span class="field-label">Fester Ausgleich (K)</span>
+          <input type="number" min="-1" max="3" step="0.5" bind:value={draft.offset_k} />
+        </label>
+      {:else}
+        <label class="field">
+          <span class="field-label">Korrektur höchstens ± (K)</span>
+          <input type="number" min="0.5" max="10" step="0.5" bind:value={draft.correction_limit_k} />
+        </label>
+      {/if}
+      <label class="field">
+        <span class="field-label">Totzone (K)</span>
+        <input type="number" min="0.5" max="3" step="0.5" bind:value={draft.deadband_k} />
+      </label>
+      <label class="field">
+        <span class="field-label">Abstand zwischen Befehlen (min)</span>
+        <input type="number" min="5" max="240" step="1" bind:value={draft.min_interval_min} />
+      </label>
+      <label class="field">
+        <span class="field-label">Befehle je Tag höchstens</span>
+        <input type="number" min="4" max="96" step="1" bind:value={draft.max_commands} />
+      </label>
+    </div>
+    <p class="hint">
+      {#if atThermostat}
+        Der Raum hat keinen eigenen Sensor (Temperatur am Thermostat): Thermostat-Soll = Raum-Soll + Ausgleich. Ist es
+        gefühlt zu kühl, den Ausgleich z. B. auf +1 K stellen.
+      {:else}
+        Thermostat-Soll = Raum-Soll + Korrektur; die App lernt die Korrektur am Raumsensor.
+      {/if}
+      Die Ventile schont der Schreibschutz: kein Befehl unter der Totzone, nicht öfter als im Abstand und nicht mehr als
+      die Höchstzahl am Tag (Fenster, Sicherheit und Rückfall ausgenommen).
+    </p>
   </fieldset>
 
   <fieldset>
