@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.1
+
+**Live-Verbindung erholt sich wieder von selbst.** Brach die Verbindung der Übersicht zur App ab (Neustart oder
+Update der App, Neustart von Home Assistant, Ruhezustand), versuchte der Browser es nur einmal neu. Antwortete Home
+Assistant in diesem Moment mit einem Fehler (502, solange die App startet; 401 nach abgelaufener Sitzung), gab er
+für immer auf: Das Band „Die Live-Verbindung zur App ist unterbrochen …“ blieb stehen, „Stand“ und alle Werte froren
+ein, bis man die Seite neu lud.
+
+- Die Oberfläche baut die Verbindung dann selbst neu auf: nach 1, 2, 5 und 10 Sekunden, danach alle 15 Sekunden;
+  sofort, wenn die Seite wieder sichtbar wird oder das Netz zurück ist.
+- Die App schickt alle 15 Sekunden ein Lebenszeichen, das die Seite sieht (bisher ein Kommentar, den der Browser
+  nicht weitergibt). Kommt 45 Sekunden lang nichts an, ersetzt die Seite die Verbindung – etwa nach dem Ruhezustand
+  oder einem Wechsel des Netzwerks, wenn die alte Verbindung ohne Fehlermeldung hängt.
+- Nach einem Update der App lädt sich eine offene Seite von selbst neu und zeigt die neue Oberfläche. Bei
+  ungespeicherten Einstellungen erscheint stattdessen ein Hinweis mit **Seite neu laden**.
+
 ## 1.3.0
 
 **Energiemanagement neu, Stufe 1: beobachten, lernen, planen.** Die App lernt Haus und Räume kennen, zählt Takte und

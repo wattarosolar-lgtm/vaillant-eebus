@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.3.0)
+# Briefing: Vaillant EEBUS (Stand v1.3.1)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -22,7 +22,8 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
   bringt die Anbindung myVAILLANT (Abschnitt 5e) und die Korrekturen aus der Prüfung von
   1.1.0, die als 1.1.1 geplant waren; 1.2.1 die Korrekturen aus deren Abnahme. **1.3.0** ersetzt den Planer durch
   Stufe 1 des neuen Energiemanagements: beobachten, lernen, planen (nur Vorschau, kein neuer Schreibweg;
-  Abschnitt 5d).
+  Abschnitt 5d). 1.3.1 macht die Live-Verbindung der Oberfläche robust (Wiederverbindung, Wächter, Neuladen nach
+  Update).
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
   Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -124,7 +125,7 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `history.py` | `bucket_means()`: zeitgewichtete 5-Minuten-Mittelwerte über 24 h aus den Zustandswechseln (Zustand gilt bis zum nächsten), Lücke bei weniger als 50 % Abdeckung, keine Zahl = fehlt; Mittel- und Höchstwert |
 | `log_store.py` | Protokoll in SQLite (`/data/app.db`): `add()` kehrt sofort zurück, alle DB-Arbeit läuft geordnet in einem Worker-Thread; höchstens 10.000 Einträge; Kategorien `mode`, `write`, `connection`, `device`, `settings`; Kennzeichen `problem` (Spalte wird in alten DBs ergänzt); Seiten mit `before`/`after`/`before_time`; `entries()` und `csv_document()` für den Download; beschädigte DB wird beiseitegelegt |
 | `state.py` | `StateService`: liest den Geräte-Snapshot nach jedem Zustandsereignis der Bridge (1 s gebündelt) und **spätestens jede Minute** – diese Leseanfrage braucht auch die Verbindungsüberwachung der Bridge (ohne Lesezugriff baut sie die Verbindung nach 2 min neu auf). Bildet `DeviceSnapshot` auf `HeatPumpState` ab (Messwerte, Zonen, Warmwasser, Status). Nicht gemeldete Werte bleiben `None`, nie Ersatzwerte. Verdichter gilt als aktiv ab 100 W. Liest auch `mode_writable`, Leistungsdeckel, Failsafe und Verdichter-Flexibilität. `refresh_now()` (nach einem Schreibvorgang) und `republish()` (Modus/offene Schreibvorgänge geändert). |
-| `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, Keep-alive alle 15 s; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log` (`category`, `problems`, `before`, `after`, `until`), `GET api/log/export` (CSV), `GET api/history/power`, `GET/PUT api/settings`, `GET api/ha/entities`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
+| `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, ohne Änderung alle 15 s ein Ereignis `ping` – kein Kommentar, damit die Seite es sieht; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log` (`category`, `problems`, `before`, `after`, `until`), `GET api/log/export` (CSV), `GET api/history/power`, `GET/PUT api/settings`, `GET api/ha/entities`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
 | `hems/` | Energiemanagement, siehe Abschnitt 5d |
 | `room_data.py` | Raumdaten je Raum (`RoomDetails`: statischer Abgleich, Thermostat, Soll, Zeitplan, Komfortband, Verluste) |
 | `ids.py` | Formate von Entitäts- und Zonen-IDs (`ENTITY_ID`, `ZONE_ID`) |
@@ -133,7 +134,12 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 ### Oberfläche (`frontend/src/`)
 
 Svelte 5 (Runes), Hash-Routing (`#/uebersicht`, `#/protokoll`, `#/einstellungen`, `#/einrichtung`), nur relative URLs
-(Ingress-Pfad), Live-Daten über `EventSource('api/events')`. Seiten: `Overview.svelte` (Rundinstrumente je Zone und
+(Ingress-Pfad), Live-Daten über `EventSource('api/events')` in `subscribeState()` (`lib/api.ts`): Der Browser
+verbindet nur nach Netzwerkfehlern selbst neu; nach einer Fehlerantwort des Ingress (502 beim Neustart der App, 401
+nach abgelaufener Sitzung) ist die EventSource zu – dann öffnet `subscribeState` eine neue (1/2/5/10 s, dann alle
+15 s), ebenso nach 45 s ohne Nachricht (`ping`) und sofort bei `visibilitychange`/`online`. `App.svelte` vergleicht
+`app_version` aus `api/connection` mit der beim Laden und lädt nach einem Update neu (bei ungespeicherten
+Einstellungen nur Hinweis). Seiten: `Overview.svelte` (Rundinstrumente je Zone und
 Warmwasser mit Bedienelementen, Karten für Leistung/Energie mit `PowerChart.svelte` (Verlauf 24 h, eigenes SVG,
 Fadenkreuz, Tastatur als `role="slider"`, alle 5 min neu), Temperaturen, Innentemperaturen, gestrichelte Karte
 „PV-Überschuss-Steuerung“), `Log.svelte` (Protokoll nach Tagen, Filter inkl. „Probleme“, „Springen zu“, alle 10 s

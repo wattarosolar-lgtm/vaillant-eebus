@@ -111,7 +111,8 @@ was sich geändert hat. Ein Update behält Kopplung, Betrieb (Demo oder Live), R
 Energiewerte sowie die Stufe des Energiemanagements (ein Planer auf „Steuern“ steht nach dem Update auf 1.3.0 auf
 „Vorschau“). Mit EEBUS baut die App nach dem Update
 die Verbindung zum Gateway neu auf (siehe oben, das kann einige Minuten dauern); mit myVAILLANT sind die Werte da,
-sobald die App wieder mit Home Assistant verbunden ist.
+sobald die App wieder mit Home Assistant verbunden ist. Eine offene Seite der App lädt sich ab 1.3.1 nach dem Update
+von selbst neu; gibt es dort ungespeicherte Einstellungen, erscheint stattdessen ein Hinweis mit **Seite neu laden**.
 
 **Hinweis zu 1.2.0 → 1.2.1:** Version 1.2.0 hat mit myVAILLANT als Außentemperatur versehentlich den eigenen Sensor
 der App vorgeschlagen; der Wert blieb dann stehen. Version 1.2.1 entfernt diese Auswahl beim Start und vermerkt es
@@ -425,6 +426,11 @@ Der Dump enthält Modell- und Seriennummern Ihrer Geräte; die SKI des Gateways 
 - **Haus „lernt noch“ oder keine Arbeitszahl:** Die App braucht mindestens zehn Heiztage mit Werten der gewählten
   Wärmesensoren, der Leistung und der Außentemperatur in der Langzeitstatistik von Home Assistant. Sensoren ohne
   Zustandsklasse („state_class“) haben dort keine Statistik.
+- **„Die Live-Verbindung zur App ist unterbrochen …“:** Die Übersicht bekommt ihre Werte über eine dauerhaft offene
+  Verbindung. Nach einem Neustart oder Update der App, einem Neustart von Home Assistant oder nach dem Ruhezustand
+  des Rechners baut die Seite sie von selbst wieder auf (erst nach Sekunden, dann alle 15 s); eine Verbindung, über
+  die 45 s lang nichts kommt, ersetzt sie ebenfalls. Bis 1.3.0 blieb das Band in manchen Fällen stehen und die Werte
+  froren ein, bis man die Seite neu lud.
 - **myVAILLANT: Werte ändern sich nur selten:** Die Integration fragt die Cloud nur in ihrem Intervall ab (siehe
   „Einrichtung mit myVAILLANT“). „Stand“ in der Kopfzeile zeigt die letzte Abfrage.
 - **myVAILLANT: „Nicht ausgeführt (HTTP …)“ oder „Ergebnis unbekannt (HTTP 500)“ im Protokoll:** Home Assistant oder
