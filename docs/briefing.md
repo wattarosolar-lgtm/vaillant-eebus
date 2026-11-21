@@ -353,46 +353,59 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
 **Schreibweg (`write_gate.py`, `RoomGate`; `ha_client.py`):**
 - `ROOM_SERVICES` = nur `("climate", "set_temperature")`, `call_room_service()` nimmt nur das Feld `temperature`
   (endliche Zahl); nur `write_gate.py` ruft ihn auf, nur `myvaillant.py` `call_device_service()` (Strukturtests).
-- Befehl `SetThermostatSetpoint(room_id, celsius, reason)`; das Thermostat ist das `trv_entity` des Raums in den
-  Einstellungen. Nie eine myVAILLANT-Zone, nie ein Thermostat zweier Räume.
+- Befehl `SetThermostatSetpoint(room_id, celsius, reason, trv=None)`; das Thermostat ist das `trv_entity` des Raums
+  in den Einstellungen (Einstellungen werden innerhalb der Sperre je Thermostat gelesen). Nur der Rückfall eines
+  Thermostats, dessen Raum fehlt, nennt `trv`; dann gilt der Notfallwert, den das Gate je Thermostat mit `room_id` und
+  Name gespeichert hat. Nie eine myVAILLANT-Zone (gewählt oder mit deren Attributen `quick_veto_end_date_time`/
+  `time_program_heating`, fail closed), nie ein Thermostat zweier Räume.
 - Erlaubt: `reason` normal (Regelung, Vorheizen, Umverteilen, Fenster, Handänderung, Sicherheit) nur bei wirksamer
-  Stufe „Steuern“ (Schalter und Raum); `TEST` bei Raumregelung ≠ Aus; `FALLBACK` nur für Thermostate, die die App
-  gestellt hat (`touched`), und nur auf Notfallwert bzw. Raum-Soll.
+  Stufe „Steuern“ (Schalter und Raum); `TEST` bei Raumregelung ≠ Aus; `RESTORE` (Rückweg nach dem Testlauf) und
+  `FALLBACK` nur für Thermostate, die die App gestellt hat (`touched`): `FALLBACK` auf Notfallwert bzw. Raum-Soll,
+  `RESTORE` zusätzlich auf `restore_c` (gemeldeter Sollwert vor dem ersten `TEST`-Befehl, gespeichert). Nach Rückfall
+  oder Rückweg gibt das Gate das Thermostat frei (`touched` = False), nach dem Rückweg nicht, wenn der Raum wirksam auf
+  „Steuern“ steht. `touched` erst nach Erfolg oder „Ergebnis unbekannt“ (oder Abbruch mitten im Aufruf).
 - Wert: in `min_temp`/`max_temp`, auf `target_temp_step` (ohne Schritt 0,5 K) der Entität; außer Fenster
   (kleinster Wert), Rückfall und Testlauf höchstens `correction_limit_k` (Start 5 K) um die Raum-Sollwerte.
-- **Ventilschonung erzwungen:** gleicher Wert → nicht gesendet; Totzone (0,5 K), Abstand (15 min) und Höchstzahl je
-  lokalem Tag (24) je Thermostat, einstellbar je Raum. Frei von Totzone und Abstand: Fenster, Handänderung,
-  Sicherheit, Rückfall, Testlauf; über der Höchstzahl nur Fenster, Sicherheit, Rückfall. Technisch höchstens ein
-  Befehl je 5 s (nicht für den Rückfall). Testlauf: eigenes Budget 16 je Tag. Ein gehaltener Befehl ist kein Fehler
-  (`RoomWriteResult.held`: `same`, `deadband`, `interval`, `limit`, `paused`).
+- **Ventilschonung erzwungen:** gleicher Wert → nicht gesendet; als aktueller Wert gilt ein noch unbestätigter
+  (`pending`) vor dem gemeldeten. Totzone (0,5 K), Abstand (15 min) und Höchstzahl je lokalem Tag (24) je
+  Thermostat, einstellbar je Raum. Frei von Totzone und Abstand: Fenster, Handänderung, Sicherheit, Rückweg,
+  Rückfall, Testlauf; über der Höchstzahl und trotz Pause nur Fenster, Sicherheit, Rückweg, Rückfall. Technisch
+  höchstens ein Befehl je 5 s (nicht für Rückweg und Rückfall). Testlauf: eigenes Budget 16 je Nacht (Mittag bis
+  Mittag); der Rückweg zählt nicht. Ein gehaltener Befehl ist kein Fehler (`RoomWriteResult.held`: `same`,
+  `deadband`, `interval`, `limit`, `paused`).
 - Demo und Vorschau senden nie; ihre Zählung ist simuliert (eigener Zustand), damit die Vorschau zeigt, was
   „Steuern“ senden würde. Live: „Wird gesendet“ vor dem Aufruf in der Datenbank; abgewiesen → „Nicht ausgeführt“
   (zählt nicht), sonst „Ergebnis unbekannt“; bestätigt, wenn das Attribut `temperature` den Wert zeigt, sonst nach
-  5 min „Nicht bestätigt“; zweimal → 1 h nur Fenster/Sicherheit/Rückfall. Zähler, letzter Befehl, erwarteter Wert und
-  `touched` in `/data/room_gate.json` (überstehen Neustarts); die letzten Grenzen jedes Thermostats im Speicher für den
-  Rückfall beim Stoppen.
+  5 min „Nicht bestätigt“; zweimal → 1 h nur Fenster/Sicherheit/Rückweg/Rückfall. Zähler, letzter Befehl,
+  erwarteter Wert, `touched`, `restore_c`, Raum, Name und Notfallwert in `/data/room_gate.json` (überstehen
+  Neustarts); die letzten Grenzen jedes Thermostats im Speicher für den Rückfall beim Stoppen.
 
 **Raumregelung (`rooms/`):**
 
 | Modul | Aufgabe |
 |---|---|
 | `thermostats.py` | Thermostat aus HA lesen (Soll, Temperatur am Thermostat, Betrieb, Preset), Neben-Entitäten über die IEEE-Adresse (`sensor`, `window_detection`, `child_lock`, `valve_alarm`, `battery`, `trv_mode`, …), Modell Aqara/Comet/anderes, Warnungen; `blocking()` (nicht erreichbar, kein Bereich, Fühler nicht intern, `trv_mode` ≠ 2) hält das Steuern an |
-| `supply.py` | Wärmeangebot je Heizkörper-Zone: Wärmepumpe (> 50 W und Vorlauf bzw. Puffer ≥ Raum + 8 K), Puffer (≥ Raum + 5 K und fällt ≥ 2 K/h, Restzeit bis zur gelernten Neustart-Temperatur, Start 28 °C), keins, unklar (Daten > 15 min) |
-| `controller.py` | `decide()` (rein): Fenster → kleinster Wert; Raum > Soll + Band + 0,5 K → Soll − 0,5 K; Spender → untere Komfortgrenze (+ Korrektur); sonst Raum-Soll (Vorheizen nach gelernter Aufheizzeit, höchstens 3 h, sonst 1 h) + Korrektur (0,5 K nach 0,2 K über 30 min, Ventil-Regeln ≥ 90 %/≤ 5 %, nicht ohne Wärme, Pause nach Fenster und Sollwechsel) bzw. fester Ausgleich (Raum am Thermostat gemessen); mit gelernter Kennlinie „Kaskade“ (Bedarfsöffnung + 30 %/K − 10 %/(K/h) → nächste erreichte Stufe → Abstand zur Temperatur am Thermostat; Hysterese Totzone + 0,25 K); weicht der Soll vom zuletzt gesetzten ab → Handänderung (`MANUAL`) |
-| `curve.py` | Ventilverhalten aus Testläufen: Punkte (Abstand, Öffnung, auf/ab, VL/RL, Wärme), vollständig = ganz offen und wieder zu; `offset_for()`, `levels()`; höchstens 5 Läufe je Thermostat |
-| `testrun.py` | Testlauf als reine Schrittfunktion `advance()` (jede Minute): vorgemerkt → Start 22–1 Uhr bei Raum −0,5…+0,2 K um Soll, kein Fenster, warmes Wasser am Heizkörper (Fühlerpaar VL ≥ Raum + 5 K), Fühlerpaar am Raum und frisch; Stufen 20–40 min mit Wärme bis Ventil und Rücklauf 10 min ruhig; hoch (+1 K solange nichts öffnet, dann +0,5 K) bis ≥ 90 %, runter bis 1 K unter Temperatur am Thermostat (Schritt 1 K, wenn das Budget sonst nicht reicht), zurück; Ende spätestens 5 Uhr; Abbruch Raum > Soll + 1 K, Fenster, 30 min keine Ventilstellung oder kein warmes Wasser; nach 3 Nächten ohne Start „nicht möglich“ |
-| `service.py` | `RoomControl`: Takt nach den Proben (`tick`), jede Minute (`minute`: Lebenszeichen, Neben-Entitäten alle 15 min, Ventilbewegungen, Testlauf); Umverteilen je Heizkörper-Zone (kalter Raum und Spender in derselben wirksamen Stufe, nach 30 min Wärme, Prüfung nach 45 min, Spender höchstens 2 h, danach 1 h Ruhe, „hilft nicht“ nach 3 Fehlschlägen); Vorlauf-Berater für `hems`; Empfehlung Voreinstellung (7 Tage Proben); Stufen, Fühlerpaar, Testlauf, Rückfall (`release`), Vorlage der Notfall-Automation, Status; `/data/rooms.json` (Korrekturen, Umverteil-Statistik, Kennlinien, Testlauf) |
+| `supply.py` | Wärmeangebot je Heizkörper-Zone: Wärmepumpe (> 50 W und Vorlauf bzw. Puffer ≥ Raum + 8 K), Puffer (≥ Raum + 5 K und fällt ≥ 2 K/h, Restzeit bis zur gelernten Neustart-Temperatur, Start 28 °C), keins, unklar (Daten > 15 min, oder WP läuft ohne Vorlauf und Puffer) |
+| `controller.py` | `decide()` (rein): Fenster → kleinster Wert; Raum > Soll + Band + 0,5 K → Soll − 0,5 K; Spender → untere Komfortgrenze (+ Korrektur); sonst Raum-Soll (Vorheizen nach gelernter Aufheizzeit, höchstens 3 h, sonst 1 h) + Korrektur (0,5 K nach 0,2 K über 30 min, Ventil-Regeln ≥ 90 %/≤ 5 %, nicht ohne Wärme, Pause nach Fenster und Sollwechsel) bzw. fester Ausgleich (Raum am Thermostat gemessen); mit gelernter Kennlinie „Kaskade“ (Bedarfsöffnung + 30 %/K − 10 %/(K/h) → nächste erreichte Stufe → Abstand zur Temperatur am Thermostat; Hysterese Totzone + 0,25 K gegen den zuletzt gesetzten Wert); weicht der Soll vom zuletzt gesetzten ab → Handänderung (`MANUAL`); beim Übergang in „zu warm“ einmal Korrektur − 0,5 K (`Correction.too_warm`) |
+| `curve.py` | Ventilverhalten aus Testläufen: Punkte (Abstand, Öffnung, auf/ab, VL/RL, Wärme), vollständig = ganz offen und wieder zu (untere Grenze erreicht oder fallende Stufe ≤ 5 %); `offset_for()`, `levels()`; höchstens 5 Läufe je Thermostat |
+| `testrun.py` | Testlauf als reine Schrittfunktion `advance()` (jede Minute): vorgemerkt → Start 22–1 Uhr bei Raum −0,5…+0,2 K um Soll, kein Fenster, warmes Wasser am Heizkörper (Fühlerpaar VL ≥ Raum + 5 K), Fühlerpaar am Raum und frisch; Stufen 20–40 min mit Wärme bis Ventil und Rücklauf 10 min ruhig; hoch (+1 K solange nichts öffnet, dann +0,5 K) bis ≥ 90 %, runter bis 1 K unter Temperatur am Thermostat (Schritt 1 K, wenn das Budget sonst nicht reicht), zurück; Ende spätestens 5 Uhr; Abbruch Raum > Soll + 1 K, Fenster, 30 min keine Ventilstellung oder kein warmes Wasser; nach 3 Nächten ohne Start „nicht möglich“ (eine Nacht, deren Startfenster vor dem Vormerken begann, zählt nicht) |
+| `service.py` | `RoomControl`: Takt nach den Proben (`tick`), jede Minute (`minute`: Lebenszeichen, Neben-Entitäten alle 15 min, Ventilbewegungen, Testlauf); Umverteilen je Heizkörper-Zone (kalter Raum und Spender in derselben wirksamen Stufe, nach 30 min Wärme, Prüfung nach 45 min, Spender höchstens 2 h, danach 1 h Ruhe, „hilft nicht“ nach 3 Fehlschlägen); Vorlauf-Berater für `hems`; Empfehlung Voreinstellung (7 Tage Proben); Stufen (`set_stage` ändert nur die Stufe am aktuellen Raum), Fühlerpaar, Testlauf mit Rückweg (`RESTORE`; geht er nicht hinaus → `release`; nach einem Neustart mitten im Lauf erneut versucht), Rückfall (`release`, auch für verwaiste Thermostate), `before_rooms_change` vor `PUT api/settings`/`PUT api/rooms/{id}`, Vorlage der Notfall-Automation, Status; im Bad gilt ein Fenster 30 min nach eigenem Befehl oder Ventilschluss (> 30 % → ≤ 5 %) nicht; `/data/rooms.json` (Korrekturen, Umverteil-Statistik, Kennlinien, Testlauf) |
 
 - **Stufen:** `room_control.mode` (Aus/Beobachten/Vorschau/Steuern) und `RoomDetails.stage` (Beobachten/Vorschau/
   Steuern), wirksam die kleinere. Steuern für alle: nur live, `confirm`; je Raum zusätzlich ein vollständiger
   Testlauf und keine blockierende Warnung. Ohne gespeicherte Einstellung (1.3.x): Beobachten, wenn der Planer auf
   Vorschau stand, sonst Aus. `PUT api/rooms/{id}` behält die Stufe.
 - **Rückfall:** Raum verlässt Steuern, Schalter verlässt Steuern, Wechsel auf Demo (`api/mode`, `api/connection`,
-  noch live), App-Ende (`run()`-finally, gegen doppelten Abbruch geschützt, höchstens 15 s) → jedes `touched`
-  Thermostat auf `fallback_c()` (Notfallwert, sonst Raum-Soll).
-- **Lebenszeichen:** `sensor.vaillant_eebus_raeume_lebenszeichen` = Zeit des letzten erfolgreichen `minute()`
-  (Export unabhängig von den Gruppen: `Sensor.always`, `add_source(..., always=True)`); die Vorlage der
-  Notfall-Automation (`GET api/rooms/automation`) setzt nach 15 min ohne Lebenszeichen die Notfallwerte.
+  noch live), App-Ende (`run()`-finally, gegen doppelten Abbruch geschützt, höchstens 15 s), Raum entfernt oder
+  Thermostat gewechselt, blockierende Warnung eines gestellten, erreichbaren Thermostats → jedes `touched` Thermostat
+  auf `fallback_c()` (Notfallwert, sonst Raum-Soll; ohne Raum der im Gate gespeicherte Notfallwert).
+- **Lebenszeichen:** `sensor.vaillant_eebus_raeume_lebenszeichen` = Zeit des letzten `minute()`, solange die
+  Regelung gesund ist (letzter erfolgreicher `tick` bzw. Start ≤ 12 min, sobald die Raumregelung an ist oder
+  Thermostate `touched` sind); sonst bleibt der Zeitstempel stehen. Attribut `notfallwerte` =
+  `[{entity_id, temperature}]` aller `touched` Thermostate. Export unabhängig von den Gruppen (`Sensor.always`,
+  `add_source(..., always=True)`). Die Vorlage der Notfall-Automation (`GET api/rooms/automation`) setzt nach 15 min
+  ohne Lebenszeichen die Thermostate aus `notfallwerte` (`variables`, `repeat for_each`), fehlt das Attribut, alle
+  Thermostate der Räume.
 - **Raum am Thermostat gemessen:** `Room.measured_at_thermostat` jetzt auch für einen Sensor mit derselben
   IEEE-Adresse wie das Thermostat (Bad mit `sensor.…_local_temperature`; Befund der Abnahme 1.3.0) → nicht im
   Zonen-Mittelwert, Fenster ohne Feuchte, fester Ausgleich statt Korrektur.
@@ -429,7 +442,7 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
 
 ## 7. Tests
 
-- Python: 370 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.0
+- Python: 397 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.0
   `test_room_gate.py` und `test_rooms.py`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`, mit `add_myvaillant()`: Entitäten und
   Dienste der myVAILLANT-Integration wie im Quellcode der Integration). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
@@ -502,7 +515,9 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
     nachgebaute Verhalten (Fake-HA mit `cloud_lag`) geprüft. Die Werte sind so alt wie das Abfrageintervall der
     Integration (Vorgabe 30 min).
 17. Raumregelung 1.4.0, bewusst so: Der Schreibschutz prüft beim Testlauf nur „Raumregelung an“, die Grenzen des
-    Geräts und das Budget (16), nicht, ob gerade ein Testlauf läuft (nur `RoomControl` sendet ihn; Strukturtests).
+    Geräts und das Budget (16 je Nacht), nicht, ob gerade ein Testlauf läuft (nur `RoomControl` sendet ihn;
+    Strukturtests). Die Prüfung von 1.4.0 (Aufwand xhigh, `pruefung-1.4.0.md`, Funde 1–14, H1–H5) ist eingearbeitet;
+    H2 bleibt (die Stufe „Steuern“ bleibt im Demo-Betrieb gespeichert, Live braucht ohnehin Bestätigung).
     Neben-Entitäten (Fühlerwahl, Kindersicherung …) liest die App alle 15 min, nicht live. Ein Abtauen erkennt das
     Wärmeangebot nicht live (erst danach), die Leistung bleibt dabei über 50 W. Vorlauf Zone 2 (`circuit_1`) ist beim
     Nutzer schlecht montiert; das Wärmeangebot nimmt dann den Puffer. Die Entscheidung je Raum wird nur alle 5 min neu
@@ -514,7 +529,11 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
 ## 10. Wo eine Prüfung am meisten bringt
 
 Zu prüfen ist der Branch `feat/thermostate` (1.4.0) gegen `v1.3.1` (`c70845a`) – **vor** dem ersten Steuern an der
-Anlage (Aufwand max). Schwerpunkt ist der neue Schreibweg zu den Thermostaten (Abschnitt 5f):
+Anlage (Aufwand max). Eine erste Prüfung (Aufwand xhigh, `pruefung-1.4.0.md` in den Notizen) ist eingearbeitet
+(`bbb9bbe` und folgende); eine zweite sollte vor allem die Korrekturen nachprüfen: Wert unterwegs als aktueller Wert,
+`RESTORE` und `restore_c`, Budget je Nacht, `touched` und seine Freigabe, verwaiste Thermostate (`trv` im Befehl),
+Lebenszeichen an `tick` gekoppelt, `notfallwerte` und die Automation, Fenster im Bad. Schwerpunkt ist der neue
+Schreibweg zu den Thermostaten (Abschnitt 5f):
 
 - **`RoomGate`** (`write_gate.py`): Kann irgendein Weg im Demo-Betrieb, in der Vorschau, bei Stufe ≠ Steuern oder auf
   ein fremdes Thermostat / eine myVAILLANT-Zone senden? Sind Totzone, Abstand, Höchstzahl und ihre Ausnahmen richtig

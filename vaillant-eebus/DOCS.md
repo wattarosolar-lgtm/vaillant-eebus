@@ -402,14 +402,18 @@ An die Wärmepumpe sendet die Raumregelung nichts.
 - **Raum ohne eigenen Sensor** (Bad mit Comet): Raum-Soll + **fester Ausgleich** (Voreinstellung 0 K). Ist es gefühlt
   zu kühl, den Ausgleich z. B. auf +1 K stellen.
 - **Fenster offen** (Temperatur und Luftfeuchte fallen): Thermostat sofort auf den kleinsten Wert (Aqara 5 °C,
-  Comet 8 °C), nach dem Schließen sofort zurück. Die eigene Fenstererkennung der Thermostate sollte aus sein.
+  Comet 8 °C), nach dem Schließen sofort zurück. Die eigene Fenstererkennung der Thermostate sollte aus sein. In einem
+  Raum ohne eigenen Sensor (Bad) misst der Fühler am Heizkörper; dort gilt ein erkanntes Fenster 30 Minuten nach
+  einem Befehl der App und nach dem Schließen des Ventils nicht, weil der Fühler dann von selbst schnell fällt.
 - **Handänderung** am Thermostat setzt die App beim nächsten Durchlauf zurück. Wärmer oder kühler stellen Sie in
   der App (Raum-Soll).
-- **Zu warm:** Steigt der Raum über Soll + Komfortband + 0,5 K, stellt sie das Thermostat sofort auf Soll − 0,5 K.
+- **Zu warm:** Steigt der Raum über Soll + Komfortband + 0,5 K, stellt sie das Thermostat sofort auf Soll − 0,5 K
+  und senkt die Korrektur einmal um 0,5 K (steht im Protokoll).
 - **Raumsensor fällt aus:** Die Korrektur bleibt stehen, die Fenstererkennung ruht.
 
 **Zone der Heizkörper:** Die App erkennt aus der Leistung der Wärmepumpe und der Puffertemperatur, ob warmes Wasser
-ankommt (von der Wärmepumpe oder aus dem Puffer, mit Restzeit) – nur dann darf eine Korrektur steigen. Ist ein Raum
+ankommt (von der Wärmepumpe oder aus dem Puffer, mit Restzeit) – nur dann darf eine Korrektur steigen. Fehlen
+Vorlauf und Puffer, gilt das Wärmeangebot als unklar. Ist ein Raum
 trotz offenem Ventil zu kalt, **verteilt sie erst um**: gut versorgte Räume (in derselben Stufe, „Darf gedrosselt
 werden“ an) gehen bis zur unteren Komfortgrenze herunter, höchstens 2 Stunden. Reicht das nach 45 Minuten nicht,
 zeigt die Seite **„Vorlauf höher nötig“**. Die App hebt den Vorlauf erst mit den Zonen (Version 1.5.0) an; bis dahin
@@ -417,9 +421,10 @@ können Sie ihn in myVAILLANT von Hand anheben.
 
 **Ventile schonen** (je Raum einstellbar, von der Schreibsperre erzwungen): kein Befehl unter der **Totzone**
 (0,5 K), höchstens alle **15 Minuten** und höchstens **24 Befehle** je Thermostat und Tag. Fenster, Handänderung,
-Sicherheit und Rückfall gehen sofort hinaus; über der Höchstzahl nur noch Fenster, Sicherheit und Rückfall. Jeder
+Sicherheit, Rückweg nach dem Testlauf und Rückfall gehen sofort hinaus; über der Höchstzahl nur noch Fenster,
+Sicherheit, Rückweg und Rückfall. Ein Wert, der noch zum Thermostat unterwegs ist, gilt schon als sein Sollwert. Jeder
 Sollwert gilt erst als bestätigt, wenn das Thermostat ihn meldet; meldet es ihn zweimal nicht, sendet die App ihm eine
-Stunde lang nur Fenster, Sicherheit und Rückfall. Die Seite zeigt Befehle und Ventilbewegungen je Tag.
+Stunde lang nur Fenster, Sicherheit, Rückweg und Rückfall. Die Seite zeigt Befehle und Ventilbewegungen je Tag.
 
 **Testlauf** (je Thermostat, Pflicht vor „Steuern“): Er misst, wie das Thermostat auf seinen Sollwert reagiert.
 
@@ -429,30 +434,41 @@ Stunde lang nur Fenster, Sicherheit und Rückfall. Die Seite zeigt Befehle und V
    die Fühler melden.
 2. Am Raum **Testlauf für heute Nacht vormerken** (nur im Live-Betrieb).
 3. Ab 22 Uhr startet er, sobald der Raum zwischen 0,5 K unter und 0,2 K über seinem Soll liegt, kein Fenster offen
-   ist und am Heizkörper warmes Wasser ankommt – spätestens um 1 Uhr, sonst in der nächsten Nacht (höchstens drei).
+   ist und am Heizkörper warmes Wasser ankommt – spätestens um 1 Uhr, sonst in der nächsten Nacht (höchstens drei;
+   eine Nacht, deren Startzeit beim Vormerken schon vorbei war, zählt nicht).
 4. Die App stellt das Thermostat auf seine eigene Temperatur, dann in 0,5-K-Schritten höher, bis das Ventil offen
    ist, danach bis 1 K unter die Temperatur am Thermostat und zurück auf den Wert von vorher – spätestens um 5 Uhr.
    Jede Stufe dauert 20–40 Minuten mit warmem Wasser, bis Ventil und Rücklauf ruhig stehen. Höchstens 16 Befehle
-   (sie zählen nicht zu den 24).
+   je Nacht (sie zählen nicht zu den 24; der Rückweg zählt nicht mit).
 5. Abbruch (zurück auf den Wert von vorher): Raum über Soll + 1 K, Fenster offen, 30 Minuten keine Ventilstellung
    oder kein warmes Wasser, Abbruch durch Sie. Der Raum kann während des Laufs bis zu 1 K wärmer werden, und der Motor
    des Thermostats ist zu hören.
+6. Der **Rückweg** auf den Wert von vorher geht immer hinaus, auch nach einem Neustart der App mitten im Lauf. Geht
+   er nicht hinaus, setzt die App den Notfallwert. Danach gibt sie das Thermostat wieder frei, außer der Raum steht auf
+   „Steuern“.
 
 Das Ergebnis steht unter „Ventilverhalten“: ab welchem Abstand das Ventil öffnet, ganz offen und wieder zu ist, nach
 wie vielen Minuten es reagiert, welche Stufen es erreicht, und je Stufe Vor- und Rücklauf und die geschätzte
-Wärmeabgabe. Empfohlen sind 2–3 Läufe an verschiedenen Tagen; mit einem Fühlerpaar geht ein Lauf je Nacht.
+Wärmeabgabe. Vollständig ist ein Lauf, wenn das Ventil ganz offen und wieder zu war; erst dann ist „Steuern“
+möglich. Empfohlen sind 2–3 Läufe an verschiedenen Tagen; mit einem Fühlerpaar geht ein Lauf je Nacht.
 
 **Absicherung:**
 
 - **Notfallwerte** je Raum eintragen (Bearbeiten → Notfallwert; ohne gilt das Raum-Soll).
-- **Notfall-Automation:** Die Karte „Raumregelung“ zeigt eine Vorlage für Home Assistant mit Ihren Thermostaten und
-  Notfallwerten. Anlegen: Einstellungen → Automationen & Szenen → Automation erstellen → ⋮ → „In YAML bearbeiten“,
-  einfügen, speichern. Sie setzt die Notfallwerte, wenn 15 Minuten kein **Lebenszeichen**
-  (`sensor.vaillant_eebus_raeume_lebenszeichen`, jede Minute, unabhängig vom Export) kommt, und gibt der App nach
-  einem Neustart von Home Assistant erst 15 Minuten Zeit. Prüfen: App stoppen, nach 15 Minuten stehen die
-  Notfallwerte an. Wird die Raumregelung nicht mehr genutzt, die Automation abschalten.
-- **Rückfall durch die App:** Verlässt ein Raum „Steuern“, schalten Sie auf Demo oder wird die App beendet, setzt sie
-  jedes Thermostat, das sie gestellt hat, selbst auf seinen Notfallwert.
+- **Lebenszeichen:** `sensor.vaillant_eebus_raeume_lebenszeichen` (jede Minute, unabhängig vom Export). Es bleibt
+  stehen, wenn die Raumregelung länger als 12 Minuten nicht mehr gerechnet hat, auch wenn die App sonst läuft. Sein
+  Attribut `notfallwerte` nennt die Thermostate, die die App gerade gestellt hat, mit ihren Notfallwerten.
+- **Notfall-Automation:** Die Karte „Raumregelung“ zeigt eine Vorlage für Home Assistant. Anlegen: Einstellungen →
+  Automationen & Szenen → Automation erstellen → ⋮ → „In YAML bearbeiten“, einfügen, speichern. Kommt 15 Minuten
+  kein Lebenszeichen, setzt sie die Thermostate aus `notfallwerte` auf ihren Notfallwert – Thermostate, die Sie selbst
+  bedienen, fasst sie also nicht an, und nach einem Wechsel der Stufen muss sie nicht neu kopiert werden. Fehlt das
+  Lebenszeichen ganz (Home Assistant neu gestartet, die App läuft nicht), setzt sie alle Thermostate der Räume aus der
+  Vorlage. Nach einem Neustart von Home Assistant gibt sie der App erst 15 Minuten Zeit. Prüfen: App stoppen, nach 15
+  Minuten stehen die Notfallwerte an. Wird die Raumregelung nicht mehr genutzt, die Automation abschalten.
+- **Rückfall durch die App:** Verlässt ein Raum „Steuern“, schalten Sie auf Demo, wird die App beendet, entfernen Sie
+  einen Raum oder geben ihm ein anderes Thermostat oder meldet ein gestelltes Thermostat eine blockierende Warnung,
+  setzt sie jedes Thermostat, das sie gestellt hat, selbst auf seinen Notfallwert – auch eines, dessen Raum es nicht
+  mehr gibt (die App merkt sich dafür den Notfallwert).
 
 **Warnungen** (die App liest sie über die IEEE-Adresse des Thermostats und schreibt nichts davon): Aqara-Fühler nicht
 auf „internal“, Betrieb nicht „heat“ oder ein Preset aktiv, Comet nicht in `trv_mode` 2, eigene Fenstererkennung an,
@@ -461,7 +477,8 @@ stellt die App das Thermostat nicht.
 
 **Was die Raumregelung nie schreibt:** Kalibrierung, Fühlerwahl, externe Temperatur, `trv_mode`, Betrieb, Presets,
 Zeitpläne, Fenstererkennung und Kindersicherung der Thermostate – nur den Sollwert (`climate.set_temperature`), und
-nur auf dem Thermostat, das einem Raum zugeordnet ist, nie auf einer Zone von myVAILLANT.
+nur auf dem Thermostat, das einem Raum zugeordnet ist, nie auf einer Zone von myVAILLANT (auch nicht auf einer
+Klima-Entität, die wie eine aussieht).
 
 ## Protokoll
 

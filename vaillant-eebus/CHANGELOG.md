@@ -18,24 +18,34 @@ sein Soll hält. An die Wärmepumpe sendet diese Version weiterhin nichts Neues.
   Korrektur am Raumsensor (0,5-K-Schritte nach 0,2 K Abweichung über 30 Minuten, nicht höher bei offenem Ventil oder
   ohne warmes Wasser, nicht tiefer bei geschlossenem Ventil); nach einem Testlauf über die gelernte Ventilkennlinie
   („braucht etwa 45 % Ventil“). Ein Raum ohne eigenen Sensor (Bad mit Comet) bekommt Raum-Soll + festen Ausgleich.
-  Fenster offen: Thermostat sofort auf den kleinsten Wert und danach zurück. Eine Handänderung am Thermostat wird
-  beim nächsten Durchlauf zurückgesetzt. Raum über Soll + Komfortband + 0,5 K: sofort Soll − 0,5 K.
+  Fenster offen: Thermostat sofort auf den kleinsten Wert und danach zurück; im Bad (Fühler am Heizkörper) gilt ein
+  Fenster 30 Minuten nach einem eigenen Befehl oder nach dem Schließen des Ventils nicht. Eine Handänderung am
+  Thermostat wird beim nächsten Durchlauf zurückgesetzt. Raum über Soll + Komfortband + 0,5 K: sofort Soll − 0,5 K
+  und die Korrektur einmal 0,5 K tiefer.
 - **Wärmeangebot und Umverteilen:** Die App erkennt aus Leistung und Puffer, ob warmes Wasser ankommt (von der
   Wärmepumpe oder aus dem Puffer, mit Restzeit). Ist ein Raum trotz offenem Ventil zu kalt, drosselt sie erst gut
   versorgte Räume; reicht das nicht, zeigt sie **„Vorlauf höher nötig“** – angehoben wird der Vorlauf erst mit den
   Zonen (1.5.0). Die Vorschau des Energiemanagements meldet „Vorlauf höher“ entsprechend erst nach dem Umverteilen.
 - **Ventile schonen, im Schreibschutz erzwungen:** Totzone 0,5 K, höchstens alle 15 Minuten und höchstens 24 Befehle
-  je Thermostat und Tag (alle einstellbar; Fenster, Sicherheit und Rückfall ausgenommen); Zähler überstehen einen
-  Neustart. Jeder Sollwert wird über die Rückmeldung bestätigt; zweimal nicht bestätigt pausiert das Thermostat eine
-  Stunde. Die App zählt außerdem die Ventilbewegungen je Tag.
+  je Thermostat und Tag (alle einstellbar; Fenster, Sicherheit, Rückweg und Rückfall ausgenommen); Zähler
+  überstehen einen Neustart. Ein Wert, der noch zum Thermostat unterwegs ist, gilt schon als dessen Sollwert. Jeder
+  Sollwert wird über die Rückmeldung bestätigt; zweimal nicht bestätigt pausiert das Thermostat eine Stunde. Die App
+  zählt außerdem die Ventilbewegungen je Tag.
 - **Testlauf je Thermostat:** von Hand vorgemerkt, läuft nachts (Start ab 22 Uhr, spätestens 1 Uhr, Ende spätestens
   5 Uhr) und nur mit dem **Fühlerpaar** an Vor- und Rücklauf des Heizkörpers: Sollwert in Stufen hoch bis das Ventil
-  offen ist, dann bis 1 K unter die Temperatur am Thermostat, dann zurück; höchstens 16 Befehle; Abbruch bei Raum
-  über Soll + 1 K, Fenster oder ohne warmes Wasser. Ergebnis: Ventilverhalten mit Tabelle je Stufe.
+  offen ist, dann bis 1 K unter die Temperatur am Thermostat, dann zurück; höchstens 16 Befehle je Nacht; Abbruch
+  bei Raum über Soll + 1 K, Fenster oder ohne warmes Wasser. Der Rückweg auf den Sollwert von vorher geht immer
+  hinaus (auch nach einem Neustart); geht er nicht, setzt die App den Notfallwert. Danach gibt die App das Thermostat
+  wieder frei, außer der Raum steht auf „Steuern“. Vollständig ist ein Lauf nur, wenn das Ventil ganz offen und
+  wieder zu war. Ergebnis: Ventilverhalten mit Tabelle je Stufe.
 - **Absicherung:** Lebenszeichen `sensor.vaillant_eebus_raeume_lebenszeichen` jede Minute (unabhängig von den
-  Export-Gruppen) und eine **Vorlage der Notfall-Automation** zum Kopieren: Sie setzt nach 15 Minuten ohne
-  Lebenszeichen die Notfallwerte. Verlässt ein Raum „Steuern“, wechselt die App auf Demo oder wird sie beendet, setzt
-  sie selbst den Notfallwert.
+  Export-Gruppen); es bleibt stehen, wenn die Raumregelung über 12 Minuten nicht mehr rechnet. Sein Attribut
+  `notfallwerte` nennt die Thermostate, die die App gerade gestellt hat. Die **Vorlage der Notfall-Automation** zum
+  Kopieren setzt nach 15 Minuten ohne Lebenszeichen genau diese auf ihren Notfallwert (fehlt das Lebenszeichen ganz,
+  alle Thermostate der Räume). Verlässt ein Raum „Steuern“, wechselt die App auf Demo, wird sie beendet, wird ein
+  Raum entfernt oder bekommt er ein anderes Thermostat, oder meldet ein gestelltes Thermostat eine blockierende
+  Warnung, setzt sie selbst den Notfallwert – auch für ein Thermostat, dessen Raum es nicht mehr gibt. Eine
+  myVAILLANT-Zone kann kein Raum-Thermostat sein (auch nicht, wenn sie nur so aussieht).
 - **Seite Räume:** Karte **Raumregelung** (Stufe, Lebenszeichen, Notfall-Automation, Fühlerpaar mit Meldeabstand
   und Auflösung), je Raum Thermostat-Soll und Ziel, Zustand, Befehle und Ventilbewegungen heute, Warnungen, Testlauf
   und Ventilverhalten; je Heizkörper-Zone Wärmeangebot, Umverteilen und Vorlauf-Hinweis. Im Raum-Editor neu: Grenze
