@@ -418,6 +418,168 @@ async def test_the_fallback_works_when_the_thermostat_state_is_gone(rig: Rig) ->
         await rig.gate.submit(office(5.0, RoomReason.WINDOW))
 
 
+# --- findings of the review of 1.4.0 ----------------------------------------------------------------
+
+
+async def test_the_fallback_goes_out_while_another_value_is_on_its_way(rig: Rig) -> None:
+    # The thermostat reports a new setpoint only after a while (finding 1).
+    rig.fake.trv_lag = 2.0
+    await rig.gate.submit(office(22.0))
+    rig.clock.advance(seconds=1)
+
+    # 21 °C is still reported, but 22 °C is on its way: the fallback to the room's 21 °C must go out.
+    result = await rig.gate.submit(office(21.0, RoomReason.FALLBACK))
+
+    assert result.sent
+    assert [call["temperature"] for call in rig.calls()] == [22.0, 21.0]
+    assert rig.gate.touched() == []
+
+
+async def test_the_dead_band_counts_from_the_value_on_its_way(rig: Rig) -> None:
+    rig.fake.trv_lag = 2.0
+    configure(rig.settings, deadband_k=1.0, min_interval_min=5)
+    await rig.gate.submit(office(23.0))
+    rig.clock.advance(minutes=6)
+
+    # 22.5 °C is 1.5 K from the reported 21 °C, but only 0.5 K from the 23 °C on its way.
+    result = await rig.gate.submit(office(22.5))
+
+    assert result.held is Held.DEADBAND
+
+
+def bath(celsius: float, reason: RoomReason) -> SetThermostatSetpoint:
+    return SetThermostatSetpoint(room_id=TRV_BATH_TEMPERATURE, celsius=celsius, reason=reason)
+
+
+async def test_the_way_back_after_a_test_run_goes_out_whatever_holds_the_rest(rig: Rig) -> None:
+    # The bathroom stays in "Beobachten"; its thermostat does not confirm (finding 2).
+    rig.fake.trv_silent.add(TRV_BATH)
+    for celsius in (24.0, 24.5):
+        assert (await rig.gate.submit(bath(celsius, RoomReason.TEST))).sent
+        rig.clock.advance(minutes=5)
+        rig.gate.expire()
+    assert rig.gate.commands(TRV_BATH).paused_until is not None
+    # It took the last value after all, without the app seeing the confirmation in time.
+    rig.fake.change(TRV_BATH, temperature=24.5)
+    await eventually(lambda: rig.home.hems_sources.attribute(TRV_BATH, "temperature") == 24.5)
+
+    # Not anywhere: only the value from before the run, the emergency value or the room's setpoint.
+    with pytest.raises(WriteRejected):
+        await rig.gate.submit(bath(23.0, RoomReason.RESTORE))
+    back = await rig.gate.submit(bath(22.0, RoomReason.RESTORE))
+
+    assert back.sent
+    assert [call["temperature"] for call in rig.calls(TRV_BATH)] == [24.0, 24.5, 22.0]
+    # The room is not in "Steuern": the app lets go of the thermostat again.
+    assert rig.gate.touched() == []
+
+
+async def test_the_way_back_may_go_to_the_setpoint_from_before_the_run(rig: Rig) -> None:
+    rig.fake.change(TRV_BATH, temperature=26.5)
+    await eventually(lambda: rig.home.hems_sources.attribute(TRV_BATH, "temperature") == 26.5)
+    await rig.gate.submit(bath(24.0, RoomReason.TEST))
+
+    # Right after the step, within the technical 5 s: the way back is never held.
+    back = await rig.gate.submit(bath(26.5, RoomReason.RESTORE))
+
+    assert back.sent
+    assert rig.gate.touched() == []
+
+
+async def test_after_the_way_back_a_room_in_control_stays_with_the_app(rig: Rig) -> None:
+    await rig.gate.submit(office(22.0, RoomReason.TEST))
+    rig.clock.advance(seconds=1)
+
+    assert (await rig.gate.submit(office(21.0, RoomReason.RESTORE))).sent
+    assert rig.gate.touched() == [TRV_OFFICE]
+
+
+async def test_the_way_back_needs_a_test_run_before_it(rig: Rig) -> None:
+    with pytest.raises(WriteRejected) as rejected:
+        await rig.gate.submit(bath(22.0, RoomReason.RESTORE))
+
+    assert rejected.value.status == 409
+    assert rig.calls() == []
+
+
+async def test_the_test_budget_is_counted_per_night(rig: Rig) -> None:
+    rig.clock.now = datetime(2026, 11, 23, 23, 0, tzinfo=UTC)
+    for index in range(16):
+        assert (await rig.gate.submit(bath(10.0 + 0.5 * index, RoomReason.TEST))).sent
+        rig.clock.advance(seconds=6)
+    assert (await rig.gate.submit(bath(20.0, RoomReason.TEST))).held is Held.LIMIT
+
+    # After midnight it is still the same night; the way back is never held by the budget.
+    rig.clock.now = datetime(2026, 11, 24, 0, 30, tzinfo=UTC)
+    assert (await rig.gate.submit(bath(20.0, RoomReason.TEST))).held is Held.LIMIT
+    assert (await rig.gate.submit(bath(22.0, RoomReason.RESTORE))).sent
+    # The next night counts from zero.
+    rig.clock.now = datetime(2026, 11, 24, 22, 0, tzinfo=UTC)
+    assert (await rig.gate.submit(bath(20.0, RoomReason.TEST))).sent
+    assert rig.gate.commands(TRV_BATH).test_today == 1
+
+
+async def test_a_refused_first_command_does_not_take_the_thermostat_over(rig: Rig) -> None:
+    rig.fake.service_status["climate.set_temperature"] = 400
+
+    with pytest.raises(WriteNotExecuted):
+        await rig.gate.submit(office(22.0))
+
+    # Finding 14: nothing reached the thermostat, so there is nothing to hand back and no interval to wait.
+    assert rig.gate.touched() == []
+    assert rig.gate.commands(TRV_OFFICE).last_sent is None
+
+
+async def test_an_unknown_outcome_takes_the_thermostat_over(rig: Rig) -> None:
+    rig.fake.service_status["climate.set_temperature"] = 500
+
+    with pytest.raises(WriteOutcomeUnknown):
+        await rig.gate.submit(office(22.0))
+
+    assert rig.gate.touched() == [TRV_OFFICE]
+
+
+async def test_a_climate_entity_that_looks_like_a_myvaillant_zone_is_refused(rig: Rig) -> None:
+    # Not in the chosen zones, but the attributes of the integration's zones (finding 7).
+    rig.fake.change(TRV_OFFICE, time_program_heating={"monday": []})
+    await eventually(lambda: "time_program_heating" in getattr(rig.home.hems_sources.get(TRV_OFFICE), "attributes", {}))
+
+    with pytest.raises(WriteRejected) as rejected:
+        await rig.gate.submit(office(22.0))
+
+    assert "myVAILLANT" in rejected.value.message
+    assert rig.calls() == []
+
+
+async def test_the_fallback_reaches_a_thermostat_whose_room_is_gone(rig: Rig) -> None:
+    await rig.gate.submit(office(22.0))
+    rig.clock.advance(seconds=10)
+    rig.settings.update(
+        lambda current: replace(current, rooms=tuple(room for room in current.rooms if room.entity_id != OFFICE))
+    )
+
+    kept = rig.gate.touched_thermostats()
+    assert [(item.trv, item.room_id, item.name, item.fallback_c) for item in kept] == [
+        (TRV_OFFICE, OFFICE, "Büro", 20.0)
+    ]
+    # Only the fallback, and only to the emergency value the gate kept (finding 4).
+    with pytest.raises(WriteRejected):
+        await rig.gate.submit(SetThermostatSetpoint(OFFICE, 21.0, RoomReason.FALLBACK, trv=TRV_OFFICE))
+    with pytest.raises(WriteRejected):
+        await rig.gate.submit(SetThermostatSetpoint(OFFICE, 20.0, RoomReason.CONTROL, trv=TRV_OFFICE))
+    with pytest.raises(WriteRejected):
+        await rig.gate.submit(office(20.0, RoomReason.FALLBACK))
+    result = await rig.gate.submit(SetThermostatSetpoint(OFFICE, 20.0, RoomReason.FALLBACK, trv=TRV_OFFICE))
+
+    assert result.sent
+    assert [call["temperature"] for call in rig.calls()] == [22.0, 20.0]
+    assert rig.gate.touched() == []
+    assert any(
+        text == "Gesendet: Thermostat Büro: Soll 20,0 °C (Rückfall auf den Notfallwert)"
+        for text in await messages(rig.log)
+    )
+
+
 # --- structure ------------------------------------------------------------------------------------
 
 

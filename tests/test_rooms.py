@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from tests.fake_home_assistant import (
+    COMET,
     MV_HOT_WATER,
     MV_OUTDOOR,
     MV_POWER,
@@ -800,3 +801,239 @@ async def test_the_flow_waits_for_redistribution_while_rooms_preview(world: Worl
 
     assert advice is not None and advice[0] is FlowHint.HOLD
     assert world.control.flow_advice(MV_ZONE_2, FlowHint.LOWER) is None
+
+
+# --- findings of the review of 1.4.0 ----------------------------------------------------------------
+
+
+def test_too_warm_lowers_the_correction_once() -> None:
+    correction = Correction(value_k=1.0)
+
+    _, correction = decide(room_inputs(room_c=22.1), correction)
+    _, still = decide(room_inputs(room_c=22.2, now=T0 + timedelta(minutes=5)), correction)
+    _, after = decide(room_inputs(room_c=21.0, now=T0 + timedelta(minutes=10)), still)
+
+    # Finding 11: on entering "zu warm" the correction goes down at once, but only once.
+    assert (correction.value_k, correction.too_warm) == (0.5, True)
+    assert (still.value_k, still.too_warm) == (0.5, True)
+    assert (after.value_k, after.too_warm) == (0.5, False)
+
+
+def test_the_cascade_sets_a_manual_change_back_to_its_own_value() -> None:
+    decision, _ = decide(
+        room_inputs(curve=complete_curve(), room_c=21.0, valve=20.0, trv_setpoint_c=23.0, expected_c=21.0),
+        Correction(),
+    )
+
+    # Finding 10: 30 % -> the 20 % step at +1 K above the thermostat's 21.5 °C. Compared with the hand's 23 °C the
+    # hysteresis would keep 23 °C; compared with what the app set (21 °C) it goes to 22.5 °C.
+    assert (decision.target_c, decision.reason) == (22.5, RoomReason.MANUAL)
+
+
+def test_a_running_heat_pump_without_water_temperatures_is_unclear() -> None:
+    supply = heat_supply(now=T0, power=series([600]), buffer=[], room_c=21.0)
+
+    assert supply.supply is HeatSupply.UNKNOWN
+
+
+def test_a_test_run_is_complete_only_when_the_valve_closed_again() -> None:
+    run = TestRun(room_id=OFFICE, trv=TRV_OFFICE, armed_at=T0, state=TestState.DONE, reached_full=True)
+    run.started_at, run.ended_at = T0, T0 + timedelta(hours=4)
+    run.steps = [step(0.0, 0.0), step(2.5, 100.0), step(1.5, 60.0, rising=False)]
+    result = run.result()
+    assert result is not None and not result.complete
+
+    run.steps.append(step(-1.0, 0.0, rising=False))
+    result = run.result()
+    assert result is not None and result.complete
+
+
+def test_a_night_whose_start_was_before_arming_does_not_count() -> None:
+    run = TestRun(room_id=OFFICE, trv=TRV_OFFICE, armed_at=datetime(2026, 11, 24, 1, 30, tzinfo=UTC))
+
+    play(run, datetime(2026, 11, 24, 1, 30, tzinfo=UTC), 5 * 60, room_c=22.0)
+    assert (run.state, run.nights) == (TestState.ARMED, 0)
+
+    play(run, datetime(2026, 11, 24, 21, 0, tzinfo=UTC), 6 * 60, room_c=22.0)
+    assert run.nights == 1
+
+
+def office_test(celsius: float, reason: RoomReason = RoomReason.TEST) -> SetThermostatSetpoint:
+    return SetThermostatSetpoint(OFFICE, celsius, reason)
+
+
+async def test_a_way_back_that_does_not_go_out_falls_back(world: World) -> None:
+    await world.gate.submit(office_test(24.0))
+    await eventually(lambda: world.home.hems_sources.attribute(TRV_OFFICE, "temperature") == 24.0)
+    # A run whose way back is not allowed (not the value from before, the emergency value or the room's setpoint).
+    world.control._test = TestRun(
+        room_id=OFFICE, trv=TRV_OFFICE, armed_at=T0, state=TestState.RUNNING, before_c=23.5, started_at=T0
+    )
+
+    await world.control.cancel_test(OFFICE)
+
+    # Finding 2: the fallback follows.
+    assert world.calls(TRV_OFFICE) == [24.0, 20.0]
+    assert any("Rückweg nach dem Testlauf Büro nicht gesendet" in text for text in await messages(world.log))
+    assert world.gate.touched() == []
+
+
+async def test_a_test_run_cut_by_a_restart_goes_back(world: World) -> None:
+    await world.gate.submit(office_test(24.0))
+    await eventually(lambda: world.home.hems_sources.attribute(TRV_OFFICE, "temperature") == 24.0)
+    world.control._test = TestRun(
+        room_id=OFFICE, trv=TRV_OFFICE, armed_at=T0, state=TestState.RUNNING, before_c=21.0, started_at=T0
+    )
+    world.control._save()
+
+    restarted = RoomControl(
+        world.settings,
+        world.control._state,
+        world.hems,
+        world.gate,
+        world.home,
+        world.log,
+        world.control._path.parent,
+        clock=world.clock,
+    )
+    await restarted.minute()
+
+    assert world.calls(TRV_OFFICE) == [24.0, 21.0]
+    # The office stays in "Beobachten": the app lets go after the way back.
+    assert world.gate.touched() == []
+
+
+async def test_the_life_sign_stands_still_without_the_control_beat(world: World) -> None:
+    await world.control.minute()
+    assert world.control.sensors()[0].state == T0.isoformat()
+
+    world.clock.now = T0 + timedelta(minutes=13)
+    await world.control.minute()
+
+    # Finding 3: the minute loop runs, but the control has not computed for 13 minutes.
+    assert world.control.sensors()[0].state == T0.isoformat()
+    assert any("rechnet seit über 12 Minuten nicht mehr" in text for text in await messages(world.log))
+    await world.hems.sample()
+    await world.control.minute()
+    assert world.control.sensors()[0].state == world.clock.now.isoformat()
+
+
+async def test_a_blocking_warning_hands_a_set_thermostat_back(world: World) -> None:
+    learned(world, TRV_BATH)
+    world.stage(TRV_BATH_TEMPERATURE, RoomStage.CONTROL, offset_k=1.0)
+    await beat(world)
+    world.fake.set(f"select.{COMET}_trv_mode", "1", name="Thermostat Bad trv_mode")
+
+    # After 15 minutes the app reads the thermostat's other entities again.
+    await beat(world, 16)
+
+    assert world.calls(TRV_BATH) == [23.0, 22.0]
+    assert any("Die App gibt es auf den Notfallwert zurück" in text for text in await messages(world.log))
+
+
+async def test_removing_a_room_hands_its_thermostat_back_first(world: World) -> None:
+    learned(world, TRV_BATH)
+    world.stage(TRV_BATH_TEMPERATURE, RoomStage.CONTROL, offset_k=1.0)
+    await beat(world)
+
+    response = await world.http.put(
+        "/api/settings",
+        json={"rooms": [{"entity_id": OFFICE, "name": "Büro", "zone_id": MV_ZONE_2}], "export": []},
+    )
+
+    assert response.status_code == 200
+    # Finding 4.
+    assert world.calls(TRV_BATH) == [23.0, 22.0]
+    assert [room.name for room in world.settings.current.rooms] == ["Büro"]
+
+
+async def test_a_thermostat_whose_room_is_gone_gets_its_value_when_the_app_stops(world: World) -> None:
+    learned(world, TRV_BATH)
+    world.stage(TRV_BATH_TEMPERATURE, RoomStage.CONTROL, offset_k=1.0)
+    await beat(world)
+    world.settings.update(
+        lambda current: replace(
+            current, rooms=tuple(room for room in current.rooms if room.entity_id != TRV_BATH_TEMPERATURE)
+        )
+    )
+    task = asyncio.create_task(world.control.run())
+    await asyncio.sleep(0.05)
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert world.calls(TRV_BATH) == [23.0, 22.0]
+
+
+async def test_changing_a_rooms_thermostat_hands_the_old_one_back(world: World) -> None:
+    await world.gate.submit(SetThermostatSetpoint(TRV_BATH_TEMPERATURE, 24.0, RoomReason.TEST))
+
+    response = await world.http.put(
+        f"/api/rooms/{TRV_BATH_TEMPERATURE}",
+        json={"trv_entity": None, "valve_entity": TRV_BATH_VALVE, "setpoint_c": 22.0, "emergency_c": 22.0},
+    )
+
+    assert response.status_code == 200
+    assert world.calls(TRV_BATH) == [24.0, 22.0]
+    assert world.gate.touched() == []
+
+
+async def test_the_life_sign_lists_what_the_emergency_automation_sets(world: World) -> None:
+    learned(world, TRV_BATH)
+    world.stage(TRV_BATH_TEMPERATURE, RoomStage.CONTROL, offset_k=1.0)
+    await beat(world)
+    world.settings.update(
+        lambda current: replace(
+            current,
+            rooms=tuple(
+                replace(room, name="Büro\nOben") if room.entity_id == OFFICE else room for room in current.rooms
+            ),
+        )
+    )
+
+    sensor = world.control.sensors()[0]
+    yaml = (await world.http.get("/api/rooms/automation")).json()["yaml"]
+
+    # Finding 5b: only the thermostats the app has set; the fixed list only without the life sign.
+    assert sensor.attributes["notfallwerte"] == [{"entity_id": TRV_BATH, "temperature": 22.0}]
+    assert f"state_attr('{LIFESIGN_ENTITY}', 'notfallwerte')" in yaml
+    assert 'for_each: "{{ gestellt }}"' in yaml
+    assert "    else:\n      - action: climate.set_temperature" in yaml
+    # H5: a name over two lines stays one comment line.
+    assert f"entity_id: {TRV_OFFICE}   # Büro Oben (Notfallwert)\n" in yaml
+
+
+async def test_a_window_in_the_bathroom_right_after_a_command_is_not_believed(world: World) -> None:
+    learned(world, TRV_BATH)
+    world.stage(TRV_BATH_TEMPERATURE, RoomStage.CONTROL, offset_k=1.0)
+    world.fake.set(TRV_BATH_TEMPERATURE, "22.6", unit="°C")
+    await eventually(lambda: world.home.hems_sources.number(TRV_BATH_TEMPERATURE) == 22.6)
+    await beat(world)
+    world.clock.now += timedelta(minutes=3)
+    world.fake.set(TRV_BATH_TEMPERATURE, "21.8", unit="°C")
+    await eventually(lambda: world.hems.window_open(TRV_BATH_TEMPERATURE))
+
+    await beat(world, 1)
+
+    # Finding 6: the sensor at the radiator falls after the app's own command; no 8 °C for the bathroom.
+    assert world.calls(TRV_BATH) == [23.0]
+    assert any("Fenster im Raum Bad nicht beachtet" in text for text in await messages(world.log))
+
+
+async def test_a_room_thermostat_cannot_become_a_myvaillant_zone(world: World) -> None:
+    response = await world.http.put(
+        "/api/connection",
+        json={
+            "connection": "myvaillant",
+            "myvaillant": {
+                "zones": [MV_ZONE_1, TRV_OFFICE],
+                "hot_water": MV_HOT_WATER,
+                "outdoor_temperature": MV_OUTDOOR,
+                "power": MV_POWER,
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert world.settings.current.myvaillant.zones == (MV_ZONE_1, MV_ZONE_2)
