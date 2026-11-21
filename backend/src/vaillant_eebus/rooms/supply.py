@@ -5,7 +5,7 @@ undersupplied or redistribute. Until the zones are controlled (1.5.0) the app
 knows no planned pauses; it reads the state from measurements alone:
 
 - heat from the heat pump: it runs (above 50 W) and the flow (or, without a
-  flow sensor, the buffer) is at least 8 K above the rooms;
+  flow sensor, the buffer) is at least 8 K above the rooms; with neither, unclear;
 - heat from the buffer: the heat pump stands, the buffer is at least 5 K above
   the rooms and falls by 2 K/h or more (the circuits draw from it), with the
   time left until the heat pump usually starts again;
@@ -100,7 +100,10 @@ def heat_supply(
     flow_c = latest(flow, now)
     if watts >= RUNNING_W:
         water = flow_c if flow_c is not None else buffer_c
-        if water is None or water >= room + FROM_PUMP_K:
+        if water is None:
+            # It runs, but whether warm water arrives is not known.
+            return SupplyNow(HeatSupply.UNKNOWN)
+        if water >= room + FROM_PUMP_K:
             return SupplyNow(HeatSupply.HEAT_PUMP, buffer_c=buffer_c)
         return SupplyNow(HeatSupply.NONE, buffer_c=buffer_c)
     if buffer_c is None:

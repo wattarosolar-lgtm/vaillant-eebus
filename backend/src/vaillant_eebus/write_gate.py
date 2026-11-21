@@ -52,7 +52,7 @@ from vaillant_eebus.ha_client import EntityState, HomeAssistantClient, ServiceCa
 from vaillant_eebus.hems.sources import HemsSources
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.pairing import NotPairedError, PairingService
-from vaillant_eebus.room_data import RoomControlMode, effective_stage
+from vaillant_eebus.room_data import RoomControlMode, RoomDetails, effective_stage
 from vaillant_eebus.settings import Connection, OperatingMode, Room, Settings, SettingsStore
 from vaillant_eebus.state import MODE_NAMES, HeatPumpState, HotWater, Setpoint, StateHub, Zone
 
@@ -1049,8 +1049,10 @@ ROOM_CONFIRM_TIMEOUT_S = 300.0
 # After this many unconfirmed commands in a row the thermostat gets only window, safety and fallback.
 ROOM_UNCONFIRMED_MAX = 2
 ROOM_UNCONFIRMED_PAUSE = timedelta(hours=1)
-# A test run's own budget per thermostat and day (punkt1-trv-regelung.md 3b); not part of the daily limit.
+# A test run's own budget per thermostat and night (punkt1-trv-regelung.md 3b); not part of the daily limit.
 TEST_COMMANDS_MAX = 16
+# A night runs from noon to noon (local), so a test run after midnight keeps its budget.
+_NIGHT_SHIFT = timedelta(hours=12)
 # Step of the thermostats when the entity does not report its own.
 DEFAULT_TRV_STEP = 0.5
 ROOM_GATE_FILE = "room_gate.json"
@@ -1067,6 +1069,8 @@ class RoomReason(StrEnum):
     MANUAL = "manual"
     SAFETY = "safety"
     TEST = "test"
+    # Back to the setpoint from before a test run.
+    RESTORE = "restore"
     FALLBACK = "fallback"
 
 
@@ -1078,23 +1082,38 @@ ROOM_REASON_NAMES = {
     RoomReason.MANUAL: "Handänderung zurückgesetzt",
     RoomReason.SAFETY: "Sicherheit, Raum zu warm",
     RoomReason.TEST: "Testlauf",
+    RoomReason.RESTORE: "Rückweg nach dem Testlauf",
     RoomReason.FALLBACK: "Rückfall auf den Notfallwert",
 }
 # Valve sparing (punkt1-trv-regelung.md 3a): these reasons need no dead band and no interval ...
 _FREE_OF_SPARING = frozenset(
-    {RoomReason.WINDOW, RoomReason.MANUAL, RoomReason.SAFETY, RoomReason.FALLBACK, RoomReason.TEST}
+    {
+        RoomReason.WINDOW,
+        RoomReason.MANUAL,
+        RoomReason.SAFETY,
+        RoomReason.FALLBACK,
+        RoomReason.TEST,
+        RoomReason.RESTORE,
+    }
 )
 # ... and these still go out when the day's commands are used up.
-_OVER_THE_LIMIT = frozenset({RoomReason.WINDOW, RoomReason.SAFETY, RoomReason.FALLBACK})
+_OVER_THE_LIMIT = frozenset({RoomReason.WINDOW, RoomReason.SAFETY, RoomReason.FALLBACK, RoomReason.RESTORE})
+# Handing a thermostat back always goes out: no pause, no technical limit, no budget.
+_HANDING_BACK = frozenset({RoomReason.FALLBACK, RoomReason.RESTORE})
 
 
 @dataclass(frozen=True, slots=True)
 class SetThermostatSetpoint:
-    """The setpoint of a room's radiator thermostat: the one chosen for the room in the settings."""
+    """The setpoint of a room's radiator thermostat: the one chosen for the room in the settings.
+
+    trv names the thermostat only for the fallback of a thermostat whose room is gone
+    (deleted, or its sensor or thermostat changed); the gate then uses what it kept of the room.
+    """
 
     room_id: str
     celsius: float
     reason: RoomReason
+    trv: str | None = None
 
 
 class Held(StrEnum):
@@ -1139,6 +1158,7 @@ class ThermostatCommands:
 
     today: int
     limit: int
+    # Commands of test runs this night.
     test_today: int
     last_sent: datetime | None
     # The value the app set last (confirmed or still on its way); None when unknown.
@@ -1148,10 +1168,21 @@ class ThermostatCommands:
     paused_until: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class TouchedThermostat:
+    """A thermostat the app has set, with what the gate kept of its room for the fallback."""
+
+    trv: str
+    room_id: str | None
+    name: str | None
+    fallback_c: float | None
+
+
 @dataclass
 class _Trv:
     day: date | None = None
     count: int = 0
+    test_night: date | None = None
     test_count: int = 0
     last_sent: datetime | None = None
     expected: float | None = None
@@ -1163,6 +1194,12 @@ class _Trv:
     pending_since: datetime | None = None
     pending_text: str = ""
     limit_logged: date | None = None
+    # The setpoint before the first command of a test run: the way back may go there.
+    restore_c: float | None = None
+    # The room the thermostat belonged to when the app last set it, for a fallback without the room.
+    room_id: str | None = None
+    name: str | None = None
+    fallback_c: float | None = None
 
 
 class RoomGate:
@@ -1171,10 +1208,11 @@ class RoomGate:
     One service, climate.set_temperature with only the temperature, on the
     thermostat a room has in the settings - never on a myVAILLANT zone. A room
     must be in "Steuern" (switch and room), a test run needs the room control
-    on, the fallback only goes to thermostats the app has set. The value must
-    fit the thermostat's range and step and the room's limits; dead band,
-    interval and the commands a day spare the valves here, not only in the
-    room control. Preview and demo mode send nothing; their counting is
+    on, the fallback and the way back after a test run only go to thermostats
+    the app has set. The value must fit the thermostat's range and step and the
+    room's limits; dead band, interval and the commands a day spare the valves
+    here, not only in the room control. A value still on its way counts as the
+    thermostat's setpoint. Preview and demo mode send nothing; their counting is
     simulated separately, so the preview shows what control would send.
     """
 
@@ -1241,6 +1279,14 @@ class RoomGate:
         """Thermostats the app has set and not handed back yet."""
         return sorted(trv for trv, state in self._live.items() if state.touched)
 
+    def touched_thermostats(self) -> list[TouchedThermostat]:
+        """The thermostats the app has set, with what the gate kept of their rooms."""
+        return [
+            TouchedThermostat(trv=trv, room_id=state.room_id, name=state.name, fallback_c=state.fallback_c)
+            for trv, state in sorted(self._live.items())
+            if state.touched
+        ]
+
     def commands(self, trv: str, *, preview: bool = False) -> ThermostatCommands:
         state = (self._preview if preview else self._live).get(trv) or _Trv()
         self._new_day(state, self._clock())
@@ -1263,23 +1309,26 @@ class RoomGate:
         the command is not allowed, WriteNotExecuted when Home Assistant refused it and
         WriteOutcomeUnknown when it is unknown whether it arrived.
         """
-        settings = self._settings.current
-        room = next((item for item in settings.rooms if item.entity_id == command.room_id), None)
-        if room is None:
-            raise WriteRejected(404, "Diesen Raum gibt es nicht (mehr).")
-        trv = room.details.trv_entity
-        if trv is None:
-            raise WriteRejected(409, f"{room.name}: Es ist kein Thermostat gewählt.")
+        trv = self._thermostat_of(command, self._settings.current)
         async with self._locks.setdefault(trv, asyncio.Lock()):
+            # Read inside the lock: the mode or the room may have changed while waiting for it.
+            settings = self._settings.current
+            room = self._room_for(command, trv, settings)
+            kept = self._live.get(trv)
+            name = room.name if room is not None else (kept.name if kept is not None and kept.name else trv)
             description = (
-                f"Thermostat {room.name}: Soll {_number(command.celsius, None)} °C "
-                f"({ROOM_REASON_NAMES[command.reason]})"
+                f"Thermostat {name}: Soll {_number(command.celsius, None)} °C ({ROOM_REASON_NAMES[command.reason]})"
             )
             live = not preview and settings.operating_mode is OperatingMode.LIVE
             try:
-                self._check_room(room, trv, command, settings, preview=preview)
-                limits = self._value_limits(trv, fallback=command.reason is RoomReason.FALLBACK)
-                _check_room_value(room, command, limits)
+                handing_back = command.reason in _HANDING_BACK
+                if room is not None:
+                    self._check_room(room, trv, command, settings, preview=preview)
+                    limits = self._value_limits(trv, handing_back=handing_back)
+                    _check_room_value(room, command, limits, restore_c=kept.restore_c if kept is not None else None)
+                else:
+                    limits = self._value_limits(trv, handing_back=handing_back)
+                    self._check_orphan(trv, command, settings, limits, preview=preview)
             except WriteRejected as rejected:
                 category = LogCategory.ROOMS if preview else LogCategory.WRITE
                 self._log.add(category, f"Abgelehnt: {description}. {rejected.message}", problem=True)
@@ -1288,11 +1337,17 @@ class RoomGate:
             state = (self._live if live else self._preview).setdefault(trv, _Trv())
             self._new_day(state, now)
             reported = self._sources.attribute(trv, "temperature")
-            current = reported if live or state.expected is None else state.expected
-            held = self._held(room, trv, state, command, current, now)
+            if live:
+                # A value still on its way is what the thermostat will have.
+                current = state.pending if state.pending is not None else reported
+            else:
+                current = state.expected if state.expected is not None else reported
+            details = room.details if room is not None else RoomDetails()
+            held = self._held(name, details, trv, state, command, current, now)
             if held is not None:
-                if command.reason is RoomReason.FALLBACK and held.held is Held.SAME and live:
-                    self._hand_back(state)
+                if live and held.held is Held.SAME and command.reason in _HANDING_BACK:
+                    self._handed_back(state, command, room, settings)
+                    self._save()
                 return held
             if not live:
                 text = "Vorschau, würde senden" if preview else "Würde senden"
@@ -1303,7 +1358,7 @@ class RoomGate:
                 return RoomWriteResult(sent=False, message=message)
             if self._client is None:
                 raise WriteRejected(409, "Ohne Home Assistant kann die App kein Thermostat stellen.")
-            return await self._send(trv, state, command, description, now)
+            return await self._send(trv, state, command, description, now, room, settings, before=reported)
 
     async def run(self) -> None:
         """Follow sent setpoints: not reported in time means not confirmed."""
@@ -1329,12 +1384,11 @@ class RoomGate:
             state.unconfirmed += 1
             if state.unconfirmed >= ROOM_UNCONFIRMED_MAX:
                 state.paused_until = now + ROOM_UNCONFIRMED_PAUSE
-                room = self._room_of(trv)
                 self._log.add(
                     LogCategory.ROOMS,
-                    f"Thermostat {room.name if room else trv} übernimmt die Sollwerte nicht "
+                    f"Thermostat {state.name or trv} übernimmt die Sollwerte nicht "
                     f"({state.unconfirmed}-mal nicht bestätigt). Die App sendet ihm eine Stunde lang nur Fenster, "
-                    "Sicherheit und Rückfall. Bitte Batterie und Funkverbindung prüfen.",
+                    "Sicherheit, Rückweg und Rückfall. Bitte Batterie und Funkverbindung prüfen.",
                     problem=True,
                 )
             changed = True
@@ -1343,11 +1397,31 @@ class RoomGate:
 
     # --- internals ----------------------------------------------------------------------
 
+    def _thermostat_of(self, command: SetThermostatSetpoint, settings: Settings) -> str:
+        if command.trv is not None:
+            if command.reason is not RoomReason.FALLBACK:
+                raise WriteRejected(422, "Ein Thermostat ohne Raum bekommt nur den Rückfall.")
+            return command.trv
+        room = next((item for item in settings.rooms if item.entity_id == command.room_id), None)
+        if room is None:
+            raise WriteRejected(404, "Diesen Raum gibt es nicht (mehr).")
+        if room.details.trv_entity is None:
+            raise WriteRejected(409, f"{room.name}: Es ist kein Thermostat gewählt.")
+        return room.details.trv_entity
+
+    def _room_for(self, command: SetThermostatSetpoint, trv: str, settings: Settings) -> Room | None:
+        """The room of the command's thermostat now; None only for the fallback of a thermostat without room."""
+        if command.trv is not None:
+            return next((room for room in settings.rooms if room.details.trv_entity == trv), None)
+        room = next((item for item in settings.rooms if item.entity_id == command.room_id), None)
+        if room is None or room.details.trv_entity != trv:
+            raise WriteRejected(409, "Raum oder Thermostat wurden gerade geändert; nichts gesendet.")
+        return room
+
     def _check_room(
         self, room: Room, trv: str, command: SetThermostatSetpoint, settings: Settings, *, preview: bool
     ) -> None:
-        if trv in settings.myvaillant.zones:
-            raise WriteRejected(409, f"{room.name}: Das Thermostat ist eine Zone von myVAILLANT, kein Heizkörper.")
+        self._check_not_a_zone(trv, settings, room.name)
         if any(other.details.trv_entity == trv for other in settings.rooms if other.entity_id != room.entity_id):
             raise WriteRejected(409, f"{room.name}: Das Thermostat ist auch einem anderen Raum zugeordnet.")
         if preview:
@@ -1357,7 +1431,7 @@ class RoomGate:
             case RoomReason.TEST:
                 if mode is RoomControlMode.OFF:
                     raise WriteRejected(409, "Die Raumregelung ist aus; ein Testlauf geht erst, wenn sie läuft.")
-            case RoomReason.FALLBACK:
+            case RoomReason.FALLBACK | RoomReason.RESTORE:
                 state = self._live.get(trv)
                 if settings.operating_mode is OperatingMode.LIVE and (state is None or not state.touched):
                     raise WriteRejected(409, f"{room.name}: Die App hat dieses Thermostat nicht gestellt.")
@@ -1365,9 +1439,29 @@ class RoomGate:
                 if effective_stage(mode, room.details.stage) is not RoomControlMode.CONTROL:
                     raise WriteRejected(409, f"{room.name}: Der Raum steht nicht auf „Steuern“.")
 
-    def _value_limits(self, trv: str, *, fallback: bool) -> ThermostatLimits:
+    def _check_orphan(
+        self, trv: str, command: SetThermostatSetpoint, settings: Settings, limits: ThermostatLimits, *, preview: bool
+    ) -> None:
+        """The fallback of a thermostat whose room is gone: only to the emergency value kept for it."""
+        state = self._live.get(trv)
+        if state is None or state.fallback_c is None or (not preview and not state.touched):
+            raise WriteRejected(409, "Die App hat dieses Thermostat nicht gestellt.")
+        self._check_not_a_zone(trv, settings, state.name or trv)
+        if abs(command.celsius - limits.round(state.fallback_c)) >= 0.01:
+            raise WriteRejected(422, "Der Rückfall geht nur auf den Notfallwert.")
+
+    def _check_not_a_zone(self, trv: str, settings: Settings, name: str) -> None:
+        """Never a zone of myVAILLANT: neither a chosen one nor one that looks like it (fail closed)."""
+        entity = self._sources.get(trv)
+        looks_like_zone = entity is not None and (
+            "quick_veto_end_date_time" in entity.attributes or "time_program_heating" in entity.attributes
+        )
+        if trv in settings.myvaillant.zones or looks_like_zone:
+            raise WriteRejected(409, f"{name}: Das Thermostat ist eine Zone von myVAILLANT, kein Heizkörper.")
+
+    def _value_limits(self, trv: str, *, handing_back: bool) -> ThermostatLimits:
         limits = self.limits(trv)
-        if limits is None and fallback:
+        if limits is None and handing_back:
             limits = self._limits.get(trv)
         if limits is None:
             state = self._sources.get(trv)
@@ -1378,14 +1472,14 @@ class RoomGate:
 
     def _held(
         self,
-        room: Room,
+        name: str,
+        details: RoomDetails,
         trv: str,
         state: _Trv,
         command: SetThermostatSetpoint,
         current: float | None,
         now: datetime,
     ) -> RoomWriteResult | None:
-        details = room.details
         reason = command.reason
         if state.paused_until is not None and now < state.paused_until and reason not in _OVER_THE_LIMIT:
             return RoomWriteResult(sent=False, message="Thermostat pausiert", held=Held.PAUSED)
@@ -1399,8 +1493,8 @@ class RoomGate:
             and abs(current - command.celsius) < details.deadband_k - 1e-6
         ):
             return RoomWriteResult(sent=False, message="Innerhalb der Totzone", held=Held.DEADBAND)
-        if state.last_sent is not None and reason is not RoomReason.FALLBACK:
-            # The fallback goes out even right after another command: the app may be stopping.
+        if state.last_sent is not None and reason not in _HANDING_BACK:
+            # Handing back goes out even right after another command: the app may be stopping.
             wait = self._rate_limit
             if reason not in _FREE_OF_SPARING:
                 wait = max(wait, timedelta(minutes=details.min_interval_min))
@@ -1417,36 +1511,51 @@ class RoomGate:
                 state.limit_logged = state.day
                 self._log.add(
                     LogCategory.ROOMS,
-                    f"Thermostat {room.name}: Höchstzahl von {details.max_commands} Befehlen heute erreicht; bis "
-                    "Mitternacht gehen nur noch Fenster, Sicherheit und Rückfall hinaus.",
+                    f"Thermostat {name}: Höchstzahl von {details.max_commands} Befehlen heute erreicht; bis "
+                    "Mitternacht gehen nur noch Fenster, Sicherheit, Rückweg und Rückfall hinaus.",
                     problem=True,
                 )
             return RoomWriteResult(sent=False, message="Höchstzahl erreicht", held=Held.LIMIT)
         return None
 
     async def _send(
-        self, trv: str, state: _Trv, command: SetThermostatSetpoint, description: str, now: datetime
+        self,
+        trv: str,
+        state: _Trv,
+        command: SetThermostatSetpoint,
+        description: str,
+        now: datetime,
+        room: Room | None,
+        settings: Settings,
+        *,
+        before: float | None,
     ) -> RoomWriteResult:
         assert self._client is not None
         # In the database before Home Assistant sees the command.
         await self._log.record(LogCategory.WRITE, f"Wird gesendet: {description}")
+        undo = (state.last_sent, state.count, state.test_count, state.restore_c)
+        if command.reason is RoomReason.TEST and state.restore_c is None:
+            # The first command of a test run: the way back goes to the setpoint from before.
+            state.restore_c = before if before is not None else state.expected
         self._count(state, command, now)
-        state.touched = True
+        if room is not None:
+            state.room_id, state.name = room.entity_id, room.name
+            state.fallback_c = room.details.fallback_c()
         state.pending, state.pending_since, state.pending_text = command.celsius, now, description
         self._save()
         try:
             await self._client.call_room_service("climate", "set_temperature", trv, {"temperature": command.celsius})
         except ServiceCallFailed as err:
             if err.executed is False:
+                # Certainly not at the thermostat: as if it had not been tried.
                 state.pending = state.pending_since = None
-                if command.reason is RoomReason.TEST:
-                    state.test_count -= 1
-                else:
-                    state.count -= 1
+                state.last_sent, state.count, state.test_count, state.restore_c = undo
                 self._save()
                 self._log.add(LogCategory.WRITE, f"Nicht ausgeführt: {description} ({err.code})", problem=True)
                 raise WriteNotExecuted(err.code) from err
             state.expected = command.celsius
+            # It may have arrived: the app keeps the thermostat until it hands it back for sure.
+            state.touched = True
             self._save()
             self._log.add(
                 LogCategory.WRITE,
@@ -1454,32 +1563,53 @@ class RoomGate:
                 problem=True,
             )
             raise WriteOutcomeUnknown(err.code) from err
-        except BaseException:
+        except ValueError:
+            # Refused before anything was sent.
             state.pending = state.pending_since = None
+            state.last_sent, state.count, state.test_count, state.restore_c = undo
+            self._save()
+            raise
+        except BaseException:
+            # The app stops in the middle of the call: the value may have arrived.
+            state.pending = state.pending_since = None
+            if command.reason not in _HANDING_BACK:
+                state.touched = True
             self._save()
             raise
         state.expected = command.celsius
-        if command.reason is RoomReason.FALLBACK:
-            self._hand_back(state)
+        if command.reason in _HANDING_BACK:
+            self._handed_back(state, command, room, settings)
+        else:
+            state.touched = True
         self._save()
         self._log.add(LogCategory.WRITE, f"Gesendet: {description}")
         return RoomWriteResult(sent=True, message=f"Gesendet: {description}")
 
-    def _hand_back(self, state: _Trv) -> None:
-        state.touched = False
-        self._save()
+    def _handed_back(self, state: _Trv, command: SetThermostatSetpoint, room: Room | None, settings: Settings) -> None:
+        """After the fallback or the way back: the app lets go, unless the room stays in "Steuern"."""
+        state.restore_c = None
+        controlled = (
+            command.reason is RoomReason.RESTORE
+            and room is not None
+            and effective_stage(settings.room_control.mode, room.details.stage) is RoomControlMode.CONTROL
+        )
+        state.touched = controlled
 
     def _count(self, state: _Trv, command: SetThermostatSetpoint, now: datetime) -> None:
         state.last_sent = now
         if command.reason is RoomReason.TEST:
             state.test_count += 1
-        else:
+        elif command.reason is not RoomReason.RESTORE:
             state.count += 1
 
     def _new_day(self, state: _Trv, now: datetime) -> None:
-        today = now.astimezone(self._zone).date()
+        local = now.astimezone(self._zone)
+        today = local.date()
         if state.day != today:
-            state.day, state.count, state.test_count = today, 0, 0
+            state.day, state.count = today, 0
+        night = (local - _NIGHT_SHIFT).date()
+        if state.test_night != night:
+            state.test_night, state.test_count = night, 0
 
     def _room_of(self, trv: str) -> Room | None:
         return next((room for room in self._settings.current.rooms if room.details.trv_entity == trv), None)
@@ -1491,10 +1621,9 @@ class RoomGate:
         reported = _finite(entity.attributes.get("temperature"))
         if reported is None or abs(reported - state.pending) >= 0.01:
             return
-        room = self._room_of(entity_id)
         self._log.add(
             LogCategory.WRITE,
-            f"Bestätigt vom Thermostat: {room.name if room else entity_id} {_number(reported, None)} °C",
+            f"Bestätigt vom Thermostat: {state.name or entity_id} {_number(reported, None)} °C",
         )
         state.expected = state.pending
         state.pending = state.pending_since = None
@@ -1518,12 +1647,17 @@ class RoomGate:
                 self._live[trv] = _Trv(
                     day=date.fromisoformat(item["day"]) if item.get("day") else None,
                     count=int(item.get("count", 0)),
+                    test_night=date.fromisoformat(item["test_night"]) if item.get("test_night") else None,
                     test_count=int(item.get("test_count", 0)),
                     last_sent=_moment(item.get("last_sent")),
                     expected=_finite(item.get("expected")),
                     touched=bool(item.get("touched", False)),
                     unconfirmed=int(item.get("unconfirmed", 0)),
                     paused_until=_moment(item.get("paused_until")),
+                    restore_c=_finite(item.get("restore_c")),
+                    room_id=item["room_id"] if isinstance(item.get("room_id"), str) else None,
+                    name=item["name"] if isinstance(item.get("name"), str) else None,
+                    fallback_c=_finite(item.get("fallback_c")),
                 )
             except (TypeError, ValueError):
                 _LOGGER.warning("Room gate state of %s unreadable, ignored", trv)
@@ -1534,12 +1668,17 @@ class RoomGate:
                 trv: {
                     "day": state.day.isoformat() if state.day else None,
                     "count": state.count,
+                    "test_night": state.test_night.isoformat() if state.test_night else None,
                     "test_count": state.test_count,
                     "last_sent": state.last_sent.isoformat() if state.last_sent else None,
                     "expected": state.expected,
                     "touched": state.touched,
                     "unconfirmed": state.unconfirmed,
                     "paused_until": state.paused_until.isoformat() if state.paused_until else None,
+                    "restore_c": state.restore_c,
+                    "room_id": state.room_id,
+                    "name": state.name,
+                    "fallback_c": state.fallback_c,
                 }
                 for trv, state in self._live.items()
             }
@@ -1554,7 +1693,9 @@ class RoomGate:
             _LOGGER.warning("Saving the room gate state failed: %s", err)
 
 
-def _check_room_value(room: Room, command: SetThermostatSetpoint, limits: ThermostatLimits) -> None:
+def _check_room_value(
+    room: Room, command: SetThermostatSetpoint, limits: ThermostatLimits, *, restore_c: float | None
+) -> None:
     celsius = command.celsius
     if not math.isfinite(celsius):
         raise WriteRejected(422, "Der Sollwert ist keine Zahl.")
@@ -1570,15 +1711,23 @@ def _check_room_value(room: Room, command: SetThermostatSetpoint, limits: Thermo
     details = room.details
     low, high = details.setpoint_range()
     normal = low - details.correction_limit_k - 1e-6 <= celsius <= high + details.correction_limit_k + 1e-6
+    handing_back = {limits.round(value) for value in (details.fallback_c(), *details.setpoint_range())}
     match command.reason:
         case RoomReason.TEST:
             return
         case RoomReason.WINDOW if abs(celsius - limits.min_c) < 0.01 or normal:
             return
         case RoomReason.FALLBACK:
-            allowed = {limits.round(value) for value in (details.fallback_c(), *details.setpoint_range())}
-            if not any(abs(celsius - value) < 0.01 for value in allowed):
+            if not any(abs(celsius - value) < 0.01 for value in handing_back):
                 raise WriteRejected(422, f"{room.name}: Der Rückfall geht nur auf den Notfallwert oder das Raum-Soll.")
+        case RoomReason.RESTORE:
+            allowed = handing_back | ({limits.round(restore_c)} if restore_c is not None else set())
+            if not any(abs(celsius - value) < 0.01 for value in allowed):
+                raise WriteRejected(
+                    422,
+                    f"{room.name}: Der Rückweg geht nur auf den Sollwert vor dem Testlauf, den Notfallwert oder das "
+                    "Raum-Soll.",
+                )
         case _ if not normal:
             raise WriteRejected(
                 422,

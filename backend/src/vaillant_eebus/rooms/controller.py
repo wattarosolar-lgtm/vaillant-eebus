@@ -75,6 +75,8 @@ class Correction:
     since: datetime | None = None
     direction: int = 0
     changed_at: datetime | None = None
+    # The room is too warm (safety rule): on entering it the correction went down once.
+    too_warm: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +152,13 @@ def decide(inputs: RoomInputs, correction: Correction) -> tuple[Decision, Correc
         and inputs.room_c > plain + details.comfort_up_k + SAFETY_ABOVE_K
     ):
         target = _clamp(limits, details, plain - SAFETY_BELOW_K)
+        if not correction.too_warm:
+            # Too warm even with the correction: it goes down at once, so the room does not swing back.
+            lowered = max(-details.correction_limit_k, correction.value_k - STEP_K)
+            correction = Correction(value_k=lowered, changed_at=inputs.now, too_warm=True)
         return Decision(target, RoomReason.SAFETY, RoomMode.SAFETY, plain, "Raum zu warm"), correction
+    if correction.too_warm:
+        correction = replace(correction, too_warm=False)
     if inputs.at_thermostat:
         offset = details.offset_k
         note = f"fester Ausgleich {offset:+.1f} K".replace(".", ",")
@@ -237,7 +245,8 @@ def _cascade(inputs: RoomInputs, base: float) -> tuple[float, str] | None:
     if offset is None:
         return None
     raw = inputs.trv_c + offset
-    current = inputs.trv_setpoint_c
+    # Against what the app set, not a manual change it is about to set back.
+    current = inputs.expected_c if inputs.expected_c is not None else inputs.trv_setpoint_c
     if current is not None and abs(raw - current) < inputs.details.deadband_k + CASCADE_HYSTERESIS_K:
         raw = current
     note = f"braucht etwa {wanted:.0f} % Ventil (Stufe {level:.0f} %)"

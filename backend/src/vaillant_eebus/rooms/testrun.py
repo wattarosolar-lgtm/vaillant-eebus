@@ -16,7 +16,9 @@ A step ends when valve and return temperature stood still for 10 minutes,
 after 20 to 40 minutes with warm water. It stops at once - back to the setpoint
 from before - when the room gets 1 K warmer than its setpoint, a window opens,
 the valve position or the warm water is missing for 30 minutes. At most 16
-commands, including the way back.
+commands a night; the way back is not counted (write gate: RESTORE). Complete
+is a run that opened the valve fully and closed it again. A night counts as a
+try only if its start window began after the run was armed.
 
 advance() is a pure step function: the room control feeds it every minute and
 sends what it asks for through the write gate.
@@ -147,6 +149,8 @@ class TestRun:
     readings: list[tuple[datetime, float, float | None]] = field(default_factory=list)
     steps: list[Step] = field(default_factory=list)
     reached_full: bool = False
+    # The way down reached 1 K below the temperature at the thermostat.
+    reached_bottom: bool = False
 
     @property
     def active(self) -> bool:
@@ -155,8 +159,10 @@ class TestRun:
     def result(self) -> TestResult | None:
         if self.started_at is None or self.ended_at is None:
             return None
-        # Complete: up to fully open and down to closed (a run cut off at the end of the night is not).
-        complete = self.state is TestState.DONE and self.reached_full
+        # Complete: up to fully open and down to closed (a run cut off at the end of the night or by its
+        # budget before the valve closed is not).
+        closed = any(not step.rising and step.valve is not None and step.valve <= OPEN_FROM for step in self.steps)
+        complete = self.state is TestState.DONE and self.reached_full and (self.reached_bottom or closed)
         return TestResult(
             started_at=self.started_at,
             ended_at=self.ended_at,
@@ -221,6 +227,10 @@ def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, en
         return _set(run, inputs, inputs.limits.round(inputs.trv_c))
     if in_window(moment, latest_start, end) and run.counted_night != night:
         run.counted_night = night
+        night_began = datetime.combine(night, start, tzinfo=inputs.local.tzinfo)
+        if run.armed_at > night_began:
+            # Armed after this night's start window had begun: it does not count as a try.
+            return Action("wait")
         run.nights += 1
         if run.nights >= MAX_NIGHTS:
             run.state = TestState.FAILED
@@ -312,9 +322,10 @@ def _down(run: TestRun, inputs: TestInputs) -> Action:
     reference = inputs.trv_c if inputs.trv_c is not None else run.setpoint_c
     bottom = inputs.limits.round(reference - DOWN_BELOW_K)
     if run.setpoint_c <= bottom + 1e-6:
+        run.reached_bottom = True
         return _finish(run, inputs.now, "Fertig", done=True)
-    # One command stays for the way back.
-    left = TEST_COMMANDS_MAX - 1 - run.commands
+    # The way back is free of the budget (write gate: RESTORE).
+    left = TEST_COMMANDS_MAX - run.commands
     if left <= 0:
         return _finish(run, inputs.now, "Befehle des Testlaufs verbraucht", done=True)
     needed = math.ceil((run.setpoint_c - bottom) / STEP_K - 1e-6)

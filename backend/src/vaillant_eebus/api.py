@@ -563,6 +563,12 @@ def create_app(
         entities = request.myvaillant.entities()
         if len(set(entities.zones)) != len(entities.zones):
             raise WriteRejected(422, "Jede Zone kann nur einmal gewählt werden.")
+        thermostats = {room.details.trv_entity for room in home_assistant.settings.rooms if room.details.trv_entity}
+        if thermostats & set(entities.zones):
+            raise WriteRejected(
+                422,
+                "Eine gewählte Zone ist das Heizkörperthermostat eines Raums; bitte dort ein anderes wählen.",
+            )
         if any(entity and is_own_entity(entity) for entity in (entities.outdoor_temperature, entities.power)):
             raise WriteRejected(
                 422,
@@ -693,6 +699,12 @@ def create_app(
             raise WriteRejected(422, "Jeder Sensor kann nur einem Raum zugeordnet werden.")
         if len(set(request.heat_energy_entities)) != len(request.heat_energy_entities):
             raise WriteRejected(422, "Jeder Wärmesensor kann nur einmal gewählt werden.")
+        if rooms is not None:
+            # A room that goes away (or whose sensor changes) first hands its thermostat back.
+            known = {room.entity_id: room.details.trv_entity for room in home_assistant.settings.rooms}
+            await rooms.before_rooms_change(
+                ((room.entity_id, known.get(room.entity_id)) for room in request.rooms), "Räume geändert"
+            )
         home_assistant.change(
             rooms=tuple(
                 Room(entity_id=room.entity_id, name=room.name.strip(), zone_id=room.zone_id) for room in request.rooms
@@ -860,6 +872,15 @@ def create_app(
             raise WriteRejected(422, "Dieses Thermostat gehört schon zu einem anderen Raum.")
         if known.details.stage is RoomStage.CONTROL and trv != known.details.trv_entity:
             raise WriteRejected(409, "Der Raum steht auf „Steuern“; das Thermostat erst nach „Vorschau“ wechseln.")
+        if rooms is not None and trv != known.details.trv_entity:
+            # The old thermostat is handed back before the room gets another one.
+            await rooms.before_rooms_change(
+                (
+                    (room.entity_id, trv if room.entity_id == entity_id else room.details.trv_entity)
+                    for room in current.rooms
+                ),
+                f"Thermostat von {known.name} gewechselt",
+            )
         details = details_from_json(request.model_dump(mode="json"))
         # The stage is changed on its own (with confirmation); the editor keeps it.
         home_assistant.change_room(entity_id, replace(details, stage=known.details.stage))

@@ -442,6 +442,13 @@ def test_only_the_write_gate_sets_a_thermostat() -> None:
     assert callers == {"write_gate.py": {"call_room_service"}}
 
 
+def test_only_the_client_calls_a_service_directly() -> None:
+    package = Path(ha_client_module.__file__).parent
+    callers = {source.name for source in package.rglob("*.py") if "_call_service" in _attributes(source)}
+
+    assert callers == {"ha_client.py"}
+
+
 def test_the_room_service_is_only_the_setpoint() -> None:
     assert set(ROOM_SERVICES) == {("climate", "set_temperature")}
     fields = ha_client_module.ROOM_SERVICE_FIELDS

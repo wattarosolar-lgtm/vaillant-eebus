@@ -23,7 +23,7 @@ import os
 import statistics
 import tempfile
 from collections import deque
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -85,6 +85,13 @@ HELPS_FAILURES = 3
 MOVE_POINTS = 5.0
 # After a window closed, the way back from its value is exempt from the interval this long.
 WINDOW_RETURN = timedelta(minutes=30)
+# In a room measured at its thermostat a window is not believed this long after the app's own command or
+# after the valve closed: the sensor at the radiator then falls fast by itself.
+WINDOW_QUIET = timedelta(minutes=30)
+VALVE_OPEN = 30.0
+VALVE_SHUT = 5.0
+# The life sign stops when the control's beat (every 5 min) has not run for this long.
+HEALTHY_FOR = timedelta(minutes=12)
 # A rejected command is tried again with the same value after this long.
 RETRY_REJECTED = timedelta(minutes=30)
 PROBE_FRESH = timedelta(minutes=15)
@@ -241,6 +248,8 @@ class _RoomState:
     recommendation: str | None = None
     # K/h over the last half hour, from the last beat.
     trend_k_per_h: float | None = None
+    # A window shown by the sensor at the radiator was not believed (logged once).
+    window_ignored: bool = False
     # The last command that was rejected or failed: (value, reason, when), not tried again for a while.
     refused: tuple[float, RoomReason, datetime] | None = None
 
@@ -250,6 +259,9 @@ class _Movements:
     day: date | None = None
     count: int = 0
     last: float | None = None
+    # The value a minute ago and when the valve last closed (from more than 30 % to 5 % or less).
+    previous: float | None = None
+    closed_at: datetime | None = None
 
 
 @dataclass
@@ -308,6 +320,10 @@ class RoomControl:
         # A test run that was interrupted by a restart: its thermostat goes back to this value.
         self._restore: tuple[str, float] | None = None
         self._alive_at: datetime | None = None
+        # The last beat of the control that ran through, and the start as grace for the first one.
+        self._ticked_at: datetime | None = None
+        self._started_at = clock()
+        self._stale_logged = False
         self._probe_reports: dict[str, deque[tuple[datetime, float]]] = {}
         self._problems: list[str] = []
         self._lock = asyncio.Lock()
@@ -342,7 +358,17 @@ class RoomControl:
             self._count_movements(now)
             await self._restore_after_restart()
             await self._advance_test(now)
-        self._alive_at = now
+        if self._healthy(now):
+            self._alive_at = now
+            self._stale_logged = False
+        elif not self._stale_logged:
+            self._stale_logged = True
+            self._log.add(
+                LogCategory.ROOMS,
+                "Die Raumregelung rechnet seit über 12 Minuten nicht mehr; das Lebenszeichen bleibt stehen, damit die "
+                "Notfall-Automation greifen kann.",
+                problem=True,
+            )
 
     async def tick(self, now: datetime) -> None:
         """Every five minutes, right after the energy management's samples."""
@@ -351,6 +377,7 @@ class RoomControl:
             mode = settings.room_control.mode
             if mode is RoomControlMode.OFF:
                 self._refresh_thermostats(now)
+                self._ticked_at = now
                 return
             await self._update_zones(now, settings)
             self._redistribute(now, settings)
@@ -370,6 +397,7 @@ class RoomControl:
                 self._recommended_at = now
                 await self._recommend(now, settings)
             self._save()
+            self._ticked_at = now
 
     # --- for the API -----------------------------------------------------------------------
 
@@ -408,11 +436,14 @@ class RoomControl:
         async with self._lock:
             if before is RoomStage.CONTROL:
                 await self.release(f"{room.name} auf {STAGE_NAMES[RoomControlMode(stage.value)]}", {room.entity_id})
-            changed = replace(room, details=replace(room.details, stage=stage))
+            # Only the stage, on the room as it is now (the editor may have saved meanwhile).
             self._settings.update(
                 lambda current: replace(
                     current,
-                    rooms=tuple(changed if item.entity_id == room_id else item for item in current.rooms),
+                    rooms=tuple(
+                        replace(item, details=replace(item.details, stage=stage)) if item.entity_id == room_id else item
+                        for item in current.rooms
+                    ),
                 )
             )
         self._log.add(LogCategory.ROOMS, f"{room.name}: Raumregelung auf {STAGE_NAMES[RoomControlMode(stage.value)]}.")
@@ -482,6 +513,22 @@ class RoomControl:
                 await self._end_test(abort(self._test, self._clock(), "Demo-Betrieb"), restore=False)
             await self.release("Demo-Betrieb")
 
+    async def before_rooms_change(self, rooms: Iterable[tuple[str, str | None]], reason: str) -> None:
+        """Before the rooms are saved: rooms that go away or lose their thermostat hand it back first.
+
+        rooms are the (room, thermostat) pairs as they will be.
+        """
+        keep = set(rooms)
+        touched = set(self._gate.touched())
+        affected = {
+            room.entity_id
+            for room in self._settings.current.rooms
+            if room.details.trv_entity in touched and (room.entity_id, room.details.trv_entity) not in keep
+        }
+        if affected:
+            async with self._lock:
+                await self.release(reason, affected)
+
     def flow_advice(self, zone_id: str, hint: FlowHint) -> tuple[FlowHint, str | None] | None:
         """The flow hint of a radiator zone with rooms in preview or control: higher only when redistributing
         is exhausted and the heat pump runs."""
@@ -530,10 +577,24 @@ class RoomControl:
                     "icon": "mdi:heart-pulse",
                     "stufe": STAGE_NAMES[mode],
                     "gesteuert": controlled,
+                    # The thermostats the app has set, for the emergency automation.
+                    "notfallwerte": self._emergency_values(),
                 },
                 always=True,
             )
         ]
+
+    def _emergency_values(self) -> list[dict[str, Any]]:
+        settings = self._settings.current
+        values = []
+        for kept in self._gate.touched_thermostats():
+            room = next((item for item in settings.rooms if item.details.trv_entity == kept.trv), None)
+            value = room.details.fallback_c() if room is not None else kept.fallback_c
+            if value is None:
+                continue
+            limits = self._gate.known_limits(kept.trv)
+            values.append({"entity_id": kept.trv, "temperature": limits.round(value) if limits else value})
+        return values
 
     def automation(self) -> str:
         """The emergency automation for Home Assistant (template of punkt1-trv-regelung.md 7)."""
@@ -568,6 +629,23 @@ class RoomControl:
             "      - condition: template",
             "        value_template: >",
             "          " + condition,
+            "  # Die Thermostate, die die App gerade gestellt hat, mit Notfallwerten (aus dem Lebenszeichen).",
+            "  - variables:",
+            "      gestellt: \"{{ state_attr('" + LIFESIGN_ENTITY + "', 'notfallwerte') }}\"",
+            "  - if:",
+            "      - condition: template",
+            '        value_template: "{{ gestellt is not none }}"',
+            "    then:",
+            "      - repeat:",
+            '          for_each: "{{ gestellt }}"',
+            "          sequence:",
+            "            - action: climate.set_temperature",
+            "              target:",
+            '                entity_id: "{{ repeat.item.entity_id }}"',
+            "              data:",
+            '                temperature: "{{ repeat.item.temperature }}"',
+            "    # Ohne Lebenszeichen (Home Assistant neu gestartet, die App fehlt): alle Thermostate der Räume.",
+            "    else:",
         ]
         for room in rooms:
             trv = room.details.trv_entity
@@ -578,14 +656,14 @@ class RoomControl:
                 value = limits.round(value)
             source = "Notfallwert" if room.details.emergency_c is not None else "kein Notfallwert, Raum-Soll"
             lines += [
-                "  - action: climate.set_temperature",
-                "    target:",
-                f"      entity_id: {trv}   # {room.name} ({source})",
-                "    data:",
-                f"      temperature: {value:g}",
+                "      - action: climate.set_temperature",
+                "        target:",
+                f"          entity_id: {trv}   # {_one_line(room.name)} ({source})",
+                "        data:",
+                f"          temperature: {value:g}",
             ]
         if not rooms:
-            lines.append("  # Noch kein Raum hat ein Thermostat.")
+            lines += ["      # Noch kein Raum hat ein Thermostat.", "      - stop: Kein Thermostat"]
         return "\n".join(lines) + "\n"
 
     def status(self) -> RoomControlStatus:
@@ -632,32 +710,51 @@ class RoomControl:
             problems=list(self._problems),
         )
 
-    async def release(self, reason: str, room_ids: set[str] | None = None) -> None:
-        """Every thermostat the app has set (of these rooms) gets its emergency value."""
+    async def release(self, reason: str, room_ids: set[str] | None = None) -> bool:
+        """Every thermostat the app has set (of these rooms) gets its emergency value.
+
+        Also a thermostat whose room is gone, with the emergency value the write gate kept.
+        Returns False when one did not surely go out.
+        """
         settings = self._settings.current
         done = []
         jobs = []
-        for trv in self._gate.touched():
-            room = next((item for item in settings.rooms if item.details.trv_entity == trv), None)
-            if room is None or (room_ids is not None and room.entity_id not in room_ids):
+        for kept in self._gate.touched_thermostats():
+            room = next((item for item in settings.rooms if item.details.trv_entity == kept.trv), None)
+            room_id = room.entity_id if room is not None else kept.room_id
+            if room_ids is not None and room_id not in room_ids:
                 continue
-            value = room.details.fallback_c()
-            limits = self._gate.known_limits(trv)
+            value = room.details.fallback_c() if room is not None else kept.fallback_c
+            name = room.name if room is not None else (kept.name or kept.trv)
+            if value is None:
+                self._log.add(LogCategory.ROOMS, f"Thermostat {name}: kein Notfallwert bekannt.", problem=True)
+                continue
+            limits = self._gate.known_limits(kept.trv)
             if limits is not None:
                 value = limits.round(value)
-            command = SetThermostatSetpoint(room_id=room.entity_id, celsius=value, reason=RoomReason.FALLBACK)
+            command = SetThermostatSetpoint(
+                room_id=room_id or "",
+                celsius=value,
+                reason=RoomReason.FALLBACK,
+                trv=None if room is not None else kept.trv,
+            )
             jobs.append(self._gate.submit(command))
-            done.append(f"{room.name} {_celsius(value)}")
+            done.append(f"{name} {_celsius(value)}")
         if not jobs:
-            return
+            return True
         results = await asyncio.gather(*jobs, return_exceptions=True)
-        failed = [text for text, result in zip(done, results, strict=True) if isinstance(result, BaseException)]
+        failed = [
+            text
+            for text, result in zip(done, results, strict=True)
+            if isinstance(result, BaseException) or (not result.sent and result.held is not Held.SAME)
+        ]
         self._log.add(
             LogCategory.ROOMS,
             f"Raumregelung gibt die Thermostate zurück ({reason}): {', '.join(done)}."
             + (f" Nicht sicher angekommen: {', '.join(failed)}." if failed else ""),
             problem=bool(failed),
         )
+        return not failed
 
     # --- the rooms ---------------------------------------------------------------------------
 
@@ -670,6 +767,17 @@ class RoomControl:
         local = now.astimezone(self._zone)
         room_c = room_celsius(self._hems.sources.get(room.entity_id))
         window = self._hems.window_open(room.entity_id)
+        if window and room.measured_at_thermostat and self._just_changed(trv, stage, now, settings):
+            if not state.window_ignored:
+                self._log.add(
+                    LogCategory.ROOMS,
+                    f"Fenster im Raum {room.name} nicht beachtet: Kurz nach einem eigenen Befehl oder nach dem "
+                    "Schließen des Ventils fällt der Fühler am Heizkörper von selbst.",
+                )
+            state.window_ignored = True
+            window = False
+        elif not window:
+            state.window_ignored = False
         if state.window_open and not window:
             state.window_closed_at = now
             self._log.add(LogCategory.ROOMS, f"Fenster wieder zu: {room.name}.")
@@ -716,7 +824,16 @@ class RoomControl:
             sending=self._gate.sending(trv),
             setpoint_changed_at=state.setpoint_changed_at,
         )
+        before = state.decision
         decision, state.correction = decide(inputs, state.correction)
+        if decision.mode is RoomMode.SAFETY and (before is None or before.mode is not RoomMode.SAFETY):
+            would = "" if stage is RoomControlMode.CONTROL else " (Vorschau)"
+            self._log.add(
+                LogCategory.ROOMS,
+                f"{room.name} zu warm{would}: {_celsius(room_c or 0.0)} bei Soll {_celsius(decision.setpoint_c)}; "
+                f"Thermostat auf {_celsius(decision.target_c or 0.0)}, Korrektur jetzt "
+                f"{_kelvin(state.correction.value_k)}.",
+            )
         limits = inputs.limits
         if (
             decision.reason in (RoomReason.CONTROL, RoomReason.PREHEAT)
@@ -732,6 +849,14 @@ class RoomControl:
         if decision.target_c is None or decision.reason is None:
             return
         if stage is RoomControlMode.CONTROL and thermostat is not None and blocking(thermostat):
+            if thermostat.available and trv in self._gate.touched():
+                # It must not stay on a window's or a large correction's value while the app cannot set it.
+                self._log.add(
+                    LogCategory.ROOMS,
+                    f"Thermostat {room.name}: {blocking(thermostat)[0]} Die App gibt es auf den Notfallwert zurück.",
+                    problem=True,
+                )
+                await self.release(f"Warnung bei {room.name}", {room.entity_id})
             return
         refused = state.refused
         if (
@@ -955,12 +1080,7 @@ class RoomControl:
         room = next((item for item in self._settings.current.rooms if item.entity_id == run.room_id), None)
         name = room.name if room is not None else run.room_id
         if restore and action.celsius is not None and room is not None:
-            command = SetThermostatSetpoint(room_id=room.entity_id, celsius=action.celsius, reason=RoomReason.TEST)
-            try:
-                await self._gate.submit(command)
-            except (WriteRejected, WriteNotExecuted, WriteOutcomeUnknown):
-                with contextlib.suppress(WriteRejected, WriteNotExecuted, WriteOutcomeUnknown):
-                    await self.release(f"Testlauf {name} beendet", {room.entity_id})
+            await self._restore_thermostat(room, action.celsius, f"Testlauf {name} beendet")
         result = run.result()
         if result is not None:
             self._curves[run.trv] = self._curves.get(run.trv, ValveCurve()).add(result)
@@ -1009,12 +1129,35 @@ class RoomControl:
         if self._restore is None:
             return
         room_id, celsius = self._restore
-        if self._gate.limits(self._room_trv(room_id) or "") is None:
+        room = next((item for item in self._settings.current.rooms if item.entity_id == room_id), None)
+        if room is None or room.details.trv_entity is None:
+            # The room is gone: its thermostat gets the emergency value the write gate kept.
+            if await self.release("Testlauf nach einem Neustart", {room_id}):
+                self._restore = None
             return
-        self._restore = None
-        command = SetThermostatSetpoint(room_id=room_id, celsius=celsius, reason=RoomReason.TEST)
-        with contextlib.suppress(WriteRejected, WriteNotExecuted, WriteOutcomeUnknown):
-            await self._gate.submit(command)
+        if self._gate.limits(room.details.trv_entity) is None:
+            # Not known yet after the start; tried again next minute.
+            return
+        if await self._restore_thermostat(room, celsius, "Testlauf nach einem Neustart"):
+            self._restore = None
+
+    async def _restore_thermostat(self, room: Room, celsius: float, reason: str) -> bool:
+        """The way back after a test run; when it does not go out, the fallback. True when one went out."""
+        command = SetThermostatSetpoint(room_id=room.entity_id, celsius=celsius, reason=RoomReason.RESTORE)
+        try:
+            result = await self._gate.submit(command)
+        except (WriteRejected, WriteNotExecuted, WriteOutcomeUnknown) as err:
+            problem = str(err) or type(err).__name__
+        else:
+            if result.sent or result.held is Held.SAME:
+                return True
+            problem = result.message
+        self._log.add(
+            LogCategory.ROOMS,
+            f"Rückweg nach dem Testlauf {room.name} nicht gesendet ({problem}); Rückfall auf den Notfallwert.",
+            problem=True,
+        )
+        return await self.release(reason, {room.entity_id})
 
     # --- helpers ------------------------------------------------------------------------------
 
@@ -1135,6 +1278,9 @@ class RoomControl:
             moves = self._movements.setdefault(trv, _Movements())
             if moves.day != today:
                 moves.day, moves.count = today, 0
+            if moves.previous is not None and moves.previous > VALVE_OPEN and value <= VALVE_SHUT:
+                moves.closed_at = now
+            moves.previous = value
             if moves.last is None:
                 moves.last = value
             elif abs(value - moves.last) >= MOVE_POINTS:
@@ -1234,13 +1380,23 @@ class RoomControl:
             raise WriteRejected(404, "Diesen Raum gibt es nicht (mehr). Räume legen Sie in den Einstellungen an.")
         return room
 
-    def _room_trv(self, room_id: str) -> str | None:
-        room = next((item for item in self._settings.current.rooms if item.entity_id == room_id), None)
-        return room.details.trv_entity if room is not None else None
-
     def _name(self, room_id: str | None) -> str:
         room = next((item for item in self._settings.current.rooms if item.entity_id == room_id), None)
         return room.name if room is not None else str(room_id)
+
+    def _healthy(self, now: datetime) -> bool:
+        """The control's beat runs (or nothing depends on it); else the life sign stops."""
+        if self._settings.current.room_control.mode is RoomControlMode.OFF and not self._gate.touched():
+            return True
+        reference = self._ticked_at or self._started_at
+        return now - reference <= HEALTHY_FOR
+
+    def _just_changed(self, trv: str, stage: RoomControlMode, now: datetime, settings: Settings) -> bool:
+        """The app set the thermostat or its valve closed within the last half hour."""
+        preview = stage is not RoomControlMode.CONTROL or settings.operating_mode is not OperatingMode.LIVE
+        sent = self._gate.commands(trv, preview=preview).last_sent
+        closed = self._movements.get(trv, _Movements()).closed_at
+        return any(moment is not None and now - moment < WINDOW_QUIET for moment in (sent, closed))
 
     def _testing(self, room: Room) -> bool:
         run = self._test
@@ -1405,6 +1561,15 @@ def _curve_status(curve: ValveCurve) -> CurveStatus:
 
 def _celsius(value: float) -> str:
     return f"{value:.1f} °C".replace(".", ",")
+
+
+def _kelvin(value: float) -> str:
+    return f"{value:+.1f} K".replace(".", ",").replace("-", "\u2212")
+
+
+def _one_line(text: str) -> str:
+    """A room's name as a YAML comment: one line, nothing that ends it."""
+    return " ".join(text.split())
 
 
 async def _despite_cancellation(work: Coroutine[Any, Any, None]) -> None:
