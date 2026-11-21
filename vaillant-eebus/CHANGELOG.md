@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.4.0
+
+**Raumregelung: die App stellt die Heizkörperthermostate** (Stufe 1, Punkt 1; vorgezogen vor die Zonen, die jetzt
+mit 1.5.0 kommen). Jedes Thermostat bekommt von der App seinen Sollwert, damit der Raum – gemessen am Raumsensor –
+sein Soll hält. An die Wärmepumpe sendet diese Version weiterhin nichts Neues.
+
+- **Ein neuer Schreibweg, nur über die Schreibsperre:** `climate.set_temperature` (nur die Temperatur) auf dem
+  Thermostat, das einem Raum zugeordnet ist – nie auf einer myVAILLANT-Zone. Kalibrierung, Fühlerwahl, externe
+  Temperatur, `trv_mode`, Betrieb, Presets, Zeitpläne, Fenstererkennung und Kindersicherung der Thermostate schreibt
+  die App nie; sie prüft sie nur und warnt. Strukturtests sichern das ab.
+- **Stufen:** ein Schalter für alle Räume (Aus, Beobachten, Vorschau, Steuern) und eine Stufe je Raum; es gilt die
+  kleinere. „Steuern“ nur im Live-Betrieb, mit Bestätigung und erst nach einem vollständigen **Testlauf** des
+  Thermostats. Nach dem Update steht alles auf „Beobachten“ (wenn das Energiemanagement auf Vorschau stand, sonst
+  „Aus“): Es ändert sich nichts, bis Sie umstellen.
+- **Regeln je Raum:** Raum-Soll und Zeitplan (rechtzeitig vorheizen, höchstens 3 h vorher) plus eine gelernte
+  Korrektur am Raumsensor (0,5-K-Schritte nach 0,2 K Abweichung über 30 Minuten, nicht höher bei offenem Ventil oder
+  ohne warmes Wasser, nicht tiefer bei geschlossenem Ventil); nach einem Testlauf über die gelernte Ventilkennlinie
+  („braucht etwa 45 % Ventil“). Ein Raum ohne eigenen Sensor (Bad mit Comet) bekommt Raum-Soll + festen Ausgleich.
+  Fenster offen: Thermostat sofort auf den kleinsten Wert und danach zurück. Eine Handänderung am Thermostat wird
+  beim nächsten Durchlauf zurückgesetzt. Raum über Soll + Komfortband + 0,5 K: sofort Soll − 0,5 K.
+- **Wärmeangebot und Umverteilen:** Die App erkennt aus Leistung und Puffer, ob warmes Wasser ankommt (von der
+  Wärmepumpe oder aus dem Puffer, mit Restzeit). Ist ein Raum trotz offenem Ventil zu kalt, drosselt sie erst gut
+  versorgte Räume; reicht das nicht, zeigt sie **„Vorlauf höher nötig“** – angehoben wird der Vorlauf erst mit den
+  Zonen (1.5.0). Die Vorschau des Energiemanagements meldet „Vorlauf höher“ entsprechend erst nach dem Umverteilen.
+- **Ventile schonen, im Schreibschutz erzwungen:** Totzone 0,5 K, höchstens alle 15 Minuten und höchstens 24 Befehle
+  je Thermostat und Tag (alle einstellbar; Fenster, Sicherheit und Rückfall ausgenommen); Zähler überstehen einen
+  Neustart. Jeder Sollwert wird über die Rückmeldung bestätigt; zweimal nicht bestätigt pausiert das Thermostat eine
+  Stunde. Die App zählt außerdem die Ventilbewegungen je Tag.
+- **Testlauf je Thermostat:** von Hand vorgemerkt, läuft nachts (Start ab 22 Uhr, spätestens 1 Uhr, Ende spätestens
+  5 Uhr) und nur mit dem **Fühlerpaar** an Vor- und Rücklauf des Heizkörpers: Sollwert in Stufen hoch bis das Ventil
+  offen ist, dann bis 1 K unter die Temperatur am Thermostat, dann zurück; höchstens 16 Befehle; Abbruch bei Raum
+  über Soll + 1 K, Fenster oder ohne warmes Wasser. Ergebnis: Ventilverhalten mit Tabelle je Stufe.
+- **Absicherung:** Lebenszeichen `sensor.vaillant_eebus_raeume_lebenszeichen` jede Minute (unabhängig von den
+  Export-Gruppen) und eine **Vorlage der Notfall-Automation** zum Kopieren: Sie setzt nach 15 Minuten ohne
+  Lebenszeichen die Notfallwerte. Verlässt ein Raum „Steuern“, wechselt die App auf Demo oder wird sie beendet, setzt
+  sie selbst den Notfallwert.
+- **Seite Räume:** Karte **Raumregelung** (Stufe, Lebenszeichen, Notfall-Automation, Fühlerpaar mit Meldeabstand
+  und Auflösung), je Raum Thermostat-Soll und Ziel, Zustand, Befehle und Ventilbewegungen heute, Warnungen, Testlauf
+  und Ventilverhalten; je Heizkörper-Zone Wärmeangebot, Umverteilen und Vorlauf-Hinweis. Im Raum-Editor neu: Grenze
+  der Korrektur bzw. fester Ausgleich, Totzone, Abstand und Befehle je Tag.
+- **Korrektur aus der Abnahme 1.3.0:** Ein Temperatursensor desselben Zigbee-Geräts wie das Thermostat (etwa
+  `…_local_temperature` des Comet) gilt jetzt als „am Thermostat gemessen“ und zählt nicht mehr im Mittelwert der Zone.
+- Die Raumproben speichern zusätzlich die Temperatur am Thermostat.
+
 ## 1.3.1
 
 **Live-Verbindung erholt sich wieder von selbst.** Brach die Verbindung der Übersicht zur App ab (Neustart oder
