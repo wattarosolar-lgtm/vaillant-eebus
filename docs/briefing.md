@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.3.1)
+# Briefing: Vaillant EEBUS (Stand v1.4.0)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -23,9 +23,11 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
   1.1.0, die als 1.1.1 geplant waren; 1.2.1 die Korrekturen aus deren Abnahme. **1.3.0** ersetzt den Planer durch
   Stufe 1 des neuen Energiemanagements: beobachten, lernen, planen (nur Vorschau, kein neuer Schreibweg;
   Abschnitt 5d). 1.3.1 macht die Live-Verbindung der Oberfläche robust (Wiederverbindung, Wächter, Neuladen nach
-  Update).
-- **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a). Nach der Installation läuft sie im
-  Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
+  Update). **1.4.0** bringt die **Raumregelung**: Die App stellt die Heizkörperthermostate (Punkt 1 von Stufe 1,
+  vom Nutzer am 21.11.2026 vor die Zonen gezogen; die Zonen kommen mit 1.5.0). Einziger neuer Schreibweg ist
+  `climate.set_temperature` auf den Thermostaten der Räume, über `RoomGate` in `write_gate.py` (Abschnitt 5f).
+- **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a; Thermostate Abschnitt 5f). Nach der
+  Installation läuft sie im Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
 
 | Phase | Inhalt | Stand |
@@ -39,7 +41,7 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
 | 7 | Einstellungs-/Protokollseite fertig, Verlauf 24 h, Absicherung der Bridge, Doku, Release | umgesetzt (1.0.0), an der Anlage abgenommen (21.10.2026) |
 | 8 | Energiemanagement: Planer für Warmwasser und Zonen, Tarife, PV-Überschuss, Wetter, Stufen Aus/Vorschau/Steuern | umgesetzt (1.1.0), Abnahme an der Anlage offen (erst Vorschau, dann Steuern) |
 | 9 | Anbindung myVAILLANT (Entitäten der Integration) neben EEBUS, wählbar; Planer im Auto-Betrieb über Quick-Veto | umgesetzt (1.2.0), an der Anlage abgenommen (1.2.1) |
-| Stufe 1 | Energiemanagement neu: 1.3.0 beobachten, lernen, planen (Vorschau); 1.4.0 Zonen; 1.5.0 Thermostate | 1.3.0 umgesetzt, Abnahme an der Anlage offen (1–2 Wochen beobachten) |
+| Stufe 1 | Energiemanagement neu: 1.3.0 beobachten, lernen, planen (Vorschau); 1.4.0 Thermostate (Raumregelung, vorgezogen); 1.5.0 Zonen | 1.3.0/1.3.1 veröffentlicht, Abnahme an der Anlage läuft; 1.4.0 umgesetzt (Branch `feat/thermostate`, lokal), Prüfung (Aufwand max) und Abnahme offen, Steuern zuerst nur im Bad |
 
 ## 2. Repositories
 
@@ -116,7 +118,7 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `bridge_auth.py` | Erzeugt einmalig selbstsigniertes Zertifikat (EC P-256, SAN `eebus-bridge` und `127.0.0.1`), Schlüssel und Token in `/data/eebus/grpc` (0600, alle drei zusammen über ein umbenanntes Verzeichnis); `BridgeCredentials.load()` für das Backend |
 | `bridge_client.py` | gRPC-Client (`grpc.aio`), mit Zugangsdaten TLS (vertraut nur diesem Zertifikat) und Bearer-Token, sonst Klartext (Fake-Bridge); `refused_tls()` erkennt einen fehlgeschlagenen TLS-Handshake (→ fremde Bridge): Server-Info, Gerätesuche, Kopplung, Gerätestatus, Snapshot, Ereignis-Streams, Struktur-Dump; **Schreibmethoden** (`WRITE_METHODS`: Zone-Soll/-Betriebsart mit `zone_id`, Warmwasser-Soll/-Betriebsart/Einmalladung, Leistungsdeckel, Failsafe, Verdichter-Flexibilität) mit 15 s Zeitlimit (die Bridge wartet bis zu 10 s auf das Gerät); Backoff, `RETRYABLE_CODES`, max. Nachrichtengröße 64 MB |
 | `pairing.py` | Kopplung und Verbindungszustand (`ConnectionState`); prüft, ob die eigene Bridge antwortet; erkennt fremde Bridge und belegten SHIP-Port; meldet das gekoppelte Gateway nach jedem Bridge-Neustart wieder an; `ConnectionLog` fasst abgelehnte Verbindungsversuche beim Start zusammen und schreibt Verbindungsereignisse deutsch ins Protokoll; Diagnose-Dump |
-| `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a). |
+| `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a); `RoomGate` für die Heizkörperthermostate (Abschnitt 5f). |
 | `energy.py` | `EnergyMeter`: summiert die gemeldete Gesamtleistung (`power_consumption`) über die Zeit zu Wh je Tag (die Anlage liefert keine Energiezähler); > 3 min ohne Messwert wird nicht überbrückt, der Tag gilt dann als lückenhaft (auch der erste Tag); Tageswechsel um Mitternacht in `TZ` (Rückfall UTC mit Warnung); `/data/energy.json` atomar, höchstens einmal pro Minute und beim Beenden, 400 Tage; kurzer Neustart (< 3 min) wird überbrückt. `today()` zählt das laufende Intervall bis jetzt mit. |
 | `ha_client.py` | Zugriff auf HA Core über den Supervisor (`SUPERVISOR_TOKEN`, `http://supervisor/core`): REST (Zustände, Verlauf `history()` über `/api/history/period`, eigene Sensoren setzen/entfernen) und eine WebSocket-Verbindung (Anmeldung, `subscribe_trigger` auf die gewählten Entitäten mit Rückfall auf `platform`, `homeassistant_started`), Wiederverbindung mit Backoff, alle 5 min erneutes Lesen (`last_reported`). Schreibt nur `sensor.vaillant_eebus_*`/`binary_sensor.vaillant_eebus_*` (`OWN_ENTITY`, sonst `ValueError`). Listener-Schnittstelle `HomeAssistantListener`. |
 | `ha_import.py` | Räume (Name, Zone), Mittelwert je Zone aus gültigen Werten (Zahl, °C/°F, ≤ 30 min alt), Wärme heute als Summe von bis zu 4 Sensoren (Wh/kWh/MWh, ≤ 3 h alt; Summe nur, wenn jeder einen Wert hat, Status = schlechtester); bei Verbindungsverlust werden Werte verworfen; meldet Änderungen gedrosselt (2 s) per `state.republish()`. |
@@ -127,8 +129,9 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `state.py` | `StateService`: liest den Geräte-Snapshot nach jedem Zustandsereignis der Bridge (1 s gebündelt) und **spätestens jede Minute** – diese Leseanfrage braucht auch die Verbindungsüberwachung der Bridge (ohne Lesezugriff baut sie die Verbindung nach 2 min neu auf). Bildet `DeviceSnapshot` auf `HeatPumpState` ab (Messwerte, Zonen, Warmwasser, Status). Nicht gemeldete Werte bleiben `None`, nie Ersatzwerte. Verdichter gilt als aktiv ab 100 W. Liest auch `mode_writable`, Leistungsdeckel, Failsafe und Verdichter-Flexibilität. `refresh_now()` (nach einem Schreibvorgang) und `republish()` (Modus/offene Schreibvorgänge geändert). |
 | `api.py` | FastAPI: `GET api/pairing`, `GET api/state`, `GET api/events` (Server-Sent Events, ohne Änderung alle 15 s ein Ereignis `ping` – kein Kommentar, damit die Seite es sieht; ein fehlschlagender Bridge-Aufruf überspringt eine Nachricht statt den Stream zu beenden), `POST api/pairing/register`, `GET api/diagnostics/dump`, `GET/POST api/mode`, `POST api/zones/{zone_id}/setpoint|mode`, `POST api/dhw/setpoint|mode|boost`, `POST api/lpc`, `POST api/lpc/failsafe`, `POST api/ohpcf`, `GET api/log` (`category`, `problems`, `before`, `after`, `until`), `GET api/log/export` (CSV), `GET api/history/power`, `GET/PUT api/settings`, `GET api/ha/entities`; Middleware lässt nur die Ingress-Adresse zu; gRPC-Fehler → HTTP mit „(Fehlercode X)“; `WriteRejected` → 4xx mit deutscher Begründung (429 mit `Retry-After`); `index.html` mit `no-cache`, Assets `immutable` |
 | `hems/` | Energiemanagement, siehe Abschnitt 5d |
-| `room_data.py` | Raumdaten je Raum (`RoomDetails`: statischer Abgleich, Thermostat, Soll, Zeitplan, Komfortband, Verluste) |
-| `ids.py` | Formate von Entitäts- und Zonen-IDs (`ENTITY_ID`, `ZONE_ID`) |
+| `rooms/` | Raumregelung (1.4.0), siehe Abschnitt 5f |
+| `room_data.py` | Raumdaten je Raum (`RoomDetails`: statischer Abgleich, Thermostat, Soll, Zeitplan, Komfortband, Verluste, Stufe der Raumregelung, Korrektur-Grenze, fester Ausgleich, Ventilschonung); Schalter `RoomControlSettings` (Stufe, Fühlerpaar, Nachtfenster des Testlaufs), `effective_stage()` |
+| `ids.py` | Formate von Entitäts- und Zonen-IDs (`ENTITY_ID`, `ZONE_ID`); `ieee_address()` (Zigbee2MQTT-Gerät einer Entität) |
 | `settings.py` | `SettingsStore` ist alleiniger Besitzer der aktuellen Einstellungen (`current`, `update()`), damit Kopplung und Moduswechsel sich nicht überschreiben; `settings.json` atomar schreiben; beschädigte Datei wird beiseitegelegt (→ Demo) |
 
 ### Oberfläche (`frontend/src/`)
@@ -204,13 +207,15 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 - `run()` protokolliert den Modus beim Start und erkennt Änderungen außerhalb der App (Kategorie `device`).
 - Moduswechsel: Live nur mit `confirm: true` (400 sonst); gespeichert in `settings.json`; Wechsel protokolliert.
 - Ein Strukturtest (AST) stellt sicher, dass nur `write_gate.py` die `WRITE_METHODS` des Bridge-Clients aufruft.
+- **Thermostate (1.4.0):** eigener Teil `RoomGate` in derselben Datei, Abschnitt 5f.
 
 ## 5b. Home Assistant (Phase 6)
 
 - Die App liest nur und meldet eigene Sensoren; keine fremden Entitäten (Test
-  `test_only_the_apps_own_sensors_can_be_written`). Einziger Dienst seit 1.1.0: `weather.get_forecasts` (liest nur;
-  Test `test_weather_get_forecasts_is_the_only_service_the_app_calls`). Nichts davon läuft über `write_gate`, weil nichts an die
-  Wärmepumpe geht.
+  `test_only_the_apps_own_sensors_can_be_written`). Dienste: `weather.get_forecasts` (liest nur), mit myVAILLANT
+  `DEVICE_SERVICES` (über `write_gate`) und seit 1.4.0 `ROOM_SERVICES` = `climate.set_temperature` auf den
+  Thermostaten der Räume (nur über `RoomGate`; Test `test_the_app_calls_only_the_weather_forecast_and_the_device_services`
+  und die Strukturtests in `tests/test_room_gate.py`).
 - Einstellungen (`settings.json`): `rooms` (`entity_id`, `name`, `zone_id`), `heat_energy_entities` (0.6.0:
   einzelnes `heat_energy_entity`, wird übernommen), `export`
   (Gruppen, Vorgabe ohne Leistungsdeckel/Verdichter). Ungültige Einträge werden einzeln verworfen, Kopplung und
@@ -241,13 +246,14 @@ stand der Name der zweiten über den Werten der ersten, und Werte konnten aus ve
 
 Plan und Entscheidungen: `vaillant-eebus-notizen/plan-stufe-1-energiemanagement.md` (freigegeben 20.11.2026, Abschnitt
 „Umsetzung 1.3.0“), `fahrplan-energiemanagement.md` (Punkte 1–9), `punkt1-trv-regelung.md` (Raummodell, Fenster,
-Versorgung). Drei Releases: 1.3.0 ohne neuen Schreibweg, 1.4.0 Zonen (Quick-Veto, Zone-1-Takt-Logik,
-Nachtabsenkung), 1.5.0 Thermostate. Der Planer aus 1.1/1.2 (Warmwasser/Zonen nach Preis und PV, `planner.py`,
+Versorgung). Drei Releases: 1.3.0 ohne neuen Schreibweg, 1.4.0 Thermostate (Raumregelung, Abschnitt 5f; vom
+Nutzer am 21.11.2026 vorgezogen, Plan `plan-thermostate-vorgezogen.md`), 1.5.0 Zonen (Quick-Veto, Zone-1-Takt-Logik,
+Nachtabsenkung). Der Planer aus 1.1/1.2 (Warmwasser/Zonen nach Preis und PV, `planner.py`,
 `executor.py`, `supply.py`, `tariff.py`, `inputs.py`, `days.py`, `weather.py`) ist entfernt.
 
 | Modul (`hems/`) | Aufgabe |
 |---|---|
-| `config.py` | `HemsSettings`: Stufe (`off`/`preview`; `control` ist für 1.4.0 vorgesehen und wird beim Laden zu `preview`, die API antwortet 409), Wetter, Lernquellen, Haus (Normaußentemperatur, Heizlast), Zonen (`ZoneConfig`: Art Fußbodenheizung/Heizkörper, Vorlauf-Entitäten, Auslegung, Band), Quick-Veto-Grenzen und Cloud-Budget (erst 1.4.0), Nachtfenster, Verluste, Ziel Starts, Heizgrenze, Blockbetrieb, Zone-1-Schwelle; ungültige Werte einzeln verworfen |
+| `config.py` | `HemsSettings`: Stufe (`off`/`preview`; `control` ist für 1.5.0 vorgesehen und wird beim Laden zu `preview`, die API antwortet 409), Wetter, Lernquellen, Haus (Normaußentemperatur, Heizlast), Zonen (`ZoneConfig`: Art Fußbodenheizung/Heizkörper, Vorlauf-Entitäten, Auslegung, Band), Quick-Veto-Grenzen und Cloud-Budget (erst 1.4.0), Nachtfenster, Verluste, Ziel Starts, Heizgrenze, Blockbetrieb, Zone-1-Schwelle; ungültige Werte einzeln verworfen |
 | `sources.py` | `HemsSources` (HA-Listener): Raum-, Thermostat-, Ventil-, Feuchte-, Vorlauf-, Puffer- und Wärmesensor-Zustände; meldet Änderungen (Fenster) und die Verbindung (neu planen) |
 | `forecast.py` | Open-Meteo `/v1/dwd-icon` (stündlich, `past_days=7`, Koordinaten auf 2 Stellen), höchstens stündlich, nach Fehler 10 min, alte Prognose bis 6 h; Rückfall `weather.get_forecasts`; Eichung (Median gemessen − Prognose je lokaler Stunde, ab 3 Tagen, ±5 K); Day-ahead-Werte in `/data/forecast_check.json` → mittlerer Fehler |
 | `statistics.py` | `StatisticsHistory`: HA-Langzeitstatistik (`ha_client.statistics()`, WebSocket `recorder/statistics_during_period`, nur lesen) für 400 Tage in Monatsstücken, danach nur Neues; `daily_values()` (lokale Tage) |
@@ -261,8 +267,12 @@ Nachtabsenkung), 1.5.0 Thermostate. Der Planer aus 1.1/1.2 (Warmwasser/Zonen nac
 | `rules.py` | `make_plan()` (reine Funktion): 48 h je Zone und Stunde, Verschiebung im Band und Schritt, Soll je Raum, Gründe: warmer Tag, vorausschauend (Verzögerung je Zonenart), Abtaurisiko (höchstens 3 h, vorher speichern in der Fußbodenheizung), Nachtabsenkung (nur wenn es sich lohnt, Feuchteschutz ab 65 %, rechtzeitig wieder auf), Blockbetrieb, Vorlauf-Verschiebung, Frostschutz |
 | `service.py` | `HemsService`: beobachtet jeden Zustand (Takte, Abtauen, Frostschutz, Zone-1-Logik „würde“), Proben alle 5 min (Fenster, Versorgung, Vorlauf „würde“ mit Abstand), lernt (Statistik alle 6 h, Räume stündlich), plant alle 15 min und nach dem Verbinden mit HA; Status, Plan mit Rückblick (`/data/plan_history.json`), Räume, CSV, Sensoren, Protokoll (Kategorien `hems`, `rooms`); Hinweis auf eine offene Verschiebung in einer alten `/data/hems.json` |
 
-- **Kein Schreibweg:** Das Paket importiert weder `write_gate` noch den Bridge-Client und ruft weder `submit` noch
-  `send_command`/`call_device_service`/`set_state` auf (Strukturtest). Gelesen wird über REST, WebSocket (nur die
+- **Kein Schreibweg:** Das Paket importiert weder `write_gate` noch den Bridge-Client noch `rooms` und ruft weder
+  `submit` noch `send_command`/`call_device_service`/`set_state` auf (Strukturtests). Seit 1.4.0 ruft `sample()` nach
+  den Proben und der Versorgung die Raumregelung auf (`on_sampled`), und ein „Berater“ der Raumregelung
+  (`set_flow_advisor`) darf den Vorlauf-Hinweis einer Heizkörper-Zone auf „halten“ setzen, solange umverteilt wird;
+  die Proben enthalten zusätzlich die Temperatur am Thermostat. „Würde“-Fenster und -Versorgung protokolliert das
+  Paket nur noch für Räume, die die Raumregelung nicht selbst führt (Stufe ≤ Beobachten). Gelesen wird über REST, WebSocket (nur die
   Befehle `auth`, `subscribe_*`, `unsubscribe_events`, `recorder/statistics_during_period`; Test) und Open-Meteo.
 - **Raumdaten** (`room_data.py`, je Raum in `settings.json` unter `details`): Heizlast, Auslegungs-Soll, Heizflächen,
   Thermostat, Ventil, Feuchte, Raum-Soll, Zeitplan, Komfortband, Verluste, Drosseln, Notfallwert. `PUT api/settings`
@@ -333,6 +343,64 @@ Integration `signalkraft/mypyllant-component` v0.9.19 (nicht gegen eine echte In
     Automation bei jedem WP-Stopp auf „Aus“ (echt, 15–25-mal am Tag); ob die Eco-Absenkung als `off` + Preset `eco`
     gemeldet wird (Kühl-Soll 0,0 → `active_operating_type` COOLING in der Integration), ist ungeklärt.
 
+## 5f. Raumregelung (1.4.0: Heizkörperthermostate)
+
+Plan und Entscheidungen: `vaillant-eebus-notizen/plan-thermostate-vorgezogen.md` (freigegeben 21.11.2026 als 1.4.0,
+mit Besprechung der Funktionen und Testläufe), fachlich maßgeblich `punkt1-trv-regelung.md`. „Alle über Sollwert“:
+Jedes Thermostat (Zigbee2MQTT; beim Nutzer 4× Aqara W600 immer `internal`, 1× Eurotronic Comet in `trv_mode` 2)
+regelt sein Ventil selbst, die App gibt den Sollwert vor.
+
+**Schreibweg (`write_gate.py`, `RoomGate`; `ha_client.py`):**
+- `ROOM_SERVICES` = nur `("climate", "set_temperature")`, `call_room_service()` nimmt nur das Feld `temperature`
+  (endliche Zahl); nur `write_gate.py` ruft ihn auf, nur `myvaillant.py` `call_device_service()` (Strukturtests).
+- Befehl `SetThermostatSetpoint(room_id, celsius, reason)`; das Thermostat ist das `trv_entity` des Raums in den
+  Einstellungen. Nie eine myVAILLANT-Zone, nie ein Thermostat zweier Räume.
+- Erlaubt: `reason` normal (Regelung, Vorheizen, Umverteilen, Fenster, Handänderung, Sicherheit) nur bei wirksamer
+  Stufe „Steuern“ (Schalter und Raum); `TEST` bei Raumregelung ≠ Aus; `FALLBACK` nur für Thermostate, die die App
+  gestellt hat (`touched`), und nur auf Notfallwert bzw. Raum-Soll.
+- Wert: in `min_temp`/`max_temp`, auf `target_temp_step` (ohne Schritt 0,5 K) der Entität; außer Fenster
+  (kleinster Wert), Rückfall und Testlauf höchstens `correction_limit_k` (Start 5 K) um die Raum-Sollwerte.
+- **Ventilschonung erzwungen:** gleicher Wert → nicht gesendet; Totzone (0,5 K), Abstand (15 min) und Höchstzahl je
+  lokalem Tag (24) je Thermostat, einstellbar je Raum. Frei von Totzone und Abstand: Fenster, Handänderung,
+  Sicherheit, Rückfall, Testlauf; über der Höchstzahl nur Fenster, Sicherheit, Rückfall. Technisch höchstens ein
+  Befehl je 5 s (nicht für den Rückfall). Testlauf: eigenes Budget 16 je Tag. Ein gehaltener Befehl ist kein Fehler
+  (`RoomWriteResult.held`: `same`, `deadband`, `interval`, `limit`, `paused`).
+- Demo und Vorschau senden nie; ihre Zählung ist simuliert (eigener Zustand), damit die Vorschau zeigt, was
+  „Steuern“ senden würde. Live: „Wird gesendet“ vor dem Aufruf in der Datenbank; abgewiesen → „Nicht ausgeführt“
+  (zählt nicht), sonst „Ergebnis unbekannt“; bestätigt, wenn das Attribut `temperature` den Wert zeigt, sonst nach
+  5 min „Nicht bestätigt“; zweimal → 1 h nur Fenster/Sicherheit/Rückfall. Zähler, letzter Befehl, erwarteter Wert und
+  `touched` in `/data/room_gate.json` (überstehen Neustarts); die letzten Grenzen jedes Thermostats im Speicher für den
+  Rückfall beim Stoppen.
+
+**Raumregelung (`rooms/`):**
+
+| Modul | Aufgabe |
+|---|---|
+| `thermostats.py` | Thermostat aus HA lesen (Soll, Temperatur am Thermostat, Betrieb, Preset), Neben-Entitäten über die IEEE-Adresse (`sensor`, `window_detection`, `child_lock`, `valve_alarm`, `battery`, `trv_mode`, …), Modell Aqara/Comet/anderes, Warnungen; `blocking()` (nicht erreichbar, kein Bereich, Fühler nicht intern, `trv_mode` ≠ 2) hält das Steuern an |
+| `supply.py` | Wärmeangebot je Heizkörper-Zone: Wärmepumpe (> 50 W und Vorlauf bzw. Puffer ≥ Raum + 8 K), Puffer (≥ Raum + 5 K und fällt ≥ 2 K/h, Restzeit bis zur gelernten Neustart-Temperatur, Start 28 °C), keins, unklar (Daten > 15 min) |
+| `controller.py` | `decide()` (rein): Fenster → kleinster Wert; Raum > Soll + Band + 0,5 K → Soll − 0,5 K; Spender → untere Komfortgrenze (+ Korrektur); sonst Raum-Soll (Vorheizen nach gelernter Aufheizzeit, höchstens 3 h, sonst 1 h) + Korrektur (0,5 K nach 0,2 K über 30 min, Ventil-Regeln ≥ 90 %/≤ 5 %, nicht ohne Wärme, Pause nach Fenster und Sollwechsel) bzw. fester Ausgleich (Raum am Thermostat gemessen); mit gelernter Kennlinie „Kaskade“ (Bedarfsöffnung + 30 %/K − 10 %/(K/h) → nächste erreichte Stufe → Abstand zur Temperatur am Thermostat; Hysterese Totzone + 0,25 K); weicht der Soll vom zuletzt gesetzten ab → Handänderung (`MANUAL`) |
+| `curve.py` | Ventilverhalten aus Testläufen: Punkte (Abstand, Öffnung, auf/ab, VL/RL, Wärme), vollständig = ganz offen und wieder zu; `offset_for()`, `levels()`; höchstens 5 Läufe je Thermostat |
+| `testrun.py` | Testlauf als reine Schrittfunktion `advance()` (jede Minute): vorgemerkt → Start 22–1 Uhr bei Raum −0,5…+0,2 K um Soll, kein Fenster, warmes Wasser am Heizkörper (Fühlerpaar VL ≥ Raum + 5 K), Fühlerpaar am Raum und frisch; Stufen 20–40 min mit Wärme bis Ventil und Rücklauf 10 min ruhig; hoch (+1 K solange nichts öffnet, dann +0,5 K) bis ≥ 90 %, runter bis 1 K unter Temperatur am Thermostat (Schritt 1 K, wenn das Budget sonst nicht reicht), zurück; Ende spätestens 5 Uhr; Abbruch Raum > Soll + 1 K, Fenster, 30 min keine Ventilstellung oder kein warmes Wasser; nach 3 Nächten ohne Start „nicht möglich“ |
+| `service.py` | `RoomControl`: Takt nach den Proben (`tick`), jede Minute (`minute`: Lebenszeichen, Neben-Entitäten alle 15 min, Ventilbewegungen, Testlauf); Umverteilen je Heizkörper-Zone (kalter Raum und Spender in derselben wirksamen Stufe, nach 30 min Wärme, Prüfung nach 45 min, Spender höchstens 2 h, danach 1 h Ruhe, „hilft nicht“ nach 3 Fehlschlägen); Vorlauf-Berater für `hems`; Empfehlung Voreinstellung (7 Tage Proben); Stufen, Fühlerpaar, Testlauf, Rückfall (`release`), Vorlage der Notfall-Automation, Status; `/data/rooms.json` (Korrekturen, Umverteil-Statistik, Kennlinien, Testlauf) |
+
+- **Stufen:** `room_control.mode` (Aus/Beobachten/Vorschau/Steuern) und `RoomDetails.stage` (Beobachten/Vorschau/
+  Steuern), wirksam die kleinere. Steuern für alle: nur live, `confirm`; je Raum zusätzlich ein vollständiger
+  Testlauf und keine blockierende Warnung. Ohne gespeicherte Einstellung (1.3.x): Beobachten, wenn der Planer auf
+  Vorschau stand, sonst Aus. `PUT api/rooms/{id}` behält die Stufe.
+- **Rückfall:** Raum verlässt Steuern, Schalter verlässt Steuern, Wechsel auf Demo (`api/mode`, `api/connection`,
+  noch live), App-Ende (`run()`-finally, gegen doppelten Abbruch geschützt, höchstens 15 s) → jedes `touched`
+  Thermostat auf `fallback_c()` (Notfallwert, sonst Raum-Soll).
+- **Lebenszeichen:** `sensor.vaillant_eebus_raeume_lebenszeichen` = Zeit des letzten erfolgreichen `minute()`
+  (Export unabhängig von den Gruppen: `Sensor.always`, `add_source(..., always=True)`); die Vorlage der
+  Notfall-Automation (`GET api/rooms/automation`) setzt nach 15 min ohne Lebenszeichen die Notfallwerte.
+- **Raum am Thermostat gemessen:** `Room.measured_at_thermostat` jetzt auch für einen Sensor mit derselben
+  IEEE-Adresse wie das Thermostat (Bad mit `sensor.…_local_temperature`; Befund der Abnahme 1.3.0) → nicht im
+  Zonen-Mittelwert, Fenster ohne Feuchte, fester Ausgleich statt Korrektur.
+- **Oberfläche:** `Rooms.svelte` mit `RoomControlCard.svelte` (Schalter, Lebenszeichen, Notfall-Automation zum
+  Kopieren, Fühlerpaar mit Meldeabstand/Auflösung) und `ThermostatPanel.svelte` (Stufe, Ziel/Ist, Zustand, Befehle
+  und Bewegungen heute, Warnungen, Testlauf, Ventilverhalten); `RoomEditor.svelte` mit Korrektur-Grenze bzw.
+  Ausgleich, Totzone, Abstand, Befehle je Tag.
+
 ## 6. Die echte Anlage (Feldbefunde)
 
 - Wärmepumpe: Vaillant aroTHERM split plus, VWL 75/8.2 AS 230V S2, über Vaillant-Gateway.
@@ -361,11 +429,13 @@ Integration `signalkraft/mypyllant-component` v0.9.19 (nicht gegen eine echte In
 
 ## 7. Tests
 
-- Python: 305 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
+- Python: 370 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.0
+  `test_room_gate.py` und `test_rooms.py`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`, mit `add_myvaillant()`: Entitäten und
   Dienste der myVAILLANT-Integration wie im Quellcode der Integration). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
-  Kein Test spricht mit echter Hardware.
+  Kein Test spricht mit echter Hardware. Das Fake-HA kennt seit 1.4.0 Zigbee2MQTT-Thermostate (`add_thermostats()`:
+  Aqara und Comet mit Neben-Entitäten, Raumsensor, Fühlerpaar; `trv_lag`, `trv_silent`).
 - Go (Fork): `go test -race ./...`; neue Tests u. a. `internal/grpc/hvac_zones_test.go`,
   `internal/usecases/entity_test.go`, `roomheatingsysfn_adapter_test.go`, `classification_test.go`, `registry_test.go`.
 - Frontend: `svelte-check`, ESLint, Build; keine Unit-Tests der Oberfläche.
@@ -431,11 +501,36 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
     Warmwasser-Soll, Fehlercodes bei Cloud-Fehlern, Kontingent. Die Korrekturen von 1.2.1 sind nur gegen das
     nachgebaute Verhalten (Fake-HA mit `cloud_lag`) geprüft. Die Werte sind so alt wie das Abfrageintervall der
     Integration (Vorgabe 30 min).
+17. Raumregelung 1.4.0, bewusst so: Der Schreibschutz prüft beim Testlauf nur „Raumregelung an“, die Grenzen des
+    Geräts und das Budget (16), nicht, ob gerade ein Testlauf läuft (nur `RoomControl` sendet ihn; Strukturtests).
+    Neben-Entitäten (Fühlerwahl, Kindersicherung …) liest die App alle 15 min, nicht live. Ein Abtauen erkennt das
+    Wärmeangebot nicht live (erst danach), die Leistung bleibt dabei über 50 W. Vorlauf Zone 2 (`circuit_1`) ist beim
+    Nutzer schlecht montiert; das Wärmeangebot nimmt dann den Puffer. Die Entscheidung je Raum wird nur alle 5 min neu
+    gerechnet (die Seite zeigt sie so lange). Nachtabsenkung und Blockbetrieb über die Thermostate kommen erst mit den
+    Zonen (1.5.0). Wunsch W1 der Abnahme (Fremdwärme-Phasen) ist nicht umgesetzt. An der Anlage ungeprüft: die echten
+    Namen der Neben-Entitäten (nach Zigbee2MQTT-Doku angenommen, `child_lock` als `lock`/`switch`), Rückmeldung und
+    Verhalten der W600 beim Testlauf, Meldeabstand des Fühlerpaars.
 
 ## 10. Wo eine Prüfung am meisten bringt
 
-Zu prüfen ist der Branch `feat/stufe-1-beobachten` (1.3.0) gegen `v1.2.1` (`9cc7fb1`). Der Schwerpunkt liegt auf
-dem neuen Energiemanagement; es schreibt in 1.3.0 nicht, liest aber viel und läuft dauerhaft mit.
+Zu prüfen ist der Branch `feat/thermostate` (1.4.0) gegen `v1.3.1` (`c70845a`) – **vor** dem ersten Steuern an der
+Anlage (Aufwand max). Schwerpunkt ist der neue Schreibweg zu den Thermostaten (Abschnitt 5f):
+
+- **`RoomGate`** (`write_gate.py`): Kann irgendein Weg im Demo-Betrieb, in der Vorschau, bei Stufe ≠ Steuern oder auf
+  ein fremdes Thermostat / eine myVAILLANT-Zone senden? Sind Totzone, Abstand, Höchstzahl und ihre Ausnahmen richtig
+  und nebenläufig sicher (Sperre je Thermostat), überstehen sie Neustart und Tageswechsel (Zeitumstellung)? Stimmen
+  Bestätigung, „Nicht bestätigt“, Pause und Rückfall (`touched`, zwischengespeicherte Grenzen)?
+- **`ha_client.call_room_service()`**: nur `climate.set_temperature` mit `temperature`; Fehlerklassen.
+- **Raumregelung** (`rooms/`): Regeln in `controller.py` (Vorrang, Korrektur, Kaskade, Handänderung, Vorheizen über
+  Mitternacht), Testlauf in `testrun.py` (Nachtfenster über Mitternacht, Budget, Abbruch, Wiederherstellen nach
+  Neustart), Umverteilen und Vorlauf-Berater in `service.py`, Rückfall beim Stoppen (doppelter Abbruch, 15 s),
+  Lebenszeichen (stirbt mit der Schleife), Vorlage der Notfall-Automation (gültiges YAML für HA, Template).
+- **Zusammenspiel mit `hems/`** (`on_sampled`, `set_flow_advisor`, `_observed`), `Room.measured_at_thermostat` über
+  die IEEE-Adresse und seine Folgen (Zonen-Mittelwert, Hausmodell, Fenster).
+- **API/Oberfläche:** `api/rooms/*`, Bestätigungen, Wechsel auf Demo, `Rooms.svelte`, `RoomControlCard.svelte`,
+  `ThermostatPanel.svelte`, `RoomEditor.svelte` (375 px, Screenreader).
+
+Die übrigen Punkte unten gelten weiter (Stand 1.3.0, Branch `feat/stufe-1-beobachten` gegen `v1.2.1`):
 
 0. **Energiemanagement** (`backend/src/vaillant_eebus/hems/`, `room_data.py`, Ergänzungen in `ha_client.py`
    (`statistics()`), `ha_import.py` (Thermostat als Raumtemperatur), `home_assistant.py`, `api.py`, `settings.py`):

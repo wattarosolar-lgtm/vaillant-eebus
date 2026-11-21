@@ -11,8 +11,9 @@ jede Heizzone einzeln, mit dem Verlauf der Leistung über 24 Stunden. Sie änder
 Solltemperaturen, Betriebsarten und die Einmalladung des Warmwassers. Die Raumtemperatur jeder Zone kommt aus
 Temperatursensoren in Home Assistant, und die App meldet die Werte der Wärmepumpe als Sensoren an Home Assistant.
 Ein Protokoll hält jede Änderung und jedes Verbindungsereignis fest. Seit Version 1.3.0 lernt ein
-**Energiemanagement** Haus und Räume kennen, zählt Takte und Abtauungen und plant 48 Stunden voraus – in dieser
-Version nur als Vorschau (siehe „Energiemanagement“).
+**Energiemanagement** Haus und Räume kennen, zählt Takte und Abtauungen und plant 48 Stunden voraus – für die Zonen
+nur als Vorschau (siehe „Energiemanagement“). Seit Version 1.4.0 stellt die **Raumregelung** auf Wunsch die
+Heizkörperthermostate der Räume (siehe „Raumregelung“).
 
 Nach der Installation läuft die App im **Demo-Betrieb** und sendet nichts an die Wärmepumpe (siehe
 „Demo- und Live-Betrieb“).
@@ -267,7 +268,8 @@ nie liefert (etwa Vorlauftemperatur oder Energiezähler), bekommen keinen Sensor
 Seit Version 1.3.0 ist das Energiemanagement neu: Es lernt Haus und Räume kennen, schaut 48 Stunden voraus und plant
 je Stunde, wie die Zonen verschoben werden sollten – damit der Vorlauf möglichst niedrig bleibt, die Wärmepumpe
 seltener taktet und abtaut und nachts nur dann abgesenkt wird, wenn es sich lohnt. **In Version 1.3.0 beobachtet,
-lernt und plant es nur; es sendet nichts.** Steuern kommt mit 1.4.0 (Zonen) und 1.5.0 (Heizkörperthermostate).
+lernt und plant es für die Zonen nur; an die Wärmepumpe sendet es nichts.** Steuern der Zonen kommt mit 1.5.0.
+Die Heizkörperthermostate stellt seit 1.4.0 die Raumregelung (eigener Abschnitt).
 Der Planer der Versionen 1.1 und 1.2 (Warmwasser und Zonen nach Strompreis und PV) ist entfallen; PV-Überschuss
 kommt später neu auf dieser Grundlage.
 
@@ -276,7 +278,7 @@ kommt später neu auf dieser Grundlage.
 - **Aus** (Voreinstellung): Es wird nicht geplant. Takte, Abtauungen und Raumwerte zählt und lernt die App trotzdem.
 - **Vorschau:** Das Energiemanagement plant alle 15 Minuten neu und zeigt, was es tun würde: auf der Übersicht, auf
   der Seite **Plan** und im Protokoll („würde“). Es sendet nichts, auch nicht im Live-Betrieb.
-- **Steuern** ist sichtbar, aber erst ab Version 1.4.0 wählbar.
+- **Steuern** ist sichtbar, aber erst ab Version 1.5.0 wählbar.
 
 **Was die App beobachtet und lernt:**
 
@@ -300,10 +302,12 @@ kommt später neu auf dieser Grundlage.
   genug Phasen gesehen sind, steht „lernt noch“ da.
 - **Fenster (würde):** Fallen Temperatur und absolute Luftfeuchte gemeinsam schnell (etwa 0,3 K und 0,5 g/m³ in
   10 Minuten) – ohne Feuchtesensor 0,5 K in 10 oder 0,8 K in 20 Minuten –, meldet die App ein offenes Fenster im
-  Protokoll (Kategorie „Räume“). So lässt sich prüfen, ob die Erkennung zu echtem Lüften passt.
+  Protokoll (Kategorie „Räume“). So lässt sich prüfen, ob die Erkennung zu echtem Lüften passt. Räume, die in der
+  Raumregelung auf „Vorschau“ oder „Steuern“ stehen, meldet die Raumregelung selbst.
 - **Versorgung (würde):** Steht das Ventil eines Raums seit 30 Minuten zu mindestens 90 % offen und ist der Raum
   0,3 K unter seinem Soll, gilt er als unterversorgt; hält er sein Soll mit wenig offenem Ventil, als überversorgt.
-  Für die Heizkörper-Zone leitet die App daraus ab, ob der Vorlauf höher oder tiefer sein dürfte.
+  Für die Heizkörper-Zone leitet die App daraus ab, ob der Vorlauf höher oder tiefer sein dürfte. Stehen Räume der
+  Zone in der Raumregelung auf „Vorschau“ oder „Steuern“, heißt es „höher“ erst, wenn das Umverteilen nicht reicht.
 - **Zone-1-Logik (würde):** wie die bekannte Automation „Fußbodenheizung aus, solange die Wärmepumpe steht“ – nicht
   bei Frostschutz und nicht, wenn ein Raum der Zone unter sein Komfortband fällt. Die Karte zeigt, wie oft das heute
   zum tatsächlichen Schalten gepasst hätte.
@@ -333,12 +337,12 @@ kommt später neu auf dieser Grundlage.
 - **Räume:** je Raum Temperatur, Soll mit Komfortband, Thermostat-Soll, Ventil, Feuchte, Versorgung, Fenster, wie
   schnell der Raum gerade abkühlt und wie lange er ohne Heizung bis zur unteren Komfortgrenze bräuchte, dazu der
   Lernstand. Unter **Bearbeiten** tragen Sie ein: Raum-Soll und bis zu vier Zeitfenster (jeden Tag gleich),
-  Komfortband, erlaubten Verlust nachts und gegen Abtauen, Notfallwert, ob der Raum gedrosselt werden darf (ab 1.5.0),
+  Komfortband, erlaubten Verlust nachts und gegen Abtauen, Notfallwert, ob der Raum gedrosselt werden darf,
   Heizkörperthermostat, Ventilstellung (Aqara W600: „position“, Eurotronic Comet: „pi_heating_demand“) und
   Luftfeuchte sowie die Werte des statischen Abgleichs (Heizlast, Auslegungs-Soll, Heizflächen mit Normleistung,
   Durchfluss und Voreinstellung). Die Werte des Gutachtens sind nur Startwerte. Räume ohne Temperatursensor (etwa ein
-  Bad) wählen Sie in den Einstellungen mit ihrem Thermostat; dessen Wert ist am Heizkörper gemessen und zählt nicht im
-  Mittelwert der Zone.
+  Bad) wählen Sie in den Einstellungen mit ihrem Thermostat oder dessen Temperatur-Sensor (etwa
+  `sensor.…_local_temperature`); der Wert ist am Heizkörper gemessen und zählt nicht im Mittelwert der Zone.
 
 **Einrichten** unter Einstellungen → Energiemanagement, gespeichert mit **Speichern**:
 
@@ -354,7 +358,7 @@ kommt später neu auf dieser Grundlage.
   (Vorgabe: Fußbodenheizung −1 … +2 K, Heizkörper −2 … +2 K).
 - **Nachtabsenkung und Abtauen:** Nachtfenster und erlaubte Verluste (Vorgabe für alle Räume).
 - **Takten und Grenzen:** Ziel Starts je Tag, Blockbetrieb ab, Heizgrenze, Schwelle der Zone-1-Logik und – wirksam
-  ab 1.4.0 – Schritt und Abstand des Quick-Veto sowie die Tagesgrenze für Befehle an die Vaillant-Cloud.
+  ab 1.5.0 – Schritt und Abstand des Quick-Veto sowie die Tagesgrenze für Befehle an die Vaillant-Cloud.
 
 **Sensoren** (Export-Gruppe „Energiemanagement“): `sensor.vaillant_eebus_hems_status` (Aus, Vorschau),
 `sensor.vaillant_eebus_hems_next_change` (nächste geplante Änderung mit Zeit und Grund),
@@ -363,11 +367,101 @@ kommt später neu auf dieser Grundlage.
 `binary_sensor.vaillant_eebus_frost_protection`.
 
 **Was das Energiemanagement nie tut:** Heizkurve, Zeitprogramm, Warmwasser oder Leistungsdeckel ändern. In dieser
-Version ruft es die Schreibsperre gar nicht auf; ein Test der App prüft das.
+Version ruft es die Schreibsperre gar nicht auf; ein Test der App prüft das. Die Thermostate stellt allein die
+Raumregelung über ihren eigenen Teil der Schreibsperre.
 
 **Wechsel von 1.2:** Hatte der alte Planer beim Update noch eine Verschiebung offen, steht ein Hinweis im Protokoll;
 bitte die Solltemperatur prüfen (ein Quick-Veto endet von selbst). Seine Einstellungen zu Tarif, PV und Akku werden
 nicht mehr gebraucht.
+
+## Raumregelung
+
+Seit Version 1.4.0 kann die App die **Heizkörperthermostate** der Räume stellen (Zigbee2MQTT, z. B. Aqara W600 und
+Eurotronic Comet). Jedes Thermostat regelt sein Ventil weiter selbst; die App gibt ihm nur den Sollwert vor, so dass
+der Raum – gemessen am Raumsensor – sein Raum-Soll hält. Fällt die App aus, regeln die Thermostate einfach weiter.
+An die Wärmepumpe sendet die Raumregelung nichts.
+
+**Stufen** (Seite Räume → Karte „Raumregelung“ für alle Räume, dazu je Raum; es gilt die kleinere):
+
+- **Aus:** keine Raumregelung.
+- **Beobachten** (nach dem Update, wenn das Energiemanagement auf Vorschau stand): wie in 1.3 – lernen, Fenster und
+  Versorgung als „würde“.
+- **Vorschau:** Die App rechnet alle 5 Minuten den Sollwert jedes Thermostats und schreibt ins Protokoll, was sie
+  senden würde („Vorschau, würde senden“), mit den Grenzen der Ventilschonung wie beim echten Senden.
+- **Steuern:** nur im Live-Betrieb, mit Bestätigung, und je Raum erst nach einem **vollständigen Testlauf** des
+  Thermostats. Empfehlung: erst einige Tage Vorschau, dann ein einzelner Raum (etwa das Bad), dann die übrigen.
+
+**Was die App je Raum tut:**
+
+- **Sollwert:** Raum-Soll aus dem Zeitplan (vor einem wärmeren Zeitfenster heizt sie rechtzeitig vor, höchstens
+  3 Stunden; solange das Aufheizen nicht gelernt ist, 1 Stunde vorher) plus eine **Korrektur**: Weicht der
+  Raumsensor 30 Minuten lang um mindestens 0,2 K ab, ändert sie die Korrektur um 0,5 K (höchstens ± 5 K,
+  einstellbar). Sie erhöht nicht, wenn das Ventil schon zu mindestens 90 % offen ist (dann fehlt Wasser oder Vorlauf)
+  oder kein warmes Wasser kommt, und senkt nicht, wenn das Ventil höchstens 5 % offen ist. Nach einem Testlauf
+  rechnet sie genauer: welche Ventilöffnung der Raum braucht und welcher Sollwert sie beim Thermostat bringt.
+- **Raum ohne eigenen Sensor** (Bad mit Comet): Raum-Soll + **fester Ausgleich** (Voreinstellung 0 K). Ist es gefühlt
+  zu kühl, den Ausgleich z. B. auf +1 K stellen.
+- **Fenster offen** (Temperatur und Luftfeuchte fallen): Thermostat sofort auf den kleinsten Wert (Aqara 5 °C,
+  Comet 8 °C), nach dem Schließen sofort zurück. Die eigene Fenstererkennung der Thermostate sollte aus sein.
+- **Handänderung** am Thermostat setzt die App beim nächsten Durchlauf zurück. Wärmer oder kühler stellen Sie in
+  der App (Raum-Soll).
+- **Zu warm:** Steigt der Raum über Soll + Komfortband + 0,5 K, stellt sie das Thermostat sofort auf Soll − 0,5 K.
+- **Raumsensor fällt aus:** Die Korrektur bleibt stehen, die Fenstererkennung ruht.
+
+**Zone der Heizkörper:** Die App erkennt aus der Leistung der Wärmepumpe und der Puffertemperatur, ob warmes Wasser
+ankommt (von der Wärmepumpe oder aus dem Puffer, mit Restzeit) – nur dann darf eine Korrektur steigen. Ist ein Raum
+trotz offenem Ventil zu kalt, **verteilt sie erst um**: gut versorgte Räume (in derselben Stufe, „Darf gedrosselt
+werden“ an) gehen bis zur unteren Komfortgrenze herunter, höchstens 2 Stunden. Reicht das nach 45 Minuten nicht,
+zeigt die Seite **„Vorlauf höher nötig“**. Die App hebt den Vorlauf erst mit den Zonen (Version 1.5.0) an; bis dahin
+können Sie ihn in myVAILLANT von Hand anheben.
+
+**Ventile schonen** (je Raum einstellbar, von der Schreibsperre erzwungen): kein Befehl unter der **Totzone**
+(0,5 K), höchstens alle **15 Minuten** und höchstens **24 Befehle** je Thermostat und Tag. Fenster, Handänderung,
+Sicherheit und Rückfall gehen sofort hinaus; über der Höchstzahl nur noch Fenster, Sicherheit und Rückfall. Jeder
+Sollwert gilt erst als bestätigt, wenn das Thermostat ihn meldet; meldet es ihn zweimal nicht, sendet die App ihm eine
+Stunde lang nur Fenster, Sicherheit und Rückfall. Die Seite zeigt Befehle und Ventilbewegungen je Tag.
+
+**Testlauf** (je Thermostat, Pflicht vor „Steuern“): Er misst, wie das Thermostat auf seinen Sollwert reagiert.
+
+1. Das **Fühlerpaar** an Vor- und Rücklauf des Heizkörpers befestigen (Anlegefühler, gut anliegend, mit Isolierung
+   darüber; gut sind eine Meldung mindestens alle 1–2 Minuten und 0,1 K Auflösung) und unter „Fühlerpaar“ den
+   Vorlauf- und den Rücklauf-Fühler wählen und den Raum eintragen. Die Seite zeigt, wie oft und in welchen Schritten
+   die Fühler melden.
+2. Am Raum **Testlauf für heute Nacht vormerken** (nur im Live-Betrieb).
+3. Ab 22 Uhr startet er, sobald der Raum zwischen 0,5 K unter und 0,2 K über seinem Soll liegt, kein Fenster offen
+   ist und am Heizkörper warmes Wasser ankommt – spätestens um 1 Uhr, sonst in der nächsten Nacht (höchstens drei).
+4. Die App stellt das Thermostat auf seine eigene Temperatur, dann in 0,5-K-Schritten höher, bis das Ventil offen
+   ist, danach bis 1 K unter die Temperatur am Thermostat und zurück auf den Wert von vorher – spätestens um 5 Uhr.
+   Jede Stufe dauert 20–40 Minuten mit warmem Wasser, bis Ventil und Rücklauf ruhig stehen. Höchstens 16 Befehle
+   (sie zählen nicht zu den 24).
+5. Abbruch (zurück auf den Wert von vorher): Raum über Soll + 1 K, Fenster offen, 30 Minuten keine Ventilstellung
+   oder kein warmes Wasser, Abbruch durch Sie. Der Raum kann während des Laufs bis zu 1 K wärmer werden, und der Motor
+   des Thermostats ist zu hören.
+
+Das Ergebnis steht unter „Ventilverhalten“: ab welchem Abstand das Ventil öffnet, ganz offen und wieder zu ist, nach
+wie vielen Minuten es reagiert, welche Stufen es erreicht, und je Stufe Vor- und Rücklauf und die geschätzte
+Wärmeabgabe. Empfohlen sind 2–3 Läufe an verschiedenen Tagen; mit einem Fühlerpaar geht ein Lauf je Nacht.
+
+**Absicherung:**
+
+- **Notfallwerte** je Raum eintragen (Bearbeiten → Notfallwert; ohne gilt das Raum-Soll).
+- **Notfall-Automation:** Die Karte „Raumregelung“ zeigt eine Vorlage für Home Assistant mit Ihren Thermostaten und
+  Notfallwerten. Anlegen: Einstellungen → Automationen & Szenen → Automation erstellen → ⋮ → „In YAML bearbeiten“,
+  einfügen, speichern. Sie setzt die Notfallwerte, wenn 15 Minuten kein **Lebenszeichen**
+  (`sensor.vaillant_eebus_raeume_lebenszeichen`, jede Minute, unabhängig vom Export) kommt, und gibt der App nach
+  einem Neustart von Home Assistant erst 15 Minuten Zeit. Prüfen: App stoppen, nach 15 Minuten stehen die
+  Notfallwerte an. Wird die Raumregelung nicht mehr genutzt, die Automation abschalten.
+- **Rückfall durch die App:** Verlässt ein Raum „Steuern“, schalten Sie auf Demo oder wird die App beendet, setzt sie
+  jedes Thermostat, das sie gestellt hat, selbst auf seinen Notfallwert.
+
+**Warnungen** (die App liest sie über die IEEE-Adresse des Thermostats und schreibt nichts davon): Aqara-Fühler nicht
+auf „internal“, Betrieb nicht „heat“ oder ein Preset aktiv, Comet nicht in `trv_mode` 2, eigene Fenstererkennung an,
+Kindersicherung aus, Ventilalarm, Batterie schwach, Ventilstellung lange nicht gemeldet. Bei Fühler oder `trv_mode`
+stellt die App das Thermostat nicht.
+
+**Was die Raumregelung nie schreibt:** Kalibrierung, Fühlerwahl, externe Temperatur, `trv_mode`, Betrieb, Presets,
+Zeitpläne, Fenstererkennung und Kindersicherung der Thermostate – nur den Sollwert (`climate.set_temperature`), und
+nur auf dem Thermostat, das einem Raum zugeordnet ist, nie auf einer Zone von myVAILLANT.
 
 ## Protokoll
 
@@ -462,8 +556,9 @@ gewählten myVAILLANT-Entitäten, das gekoppelte Gateway, den gewählten Betrieb
 Tag (400 Tage) in `/data/energy.json`. Das Energiemanagement speichert seine Raumproben (21 Tage) in
 `/data/hems.db`, Takte und Abtauungen (90 Tage) in `/data/cycles.json`, den Plan der letzten 24 Stunden in
 `/data/plan_history.json`, die gemerkten Prognosen in `/data/forecast_check.json` und seinen Stand in
-`/data/hems_state.json`. Die Dateien `/data/hems.json` und `/data/hems_days.json` früherer Versionen werden nicht
-mehr gebraucht. Diese Dateien sind Teil der
+`/data/hems_state.json`. Die Raumregelung speichert Korrekturen, Testläufe und Ventilverhalten in
+`/data/rooms.json` und die gezählten Befehle je Thermostat in `/data/room_gate.json`. Die Dateien `/data/hems.json`
+und `/data/hems_days.json` früherer Versionen werden nicht mehr gebraucht. Diese Dateien sind Teil der
 Home-Assistant-Sicherung. Gehen die Daten in `/data/eebus` verloren, ändert sich die SKI der App und die Kopplung
 in der myVAILLANT-App muss neu gemacht werden.
 

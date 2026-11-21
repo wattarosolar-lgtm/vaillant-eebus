@@ -61,7 +61,8 @@ bei Versionen vor 2024.10 mit `platform` statt `trigger`) und `homeassistant_sta
 `binary_sensor.vaillant_eebus_*`. Dienste: `weather.get_forecasts` (liest nur, per REST mit `return_response`) und
 mit der Anbindung myVAILLANT `call_device_service()` für genau die Dienste in `DEVICE_SERVICES` auf Klima- und
 Warmwasser-Entitäten; Tests prüfen, dass es keine anderen sind und nur `write_gate.py` (über `myvaillant.py`) sie
-aufruft. `ha_import.py` bildet daraus Räume, den
+aufruft. Für die Heizkörperthermostate `call_room_service()` mit `ROOM_SERVICES` = nur `climate.set_temperature`
+(nur das Feld `temperature`); nur `write_gate.py` ruft ihn auf (Test). `ha_import.py` bildet daraus Räume, den
 Mittelwert je Zone (nur Zahlen in °C/°F, höchstens 30 Minuten alt) und die Wärme des Tages; `ha_export.py` meldet
 die Wärmepumpe als Sensoren (je Sensor höchstens alle 10 s, Energie jede Minute, alles neu nach einer
 Neuverbindung oder `homeassistant_started`, abgewählte Gruppen werden entfernt). Der Zustand enthält dazu
@@ -86,14 +87,26 @@ Fremdwärme, Aufheizen, Anlaufzeit, Bedarfsöffnung, Korrektur, Versorgung, Vorl
 Lauf, Pause, Abtau-Muster, `/data/cycles.json`), `defrost.py` (Abtaurisiko je Stunde), `frost.py` (Frostschutz
 < 4 °C länger als 4 h), `windows.py` (Fenster aus Temperatur und absoluter Feuchte), `rules.py` (reine Funktion:
 Plan 48 h je Zone und Stunde mit Grund), `service.py` (Beobachten, Proben, Lernen, Planen alle 15 min, Status,
-Sensoren, CSV). Das Paket importiert weder `write_gate` noch den Bridge-Client (Strukturtest). Raumdaten stehen
-in `room_data.py` (je Raum in `settings.json`).
+Sensoren, CSV). Das Paket importiert weder `write_gate` noch den Bridge-Client noch `rooms` (Strukturtest).
+Raumdaten stehen in `room_data.py` (je Raum in `settings.json`, dazu der Schalter `room_control` mit Fühlerpaar).
+
+**Raumregelung** (`backend/src/vaillant_eebus/rooms/`, 1.4.0): `thermostats.py` (Zigbee2MQTT-Thermostat und seine
+Neben-Entitäten über die IEEE-Adresse, Modell, Warnungen; nur lesen), `supply.py` (Wärmeangebot: Wärmepumpe, Puffer
+mit Restzeit, keins, unklar), `controller.py` (reine Funktion: Sollwert je Raum mit Korrektur bzw. festem Ausgleich,
+Kaskade über die Ventilkennlinie, Fenster, Sicherheit, Handänderung, Vorheizen, Drosseln), `curve.py`
+(Ventilverhalten aus Testläufen), `testrun.py` (Testlauf nachts als reine Schrittfunktion), `service.py`
+(`RoomControl`: Takt nach den Proben des Energiemanagements, Umverteilen, Vorlauf-Hinweis an den Planer, Lebenszeichen,
+Notfall-Automation, Rückfall beim Stoppen, `/data/rooms.json`). Sie erreicht Home Assistant schreibend nur über
+`RoomGate` in `write_gate.py` (Strukturtest).
 
 **Schreiben:** Einzige Stelle, die an die Wärmepumpe schreibt, ist `backend/src/vaillant_eebus/write_gate.py`
 (Tests stellen sicher, dass kein anderes Modul die Schreibmethoden des Bridge-Clients oder `send_command()` des
 myVAILLANT-Wegs aufruft). Es prüft jeden
 Befehl gegen die Angaben des Geräts, sendet im Demo-Betrieb nichts und im Live-Betrieb höchstens einen Befehl je
-Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
+Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite). `RoomGate` in derselben Datei ist der einzige
+Weg zu den Heizkörperthermostaten: nur das Thermostat eines Raums in „Steuern“, Grenzen der Entität und des Raums,
+Totzone, Abstand und Höchstzahl je Tag erzwungen (Zähler in `/data/room_gate.json`), Bestätigung über den gemeldeten
+Wert.
 
 | Methode | Pfad | Zweck |
 |---|---|---|
@@ -112,10 +125,15 @@ Steuerung alle 5 s. Alles landet im Protokoll (`/data/app.db`, SQLite).
 | GET | `api/ha/location` | Standort aus der HA-Konfiguration (für Open-Meteo); 404 ohne Standort |
 | GET | `api/hems` | Energiemanagement: Stufe, Einstellungen, fehlende Daten, Prognose, Hausmodell, Bedarf, Takte und Abtauungen, Abtauraten, Frostschutz, Zone-1-Logik, Vorlauf, nächste Änderungen |
 | PUT | `api/hems/settings` | Einstellungen des Energiemanagements (ohne Stufe), geprüft (422 mit Begründung) |
-| POST | `api/hems/mode` | Stufe `off` oder `preview`; `control` antwortet in 1.3.0 mit 409 |
+| POST | `api/hems/mode` | Stufe `off` oder `preview`; `control` (Zonen) antwortet bis 1.5.0 mit 409 |
 | GET | `api/hems/plan`, `api/hems/plan/export` | Plan 48 h je Stunde und Rückblick 24 h; als CSV |
-| GET | `api/rooms` | Räume mit Messwerten, Lernstand, Versorgung und Fenster; je Zone der begrenzende Raum |
-| PUT | `api/rooms/{entity_id}` | Raumdaten eines Raums (Soll, Zeitplan, Komfortband, Verluste, Thermostat, Ventil, Feuchte, statischer Abgleich) |
+| GET | `api/rooms` | Räume mit Messwerten, Lernstand, Versorgung und Fenster; je Zone der begrenzende Raum; unter `control` die Raumregelung (Stufen, Thermostate, Testläufe, Wärmeangebot, Umverteilen, Fühlerpaar, Lebenszeichen) |
+| PUT | `api/rooms/{entity_id}` | Raumdaten eines Raums (Soll, Zeitplan, Komfortband, Verluste, Thermostat, Ventil, Feuchte, statischer Abgleich, Korrektur/Ausgleich, Ventilschonung; die Stufe bleibt) |
+| PUT | `api/rooms/control` | Schalter der Raumregelung (`off`, `observe`, `preview`, `control`; `control` nur live und mit `"confirm": true`) |
+| PUT | `api/rooms/{entity_id}/stage` | Stufe eines Raums (`observe`, `preview`, `control`; `control` mit `confirm` und nach einem vollständigen Testlauf) |
+| POST | `api/rooms/{entity_id}/test` | Testlauf vormerken (`"action": "arm"`, `confirm`) oder abbrechen (`cancel`) |
+| PUT | `api/rooms/probe` | Fühlerpaar (`flow_entity`, `return_entity`) und der Raum, an dessen Heizkörper es hängt |
+| GET | `api/rooms/automation` | Vorlage der Notfall-Automation als YAML |
 
 Jeder Schreibbefehl nennt in `operating_mode` (`demo` oder `live`) den Betrieb, den der Nutzer beim Ändern sah;
 stimmt er nicht mehr, wird nichts gesendet (409). Antworten sagen immer, ob gesendet wurde: `{"sent": false,
