@@ -386,6 +386,19 @@ class _OpenClient:
         return False
 
 
+async def _quiet_state(heat_pump: HeatPumpState | None) -> ApiState:
+    return ApiState(
+        connection=ConnectionState.CONNECTED,
+        link=Connection.EEBUS,
+        mode=OperatingMode.DEMO,
+        pending=[],
+        heat_pump=heat_pump,
+        energy_today=None,
+        home_assistant=HomeAssistantState(available=False, connected=False, rooms=[], zones=[], heat_today=None),
+        performance_today=None,
+    )
+
+
 async def test_event_stream_survives_a_failing_bridge_call(state: StateService) -> None:
     calls = 0
 
@@ -394,16 +407,7 @@ async def test_event_stream_survives_a_failing_bridge_call(state: StateService) 
         calls += 1
         if calls == 1:
             raise grpc.aio.AioRpcError(grpc.StatusCode.INTERNAL, grpc.aio.Metadata(), grpc.aio.Metadata(), "broken")
-        return ApiState(
-            connection=ConnectionState.CONNECTED,
-            link=Connection.EEBUS,
-            mode=OperatingMode.DEMO,
-            pending=[],
-            heat_pump=heat_pump,
-            energy_today=None,
-            home_assistant=HomeAssistantState(available=False, connected=False, rooms=[], zones=[], heat_today=None),
-            performance_today=None,
-        )
+        return await _quiet_state(heat_pump)
 
     events = state_events(_OpenClient(), state, flaky_state, keepalive=5)
     try:
@@ -418,6 +422,25 @@ async def test_event_stream_survives_a_failing_bridge_call(state: StateService) 
     assert first == ": bridge error\n\n"
     assert message.startswith("event: state\ndata: ")
     assert json.loads(message.split("data: ", 1)[1])["connection"] == "connected"
+
+
+async def test_a_quiet_event_stream_sends_pings_the_page_can_see(state: StateService) -> None:
+    # The UI opens a new stream when nothing arrives for a while; an SSE comment
+    # never reaches the page's script, a named event with data does.
+    events = state_events(_OpenClient(), state, _quiet_state, keepalive=0.05)
+    try:
+        first = await anext(events)
+        async with asyncio.timeout(2):
+            pings = [await anext(events), await anext(events)]
+        state.republish()
+        async with asyncio.timeout(2):
+            update = await anext(events)
+    finally:
+        await events.aclose()
+
+    assert first.startswith("event: state\ndata: ")
+    assert pings == ["event: ping\ndata: {}\n\n"] * 2
+    assert update.startswith("event: state\ndata: ")
 
 
 async def test_a_lost_answer_is_reported_as_unknown(

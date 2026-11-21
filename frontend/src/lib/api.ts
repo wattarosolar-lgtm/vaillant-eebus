@@ -266,17 +266,102 @@ export async function getPowerHistory(): Promise<PowerHistory> {
   return (await send('api/history/power')).json() as Promise<PowerHistory>;
 }
 
+/** Delays before opening a new stream after the last one failed for good; the last one repeats. */
+const STREAM_RETRY_MS = [1000, 2000, 5000, 10000, 15000];
+/** The backend sends a ping every 15 s; a stream without any message for this long hangs. */
+const STREAM_SILENCE_MS = 45000;
+/** Back on the page after this long without a message: do not wait for the silence limit. */
+const STREAM_STALE_MS = 20000;
+
 /**
- * Follows the backend's server-sent events. The browser reconnects by itself
- * after an interruption; onOpenChange reports whether the stream is up.
- * Returns a function that closes the stream.
+ * Follows the backend's server-sent events and keeps following them.
+ *
+ * The browser reconnects by itself only after a network error. An error answer
+ * ends its EventSource for good: Home Assistant's ingress answers 502 while the
+ * app restarts (update, crash) and 401 once its session ran out (after sleep).
+ * Then a new stream is opened after STREAM_RETRY_MS. A stream that stays silent
+ * is replaced too: after sleep or a network change the old connection can hang
+ * without any error. onOpenChange reports whether the stream is up. Returns a
+ * function that closes the stream for good.
  */
 export function subscribeState(onState: (state: ApiState) => void, onOpenChange: (open: boolean) => void): () => void {
-  const source = new EventSource('api/events');
-  source.addEventListener('state', (event: MessageEvent<string>) => {
-    onState(JSON.parse(event.data) as ApiState);
-  });
-  source.addEventListener('open', () => onOpenChange(true));
-  source.addEventListener('error', () => onOpenChange(false));
-  return () => source.close();
+  let source: EventSource | null = null;
+  let failures = 0;
+  let lastMessage = Date.now();
+  let retryTimer: number | undefined;
+  let silenceTimer: number | undefined;
+
+  const alive = (): void => {
+    lastMessage = Date.now();
+    window.clearTimeout(silenceTimer);
+    silenceTimer = window.setTimeout(retry, STREAM_SILENCE_MS);
+  };
+
+  function open(): void {
+    window.clearTimeout(retryTimer);
+    source?.close();
+    const current = new EventSource('api/events');
+    source = current;
+    alive();
+    current.addEventListener('open', () => {
+      if (current === source) {
+        failures = 0;
+        alive();
+        onOpenChange(true);
+      }
+    });
+    current.addEventListener('state', (event: MessageEvent<string>) => {
+      if (current === source) {
+        alive();
+        onState(JSON.parse(event.data) as ApiState);
+      }
+    });
+    current.addEventListener('ping', () => {
+      if (current === source) {
+        alive();
+      }
+    });
+    current.addEventListener('error', () => {
+      if (current !== source) {
+        return;
+      }
+      onOpenChange(false);
+      // CONNECTING: the browser tries again by itself, the silence limit covers it.
+      if (current.readyState === EventSource.CLOSED) {
+        retry();
+      }
+    });
+  }
+
+  /** Drops the current stream and opens a new one after the next delay. */
+  function retry(): void {
+    source?.close();
+    window.clearTimeout(silenceTimer);
+    window.clearTimeout(retryTimer);
+    onOpenChange(false);
+    const delay = STREAM_RETRY_MS[Math.min(failures, STREAM_RETRY_MS.length - 1)];
+    failures += 1;
+    retryTimer = window.setTimeout(open, delay);
+  }
+
+  /** Back on the page or online again: reconnect at once instead of waiting for a retry or the silence limit. */
+  const wake = (): void => {
+    const stale = source?.readyState === EventSource.CLOSED || Date.now() - lastMessage > STREAM_STALE_MS;
+    if (document.visibilityState === 'visible' && stale) {
+      failures = 0;
+      open();
+    }
+  };
+
+  open();
+  document.addEventListener('visibilitychange', wake);
+  window.addEventListener('online', wake);
+  return () => {
+    document.removeEventListener('visibilitychange', wake);
+    window.removeEventListener('online', wake);
+    window.clearTimeout(retryTimer);
+    window.clearTimeout(silenceTimer);
+    source?.close();
+    source = null;
+  };
 }

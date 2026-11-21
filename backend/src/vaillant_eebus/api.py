@@ -118,8 +118,11 @@ FOREIGN_BRIDGE_MESSAGE = (
 )
 
 
-# Seconds between keep-alive comments on the event stream.
+# Seconds between keep-alive events on the event stream. The UI treats a stream
+# without any message for three times as long as hung and opens a new one.
 SSE_KEEPALIVE = 15.0
+# A named event, unlike an SSE comment, reaches the page's script.
+SSE_PING = "event: ping\ndata: {}\n\n"
 
 
 class RegisterRequest(BaseModel):
@@ -377,10 +380,11 @@ async def state_events(
     *,
     keepalive: float = SSE_KEEPALIVE,
 ) -> AsyncGenerator[str]:
-    """Server-sent events: the full state on connect and after every change.
+    """Server-sent events: the full state on connect and after every change, and
+    a ping after keepalive seconds without a change.
 
     A failing bridge call skips one message instead of ending the stream; the
-    next change or keep-alive follows as usual.
+    next change or ping follows as usual.
     """
     async with state.listen() as updates:
         current = state.current
@@ -400,7 +404,7 @@ async def state_events(
                         current = await updates.get()
                     break
                 except TimeoutError:
-                    yield ": keep-alive\n\n"
+                    yield SSE_PING
 
 
 def create_app(

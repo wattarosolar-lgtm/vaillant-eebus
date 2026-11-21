@@ -38,6 +38,10 @@
   let confirmingLive = $state(false);
   let modeBusy = $state(false);
   let modeError = $state<string | null>(null);
+  // The app's version when this page was loaded; another one means an update was installed.
+  let loadedVersion: string | null = null;
+  // An update arrived while settings were unsaved: the user reloads when ready.
+  let updateInstalled = $state<string | null>(null);
 
   function currentRoute(): Route | '' {
     const hash = window.location.hash.replace(/^#\/?/, '');
@@ -77,12 +81,34 @@
     }
     try {
       const next = await getConnection();
+      if (updated(next.app_version)) {
+        return;
+      }
       pairing = next.active === 'eebus' ? await getPairing() : null;
       connection = next;
       loadError = null;
     } catch (err) {
       loadError = err instanceof ApiError ? err.message : 'Der Status der App konnte nicht geladen werden.';
     }
+  }
+
+  /**
+   * After an update of the app this page is still the old one: load the new one,
+   * unless settings are unsaved. Returns true when the page reloads.
+   */
+  function updated(version: string): boolean {
+    if (loadedVersion === null) {
+      loadedVersion = version;
+    }
+    if (version === loadedVersion) {
+      return false;
+    }
+    if (hasUnsaved()) {
+      updateInstalled = version;
+      return false;
+    }
+    window.location.reload();
+    return true;
   }
 
   /** The app restarts with another connection: wait until it answers with it, then load it anew. */
@@ -140,6 +166,10 @@
         live = state;
       },
       (open) => {
+        // Back after an interruption, e.g. a restart for an update: ask for the status at once.
+        if (open && !streamOpen) {
+          void refreshStatus();
+        }
         streamOpen = open;
       },
     );
@@ -216,6 +246,13 @@
     </p>
   {:else if loadError}
     <p class="banner error" role="alert">{loadError}</p>
+  {:else if updateInstalled}
+    <div class="banner info update" role="status">
+      <p>
+        Version {updateInstalled} der App ist installiert. Bitte die Einstellungen speichern und dann die Seite neu laden.
+      </p>
+      <button type="button" class="button" onclick={() => window.location.reload()}>Seite neu laden</button>
+    </div>
   {:else if problem}
     <p class="banner error" role="alert">{problem}</p>
   {/if}
@@ -278,6 +315,14 @@
     align-items: center;
     justify-content: space-between;
     gap: 16px;
+  }
+
+  .banner.update {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
   }
 
   .header-right {
