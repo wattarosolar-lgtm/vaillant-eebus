@@ -20,6 +20,12 @@ commands a night; the way back is not counted (write gate: RESTORE). Complete
 is a run that opened the valve fully and closed it again. A night counts as a
 try only if its start window began after the run was armed.
 
+A reading of the probe pair counts up to two hours after its last report
+(1.4.1): many sensors report only when the value changes, so a quiet pipe is
+silent for an hour. A pair whose return is warmer than its flow while warm
+water reaches the open valve looks swapped; no run starts then
+(fehlerliste-abnahme-1.4.0.md, finding 1).
+
 advance() is a pure step function: the room control feeds it every minute and
 sends what it asks for through the write gate.
 """
@@ -53,8 +59,17 @@ DOWN_BELOW_K = 1.0
 # Warm water at the radiator: its flow at least this much above the room.
 HEAT_K = 5.0
 UP_COMMANDS_MAX = 8
-# Readings of the probe pair must be this fresh to start.
-PROBE_FRESH = timedelta(minutes=15)
+# A reading of the probe pair counts this long after its last report. Sensors that report only on a change
+# (the Sonoff probes: by 0.2 K) stay silent for 45-90 minutes while the pipe's temperature stands still, and
+# Home Assistant does not show a report of an unchanged value (last_reported = last_changed).
+PROBE_VALID = timedelta(hours=2)
+# Flow and return look swapped when the return is this much warmer than the flow for SWAP_FOR, while the
+# valve is at least SWAP_VALVE open and warm water reaches the radiator; the look goes away after the same
+# time the other way round.
+SWAP_K = 1.0
+SWAP_FOR = timedelta(minutes=15)
+SWAP_VALVE = 20.0
+WAITING = "Wartet: "
 # Rated output's temperature difference to the room (flow/return mean - 20 °C) by basis.
 RATED_DELTA_K = {"75/65": 50.0, "55/45": 30.0, "50/40": 25.0}
 RADIATOR_EXPONENT = 1.3
@@ -103,8 +118,9 @@ class TestInputs:
     return_c: float | None
     window_open: bool
     limits: ThermostatLimits | None
-    # The probe pair hangs at this room's radiator and both reported within PROBE_FRESH.
-    probe_here: bool
+    # Why the probe pair cannot measure this radiator now (elsewhere, a sensor silent or missing, swapped);
+    # None when it can.
+    probe_problem: str | None
     # Live mode, room control on, nothing that keeps the app from setting the thermostat.
     may_write: bool
     # Rated output of the radiator and its basis, for the heat estimate.
@@ -193,8 +209,8 @@ def start_problem(run: TestRun, inputs: TestInputs) -> str | None:
     """Why the run cannot start now; None when it can."""
     if not inputs.may_write:
         return "Die App darf das Thermostat gerade nicht stellen (Live-Betrieb, Raumregelung an, Warnungen)."
-    if not inputs.probe_here:
-        return "Das Fühlerpaar hängt nicht an diesem Heizkörper oder meldet nichts."
+    if inputs.probe_problem is not None:
+        return inputs.probe_problem
     if inputs.limits is None or inputs.trv_c is None or inputs.trv_setpoint_c is None:
         return "Das Thermostat meldet seine Werte nicht."
     if inputs.valve is None:
@@ -212,11 +228,11 @@ def start_problem(run: TestRun, inputs: TestInputs) -> str | None:
 
 def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, end: time) -> Action:
     moment = inputs.local.time()
-    night = _night(inputs.local, start)
+    night = night_of(inputs.local, start)
     if in_window(moment, start, latest_start):
         problem = start_problem(run, inputs)
         if problem is not None:
-            run.message = f"Wartet: {problem}"
+            run.message = f"{WAITING}{problem}"
             return Action("wait")
         assert inputs.limits is not None and inputs.trv_c is not None
         run.state = TestState.RUNNING
@@ -233,9 +249,10 @@ def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, en
             return Action("wait")
         run.nights += 1
         if run.nights >= MAX_NIGHTS:
+            waited = waiting_for(run)
+            reason = f"{waited}." if waited else "Die Bedingungen waren nie erfüllt."
             run.state = TestState.FAILED
             run.ended_at = inputs.now
-            reason = run.message.removeprefix("Wartet: ") or "Die Bedingungen waren nie erfüllt."
             run.message = f"In {MAX_NIGHTS} Nächten nicht gestartet: {reason}"
             return Action("end", note=run.message)
     return Action("wait")
@@ -388,9 +405,78 @@ def _heat(inputs: TestInputs) -> bool:
     return inputs.flow_c is not None and inputs.room_c is not None and inputs.flow_c >= inputs.room_c + HEAT_K
 
 
-def _night(local: datetime, start: time) -> date:
+def night_of(local: datetime, start: time) -> date:
     """The night a moment belongs to: the date of its evening."""
     return local.date() if local.time() >= start else (local - timedelta(days=1)).date()
+
+
+def waiting_for(run: TestRun) -> str | None:
+    """What an armed run waited for last (without the closing full stop); None if it has not waited."""
+    if run.state is not TestState.ARMED or not run.message.startswith(WAITING):
+        return None
+    return run.message.removeprefix(WAITING).rstrip(".")
+
+
+def probe_reading(
+    state: str | None, reported: datetime | None, now: datetime, which: str, *, valid_for: timedelta = PROBE_VALID
+) -> tuple[float | None, str | None]:
+    """A probe's value if it counts, else why not ("Vorlauf" or "Rücklauf" as which)."""
+    try:
+        value = float(state) if state is not None else None
+    except ValueError:
+        value = None
+    if value is None or not math.isfinite(value):
+        return None, f"Der {which}-Fühler ist nicht verfügbar."
+    if reported is None or now - reported > valid_for:
+        hours = valid_for.total_seconds() / 3600
+        return None, f"Der {which}-Fühler meldet seit über {hours:g} h nichts."
+    return value, None
+
+
+def swapped_text(flow_c: float, return_c: float) -> str:
+    return (
+        f"Der Vorlauf ist kälter als der Rücklauf ({_number(flow_c)} / {_number(return_c)} °C): "
+        "Fühler vertauscht oder liegt der Vorlauf-Fühler schlecht an?"
+    )
+
+
+@dataclass
+class SwapWatch:
+    """Whether flow and return of the probe pair look swapped (see SWAP_K)."""
+
+    swapped: bool = False
+    # Since when the readings speak for swapped, or against it; None without evidence.
+    for_since: datetime | None = None
+    against_since: datetime | None = None
+
+    def update(
+        self, now: datetime, flow_c: float | None, return_c: float | None, valve: float | None, room_c: float | None
+    ) -> bool:
+        """Takes the readings of a minute; True when swapped changed."""
+        warm = (
+            flow_c is not None and return_c is not None and (room_c is None or max(flow_c, return_c) >= room_c + HEAT_K)
+        )
+        if flow_c is None or return_c is None or valve is None or valve < SWAP_VALVE or not warm:
+            # No evidence either way: a closed valve or cold pipes say nothing about the pair.
+            self.for_since = self.against_since = None
+            return False
+        if return_c >= flow_c + SWAP_K:
+            self.against_since = None
+            self.for_since = self.for_since or now
+            if not self.swapped and now - self.for_since >= SWAP_FOR:
+                self.swapped = True
+                return True
+            return False
+        self.for_since = None
+        self.against_since = self.against_since or now
+        if self.swapped and now - self.against_since >= SWAP_FOR:
+            self.swapped = False
+            return True
+        return False
+
+
+def _number(value: float) -> str:
+    return f"{value:.1f}".replace(".", ",")
 
 
 def run_to_json(run: TestRun) -> dict[str, Any]:

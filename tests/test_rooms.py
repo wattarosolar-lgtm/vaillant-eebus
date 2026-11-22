@@ -233,7 +233,7 @@ def night_inputs(moment: datetime, run: TestRun, **changes: Any) -> TestInputs:
         "return_c": 30.0 + valve / 20,
         "window_open": False,
         "limits": AQARA_LIMITS,
-        "probe_here": True,
+        "probe_problem": None,
         "may_write": True,
         "rated_w": 1600.0,
     }
@@ -1037,3 +1037,103 @@ async def test_a_room_thermostat_cannot_become_a_myvaillant_zone(world: World) -
 
     assert response.status_code == 422
     assert world.settings.current.myvaillant.zones == (MV_ZONE_1, MV_ZONE_2)
+
+
+# --- the probe pair after the field acceptance of 1.4.0 (1.4.1) -----------------------------------------------
+
+
+async def hang_probe_at_the_office(world: World) -> None:
+    response = await world.http.put(
+        "/api/rooms/probe", json={"flow_entity": PROBE_FLOW, "return_entity": PROBE_RETURN, "room_id": OFFICE}
+    )
+    assert response.status_code == 200
+
+
+async def probe_values(world: World, flow: str, back: str, *, flow_age: float = 0, back_age: float = 0) -> None:
+    """New readings of the pair, reported flow_age and back_age minutes ago."""
+    now = world.clock.now
+    world.fake.set(PROBE_FLOW, flow, unit="°C", name="Fühler A", reported=now - timedelta(minutes=flow_age))
+    world.fake.set(PROBE_RETURN, back, unit="°C", name="Fühler B", reported=now - timedelta(minutes=back_age))
+    await eventually(lambda: world.home.hems_sources.number(PROBE_FLOW) == float(flow))
+    await eventually(lambda: world.home.hems_sources.number(PROBE_RETURN) == float(back))
+
+
+def room_named(world: World, name: str) -> Room:
+    return next(room for room in world.settings.current.rooms if room.name == name)
+
+
+async def test_a_quiet_probe_counts_for_two_hours_and_a_silent_one_is_named(world: World) -> None:
+    await hang_probe_at_the_office(world)
+    # Sensors that report only on a change: the flow 90 minutes ago, the return 130 minutes ago.
+    await probe_values(world, "40.2", "30.2", flow_age=90, back_age=130)
+    now, settings = world.clock.now, world.settings.current
+
+    office = world.control._test_inputs(room_named(world, "Büro"), TRV_OFFICE, now, settings)
+    bath = world.control._test_inputs(room_named(world, "Bad"), TRV_BATH, now, settings)
+    probe = (await world.http.get("/api/rooms")).json()["control"]["probe"]
+
+    assert (office.flow_c, office.return_c) == (40.2, None)
+    assert office.probe_problem == "Der Rücklauf-Fühler meldet seit über 2 h nichts."
+    assert bath.probe_problem == "Das Fühlerpaar hängt nicht am Heizkörper von Bad."
+    assert (probe["flow_age_min"], probe["return_age_min"], probe["valid_hours"]) == (90.0, 130.0, 2.0)
+    assert probe["swapped"] is False and "longest_gap_min" in probe and "report_minutes" not in probe
+
+
+async def test_swapped_probes_are_reported_and_swapping_them_clears_it(world: World) -> None:
+    await hang_probe_at_the_office(world)
+    # Warm water at the office's open valve (30 %), but the return is the warmer pipe.
+    await probe_values(world, "26.4", "30.3")
+
+    for _ in range(16):
+        world.clock.now += timedelta(minutes=1)
+        await world.control.minute()
+
+    probe = (await world.http.get("/api/rooms")).json()["control"]["probe"]
+    assert probe["swapped"] is True
+    texts = await messages(world.log, LogCategory.ROOMS)
+    assert any("Der Vorlauf ist kälter als der Rücklauf (26,4 / 30,3 °C)" in text for text in texts)
+    office = world.control._test_inputs(room_named(world, "Büro"), TRV_OFFICE, world.clock.now, world.settings.current)
+    assert office.probe_problem is not None and "vertauscht" in office.probe_problem
+
+    swapped = await world.http.put(
+        "/api/rooms/probe", json={"flow_entity": PROBE_RETURN, "return_entity": PROBE_FLOW, "room_id": OFFICE}
+    )
+
+    assert swapped.status_code == 200 and swapped.json()["control"]["probe"]["swapped"] is False
+    # Still the same radiator: hanging there since the first choice.
+    assert world.settings.current.room_control.probe == ProbePair(PROBE_RETURN, PROBE_FLOW, OFFICE, T0)
+    office = world.control._test_inputs(room_named(world, "Büro"), TRV_OFFICE, world.clock.now, world.settings.current)
+    assert office.probe_problem is None
+
+
+async def test_what_an_armed_run_waits_for_is_logged_once_a_night(world: World) -> None:
+    await hang_probe_at_the_office(world)
+    armed = await world.http.post(f"/api/rooms/{OFFICE}/test", json={"action": "arm", "confirm": True})
+    assert armed.status_code == 200
+    world.clock.now = datetime(2026, 11, 23, 22, 0, tzinfo=UTC)
+    # The office is 2 K too warm to start, and the return sensor has been silent for three hours.
+    world.fake.set(OFFICE, "23.0", unit="°C", name="Büro Temperatur")
+    await eventually(lambda: world.home.hems_sources.number(OFFICE) == 23.0)
+    await probe_values(world, "40.2", "30.2", back_age=180)
+    for _ in range(3):
+        await world.control.minute()
+        world.clock.now += timedelta(minutes=1)
+    await probe_values(world, "40.4", "30.4")
+    for _ in range(3):
+        await world.control.minute()
+        world.clock.now += timedelta(minutes=1)
+    world.clock.now = datetime(2026, 11, 24, 1, 0, tzinfo=UTC)
+    await world.control.minute()
+    world.clock.now += timedelta(minutes=1)
+    await world.control.minute()
+    await world.control.cancel_test(OFFICE)
+
+    lines = [text for text in reversed(await messages(world.log, LogCategory.ROOMS)) if text.startswith("Testlauf")]
+    band = "Der Raum ist nicht nahe genug an seinem Soll (0,5 K darunter bis 0,2 K darüber)"
+    assert lines == [
+        "Testlauf Büro vorgemerkt: startet ab 22:00 Uhr.",
+        "Testlauf Büro wartet: Der Rücklauf-Fühler meldet seit über 2 h nichts.",
+        f"Testlauf Büro wartet: {band}.",
+        f"Testlauf Büro heute Nacht nicht gestartet: zuletzt {band}.",
+        f"Testlauf Büro abgebrochen: vom Nutzer abgebrochen; wartete zuletzt: {band}.",
+    ]

@@ -32,7 +32,7 @@ from typing import Any
 from vaillant_eebus.ha_client import EntityState, HomeAssistantUnavailable
 from vaillant_eebus.ha_export import PREFIX, Sensor
 from vaillant_eebus.ha_import import room_celsius
-from vaillant_eebus.hems.config import ZoneKind
+from vaillant_eebus.hems.config import ZoneKind, in_window
 from vaillant_eebus.hems.room_model import FlowHint, Supply
 from vaillant_eebus.hems.samples import room_series
 from vaillant_eebus.hems.service import HemsService
@@ -43,16 +43,22 @@ from vaillant_eebus.rooms.controller import MODE_NAMES, Correction, Decision, Ro
 from vaillant_eebus.rooms.curve import Step, ValveCurve, curve_from_json, curve_to_json
 from vaillant_eebus.rooms.supply import SUPPLY_NAMES, HeatSupply, SupplyNow, heat_supply, restart_temperature
 from vaillant_eebus.rooms.testrun import (
+    PROBE_VALID,
     STATE_NAMES,
     Action,
+    SwapWatch,
     TestInputs,
     TestRun,
     TestState,
     abort,
     advance,
     describe,
+    night_of,
+    probe_reading,
     run_from_json,
     run_to_json,
+    swapped_text,
+    waiting_for,
 )
 from vaillant_eebus.rooms.thermostats import MODEL_NAMES, Thermostat, TrvModel, blocking, read, side_entities
 from vaillant_eebus.settings import OperatingMode, Room, Settings, SettingsStore
@@ -94,7 +100,6 @@ VALVE_SHUT = 5.0
 HEALTHY_FOR = timedelta(minutes=12)
 # A rejected command is tried again with the same value after this long.
 RETRY_REJECTED = timedelta(minutes=30)
-PROBE_FRESH = timedelta(minutes=15)
 PROBE_KEEP = 60
 TREND_OVER = timedelta(minutes=30)
 RECOMMEND_DAYS = 7
@@ -124,9 +129,13 @@ class ProbeStatus:
     return_c: float | None
     flow_age_min: float | None
     return_age_min: float | None
-    # How often the sensors report (median minutes between reports) and their smallest change seen.
-    report_minutes: float | None
+    # The longest silence between two reports of either sensor since the app started, and the smallest change.
+    longest_gap_min: float | None
     resolution_k: float | None
+    # A reading counts this long after its report.
+    valid_hours: float
+    # The return was warmer than the flow with warm water at the open valve (SwapWatch).
+    swapped: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +334,9 @@ class RoomControl:
         self._started_at = clock()
         self._stale_logged = False
         self._probe_reports: dict[str, deque[tuple[datetime, float]]] = {}
+        self._swap = SwapWatch()
+        # The reasons an armed run waited for in its start window, logged once per night: (night, reasons).
+        self._waits: tuple[date, set[str]] | None = None
         self._problems: list[str] = []
         self._lock = asyncio.Lock()
         self._load()
@@ -356,6 +368,7 @@ class RoomControl:
             await self._discover(now)
             self._refresh_thermostats(now)
             self._count_movements(now)
+            self._watch_probe(now)
             await self._restore_after_restart()
             await self._advance_test(now)
         if self._healthy(now):
@@ -465,6 +478,8 @@ class RoomControl:
             self._settings.update(
                 lambda current: replace(current, room_control=replace(current.room_control, probe=probe))
             )
+            # A new pair (or the same one swapped) is judged afresh.
+            self._swap = SwapWatch()
         self._home_assistant.watch()
         where = self._room(probe.room_id).name if probe.room_id else "nicht an einem Heizkörper"
         self._log.add(
@@ -504,7 +519,11 @@ class RoomControl:
             run = self._test
             if run is None or not run.active or run.room_id != room_id:
                 raise WriteRejected(409, "Für diesen Raum ist kein Testlauf vorgemerkt.")
-            await self._end_test(abort(run, self._clock(), "vom Nutzer abgebrochen"))
+            reason = "vom Nutzer abgebrochen"
+            waited = waiting_for(run)
+            if waited is not None:
+                reason += f"; wartete zuletzt: {waited}"
+            await self._end_test(abort(run, self._clock(), reason))
 
     async def before_demo(self) -> None:
         """The app goes to demo mode: hand the thermostats back while still live."""
@@ -1049,6 +1068,7 @@ class RoomControl:
             return
         inputs = self._test_inputs(room, run.trv, now, settings)
         was = run.state
+        counted = run.counted_night
         action = advance(
             run,
             inputs,
@@ -1058,6 +1078,7 @@ class RoomControl:
         )
         if was is TestState.ARMED and run.state is TestState.RUNNING:
             self._log.add(LogCategory.ROOMS, f"Testlauf {room.name} gestartet.")
+        self._log_waiting(run, room, inputs.local, counted, settings)
         if action.kind == "send" and action.celsius is not None:
             command = SetThermostatSetpoint(room_id=room.entity_id, celsius=action.celsius, reason=RoomReason.TEST)
             try:
@@ -1072,6 +1093,51 @@ class RoomControl:
             await self._end_test(action, run=run)
             return
         self._save()
+
+    def _log_waiting(self, run: TestRun, room: Room, local: datetime, counted: date | None, settings: Settings) -> None:
+        """Each new reason an armed run waits for, once a night; a line when its start window passed without a start."""
+        control = settings.room_control
+        night = night_of(local, control.test_start)
+        waited = waiting_for(run)
+        if run.state is TestState.ARMED and run.counted_night != counted and run.counted_night is not None:
+            # The start window of that night has just passed.
+            if self._waits is not None and self._waits[0] == run.counted_night and self._waits[1] and waited:
+                self._log.add(LogCategory.ROOMS, f"Testlauf {room.name} heute Nacht nicht gestartet: zuletzt {waited}.")
+            return
+        # The reason is set only in the start window; outside it the message still holds the last night's.
+        if waited is None or not in_window(local.time(), control.test_start, control.test_latest_start):
+            return
+        if self._waits is None or self._waits[0] != night:
+            self._waits = (night, set())
+        if waited not in self._waits[1]:
+            self._waits[1].add(waited)
+            self._log.add(LogCategory.ROOMS, f"Testlauf {room.name} wartet: {waited}.")
+
+    def _watch_probe(self, now: datetime) -> None:
+        """Every minute: do flow and return of the pair look swapped?"""
+        probe = self._settings.current.room_control.probe
+        room = next((item for item in self._settings.current.rooms if item.entity_id == probe.room_id), None)
+        if room is None:
+            self._swap = SwapWatch()
+            return
+        sources = self._hems.sources
+        flow = self._probe_value(probe.flow_entity, "Vorlauf", now)[0]
+        back = self._probe_value(probe.return_entity, "Rücklauf", now)[0]
+        valve = sources.number(room.details.valve_entity)
+        if not self._swap.update(now, flow, back, valve, room_celsius(sources.get(room.entity_id))):
+            return
+        if self._swap.swapped and flow is not None and back is not None:
+            self._log.add(LogCategory.ROOMS, f"Fühlerpaar: {swapped_text(flow, back)}", problem=True)
+        else:
+            self._log.add(LogCategory.ROOMS, "Fühlerpaar: Der Vorlauf ist wieder wärmer als der Rücklauf.")
+
+    def _probe_value(self, entity: str | None, which: str, now: datetime) -> tuple[float | None, str | None]:
+        if entity is None:
+            return None, f"Es ist kein {which}-Fühler gewählt."
+        state = self._hems.sources.get(entity)
+        return probe_reading(
+            state.state if state is not None else None, state.last_reported if state is not None else None, now, which
+        )
 
     async def _end_test(self, action: Action, *, run: TestRun | None = None, restore: bool = True) -> None:
         run = run or self._test
@@ -1096,8 +1162,16 @@ class RoomControl:
     def _test_inputs(self, room: Room, trv: str, now: datetime, settings: Settings) -> TestInputs:
         sources = self._hems.sources
         probe = settings.room_control.probe
-        flow = _fresh(sources.get(probe.flow_entity), now)
-        back = _fresh(sources.get(probe.return_entity), now)
+        flow, flow_problem = self._probe_value(probe.flow_entity, "Vorlauf", now)
+        back, back_problem = self._probe_value(probe.return_entity, "Rücklauf", now)
+        if probe.room_id != room.entity_id:
+            probe_problem: str | None = f"Das Fühlerpaar hängt nicht am Heizkörper von {room.name}."
+        elif flow_problem is not None or back_problem is not None:
+            probe_problem = flow_problem or back_problem
+        elif self._swap.swapped and flow is not None and back is not None:
+            probe_problem = swapped_text(flow, back)
+        else:
+            probe_problem = None
         thermostat = self._thermostats.get(trv)
         may_write = (
             settings.operating_mode is OperatingMode.LIVE
@@ -1119,7 +1193,7 @@ class RoomControl:
             return_c=back,
             window_open=self._hems.window_open(room.entity_id),
             limits=self._gate.limits(trv),
-            probe_here=probe.room_id == room.entity_id and flow is not None and back is not None,
+            probe_problem=probe_problem,
             may_write=may_write,
             rated_w=surface.rated_w if surface is not None else None,
             rated_basis=surface.rated_basis.value if surface is not None else "75/65",
@@ -1328,7 +1402,7 @@ class RoomControl:
             if entity
             for report in [list(self._probe_reports.get(entity, ()))]
         ]
-        intervals = [
+        gaps = [
             (later[0] - earlier[0]).total_seconds() / 60
             for items in reports
             for earlier, later in itertools.pairwise(items)
@@ -1349,8 +1423,10 @@ class RoomControl:
             return_c=sources.number(probe.return_entity),
             flow_age_min=age(probe.flow_entity),
             return_age_min=age(probe.return_entity),
-            report_minutes=round(statistics.median(intervals), 1) if intervals else None,
+            longest_gap_min=round(max(gaps), 1) if gaps else None,
             resolution_k=round(min(changes), 3) if changes else None,
+            valid_hours=PROBE_VALID.total_seconds() / 3600,
+            swapped=self._swap.swapped,
         )
 
     def _source_changed(self, entity_id: str, state: EntityState | None) -> None:
@@ -1362,7 +1438,11 @@ class RoomControl:
         except ValueError:
             return
         reports = self._probe_reports.setdefault(entity_id, deque(maxlen=PROBE_KEEP))
-        reports.append((state.last_reported or self._clock(), value))
+        reported = state.last_reported or self._clock()
+        if reports and reports[-1][0] == reported:
+            # The same report again (read again after a reconnect), not a new one.
+            return
+        reports.append((reported, value))
 
     def _flow_now(self, zone_id: str | None, settings: Settings) -> float | None:
         if zone_id is None:
@@ -1471,15 +1551,6 @@ def _no_help(state: _RoomState) -> bool:
 
 def _rested(state: _RoomState, now: datetime) -> bool:
     return state.rest_until is None or now >= state.rest_until
-
-
-def _fresh(state: EntityState | None, now: datetime) -> float | None:
-    if state is None or state.last_reported is None or now - state.last_reported > PROBE_FRESH:
-        return None
-    try:
-        return float(state.state)
-    except ValueError:
-        return None
 
 
 def _slope(series: Sequence[tuple[datetime, float]]) -> float | None:
