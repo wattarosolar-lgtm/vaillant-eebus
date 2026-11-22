@@ -429,13 +429,18 @@ Stunde lang nur Fenster, Sicherheit, Rückweg und Rückfall. Die Seite zeigt Bef
 **Testlauf** (je Thermostat, Pflicht vor „Steuern“): Er misst, wie das Thermostat auf seinen Sollwert reagiert.
 
 1. Das **Fühlerpaar** an Vor- und Rücklauf des Heizkörpers befestigen (Anlegefühler, gut anliegend, mit Isolierung
-   darüber; gut sind eine Meldung mindestens alle 1–2 Minuten und 0,1 K Auflösung) und unter „Fühlerpaar“ den
-   Vorlauf- und den Rücklauf-Fühler wählen und den Raum eintragen. Die Seite zeigt, wie oft und in welchen Schritten
-   die Fühler melden.
+   darüber; gut ist eine Auflösung von 0,1–0,2 K). Der **Vorlauf** ist das Rohr am Thermostatventil. Unter
+   „Fühlerpaar“ den Vorlauf- und den Rücklauf-Fühler wählen und den Raum eintragen. Fühler, die nur bei einer
+   Änderung melden, sind in Ordnung: Ein Wert gilt bis **2 Stunden** nach seiner Meldung. Die Seite zeigt je Fühler,
+   wann er zuletzt gemeldet hat, die längste Meldepause und die kleinste Änderung. Ist der Rücklauf bei warmem Wasser
+   am offenen Ventil 15 Minuten lang wärmer als der Vorlauf, steht dort „vertauscht?“ mit dem Knopf **„Vorlauf und
+   Rücklauf tauschen“**; so lange startet kein Testlauf.
 2. Am Raum **Testlauf für heute Nacht vormerken** (nur im Live-Betrieb).
 3. Ab 22 Uhr startet er, sobald der Raum zwischen 0,5 K unter und 0,2 K über seinem Soll liegt, kein Fenster offen
    ist und am Heizkörper warmes Wasser ankommt – spätestens um 1 Uhr, sonst in der nächsten Nacht (höchstens drei;
-   eine Nacht, deren Startzeit beim Vormerken schon vorbei war, zählt nicht).
+   eine Nacht, deren Startzeit beim Vormerken schon vorbei war, zählt nicht). Worauf er wartet, steht beim Raum
+   („Wartet: …“) und – jeder neue Grund einmal je Nacht – im Protokoll; um 1 Uhr folgt „heute Nacht nicht
+   gestartet: zuletzt …“.
 4. Die App stellt das Thermostat auf seine eigene Temperatur, dann in 0,5-K-Schritten höher, bis das Ventil offen
    ist, danach bis 1 K unter die Temperatur am Thermostat und zurück auf den Wert von vorher – spätestens um 5 Uhr.
    Jede Stufe dauert 20–40 Minuten mit warmem Wasser, bis Ventil und Rücklauf ruhig stehen. Höchstens 16 Befehle

@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.4.0)
+# Briefing: Vaillant EEBUS (Stand v1.4.1)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -26,6 +26,9 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
   Update). **1.4.0** bringt die **Raumregelung**: Die App stellt die Heizkörperthermostate (Punkt 1 von Stufe 1,
   vom Nutzer am 21.11.2026 vor die Zonen gezogen; die Zonen kommen mit 1.5.0). Einziger neuer Schreibweg ist
   `climate.set_temperature` auf den Thermostaten der Räume, über `RoomGate` in `write_gate.py` (Abschnitt 5f).
+  1.4.1 korrigiert den Befund 1 der Abnahme von 1.4.0: Der Testlauf startete mit Fühlern, die nur bei einer
+  Änderung melden, nie (Werte galten 15 min, jetzt 2 h); vertauschte Fühler werden erkannt, Wartegründe stehen im
+  Protokoll.
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a; Thermostate Abschnitt 5f). Nach der
   Installation läuft sie im Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -41,7 +44,7 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
 | 7 | Einstellungs-/Protokollseite fertig, Verlauf 24 h, Absicherung der Bridge, Doku, Release | umgesetzt (1.0.0), an der Anlage abgenommen (21.10.2026) |
 | 8 | Energiemanagement: Planer für Warmwasser und Zonen, Tarife, PV-Überschuss, Wetter, Stufen Aus/Vorschau/Steuern | umgesetzt (1.1.0), Abnahme an der Anlage offen (erst Vorschau, dann Steuern) |
 | 9 | Anbindung myVAILLANT (Entitäten der Integration) neben EEBUS, wählbar; Planer im Auto-Betrieb über Quick-Veto | umgesetzt (1.2.0), an der Anlage abgenommen (1.2.1) |
-| Stufe 1 | Energiemanagement neu: 1.3.0 beobachten, lernen, planen (Vorschau); 1.4.0 Thermostate (Raumregelung, vorgezogen); 1.5.0 Zonen | 1.3.0/1.3.1 veröffentlicht, Abnahme an der Anlage läuft; 1.4.0 umgesetzt (Branch `feat/thermostate`, lokal), Prüfung (Aufwand max) und Abnahme offen, Steuern zuerst nur im Bad |
+| Stufe 1 | Energiemanagement neu: 1.3.0 beobachten, lernen, planen (Vorschau); 1.4.0 Thermostate (Raumregelung, vorgezogen); 1.5.0 Zonen | 1.3.0/1.3.1 veröffentlicht, Abnahme an der Anlage läuft; 1.4.0 veröffentlicht (21.11.2026), Abnahme läuft (`fehlerliste-abnahme-1.4.0.md`), 1.4.1 mit deren Befund 1; Prüfung (Aufwand max) offen, Steuern zuerst nur im Bad |
 
 ## 2. Repositories
 
@@ -388,8 +391,8 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
 | `supply.py` | Wärmeangebot je Heizkörper-Zone: Wärmepumpe (> 50 W und Vorlauf bzw. Puffer ≥ Raum + 8 K), Puffer (≥ Raum + 5 K und fällt ≥ 2 K/h, Restzeit bis zur gelernten Neustart-Temperatur, Start 28 °C), keins, unklar (Daten > 15 min, oder WP läuft ohne Vorlauf und Puffer) |
 | `controller.py` | `decide()` (rein): Fenster → kleinster Wert; Raum > Soll + Band + 0,5 K → Soll − 0,5 K; Spender → untere Komfortgrenze (+ Korrektur); sonst Raum-Soll (Vorheizen nach gelernter Aufheizzeit, höchstens 3 h, sonst 1 h) + Korrektur (0,5 K nach 0,2 K über 30 min, Ventil-Regeln ≥ 90 %/≤ 5 %, nicht ohne Wärme, Pause nach Fenster und Sollwechsel) bzw. fester Ausgleich (Raum am Thermostat gemessen); mit gelernter Kennlinie „Kaskade“ (Bedarfsöffnung + 30 %/K − 10 %/(K/h) → nächste erreichte Stufe → Abstand zur Temperatur am Thermostat; Hysterese Totzone + 0,25 K gegen den zuletzt gesetzten Wert); weicht der Soll vom zuletzt gesetzten ab → Handänderung (`MANUAL`); beim Übergang in „zu warm“ einmal Korrektur − 0,5 K (`Correction.too_warm`) |
 | `curve.py` | Ventilverhalten aus Testläufen: Punkte (Abstand, Öffnung, auf/ab, VL/RL, Wärme), vollständig = ganz offen und wieder zu (untere Grenze erreicht oder fallende Stufe ≤ 5 %); `offset_for()`, `levels()`; höchstens 5 Läufe je Thermostat |
-| `testrun.py` | Testlauf als reine Schrittfunktion `advance()` (jede Minute): vorgemerkt → Start 22–1 Uhr bei Raum −0,5…+0,2 K um Soll, kein Fenster, warmes Wasser am Heizkörper (Fühlerpaar VL ≥ Raum + 5 K), Fühlerpaar am Raum und frisch; Stufen 20–40 min mit Wärme bis Ventil und Rücklauf 10 min ruhig; hoch (+1 K solange nichts öffnet, dann +0,5 K) bis ≥ 90 %, runter bis 1 K unter Temperatur am Thermostat (Schritt 1 K, wenn das Budget sonst nicht reicht), zurück; Ende spätestens 5 Uhr; Abbruch Raum > Soll + 1 K, Fenster, 30 min keine Ventilstellung oder kein warmes Wasser; nach 3 Nächten ohne Start „nicht möglich“ (eine Nacht, deren Startfenster vor dem Vormerken begann, zählt nicht) |
-| `service.py` | `RoomControl`: Takt nach den Proben (`tick`), jede Minute (`minute`: Lebenszeichen, Neben-Entitäten alle 15 min, Ventilbewegungen, Testlauf); Umverteilen je Heizkörper-Zone (kalter Raum und Spender in derselben wirksamen Stufe, nach 30 min Wärme, Prüfung nach 45 min, Spender höchstens 2 h, danach 1 h Ruhe, „hilft nicht“ nach 3 Fehlschlägen); Vorlauf-Berater für `hems`; Empfehlung Voreinstellung (7 Tage Proben); Stufen (`set_stage` ändert nur die Stufe am aktuellen Raum), Fühlerpaar, Testlauf mit Rückweg (`RESTORE`; geht er nicht hinaus → `release`; nach einem Neustart mitten im Lauf erneut versucht), Rückfall (`release`, auch für verwaiste Thermostate), `before_rooms_change` vor `PUT api/settings`/`PUT api/rooms/{id}`, Vorlage der Notfall-Automation, Status; im Bad gilt ein Fenster 30 min nach eigenem Befehl oder Ventilschluss (> 30 % → ≤ 5 %) nicht; `/data/rooms.json` (Korrekturen, Umverteil-Statistik, Kennlinien, Testlauf) |
+| `testrun.py` | Testlauf als reine Schrittfunktion `advance()` (jede Minute): vorgemerkt → Start 22–1 Uhr bei Raum −0,5…+0,2 K um Soll, kein Fenster, warmes Wasser am Heizkörper (Fühlerpaar VL ≥ Raum + 5 K), Fühlerpaar am Raum, Werte höchstens 2 h nach der Meldung (`PROBE_VALID`, `probe_reading`; 1.4.1, vorher 15 min) und nicht vertauscht (`SwapWatch`: RL ≥ VL + 1 K für 15 min bei Ventil ≥ 20 % und warmem Wasser); Stufen 20–40 min mit Wärme bis Ventil und Rücklauf 10 min ruhig; hoch (+1 K solange nichts öffnet, dann +0,5 K) bis ≥ 90 %, runter bis 1 K unter Temperatur am Thermostat (Schritt 1 K, wenn das Budget sonst nicht reicht), zurück; Ende spätestens 5 Uhr; Abbruch Raum > Soll + 1 K, Fenster, 30 min keine Ventilstellung oder kein warmes Wasser; nach 3 Nächten ohne Start „nicht möglich“ (eine Nacht, deren Startfenster vor dem Vormerken begann, zählt nicht) |
+| `service.py` | `RoomControl`: Takt nach den Proben (`tick`), jede Minute (`minute`: Lebenszeichen, Neben-Entitäten alle 15 min, Ventilbewegungen, Testlauf); Umverteilen je Heizkörper-Zone (kalter Raum und Spender in derselben wirksamen Stufe, nach 30 min Wärme, Prüfung nach 45 min, Spender höchstens 2 h, danach 1 h Ruhe, „hilft nicht“ nach 3 Fehlschlägen); Vorlauf-Berater für `hems`; Empfehlung Voreinstellung (7 Tage Proben); Stufen (`set_stage` ändert nur die Stufe am aktuellen Raum), Fühlerpaar (vertauscht? jede Minute per `SwapWatch`, im Protokoll als Problem; neue Wahl beurteilt neu), Wartegründe des vorgemerkten Laufs im Protokoll (jeder Grund einmal je Nacht, um 1 Uhr „heute Nacht nicht gestartet“, Abbruch von Hand mit letztem Grund; 1.4.1), Testlauf mit Rückweg (`RESTORE`; geht er nicht hinaus → `release`; nach einem Neustart mitten im Lauf erneut versucht), Rückfall (`release`, auch für verwaiste Thermostate), `before_rooms_change` vor `PUT api/settings`/`PUT api/rooms/{id}`, Vorlage der Notfall-Automation, Status; im Bad gilt ein Fenster 30 min nach eigenem Befehl oder Ventilschluss (> 30 % → ≤ 5 %) nicht; `/data/rooms.json` (Korrekturen, Umverteil-Statistik, Kennlinien, Testlauf) |
 
 - **Stufen:** `room_control.mode` (Aus/Beobachten/Vorschau/Steuern) und `RoomDetails.stage` (Beobachten/Vorschau/
   Steuern), wirksam die kleinere. Steuern für alle: nur live, `confirm`; je Raum zusätzlich ein vollständiger
@@ -410,7 +413,7 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
   IEEE-Adresse wie das Thermostat (Bad mit `sensor.…_local_temperature`; Befund der Abnahme 1.3.0) → nicht im
   Zonen-Mittelwert, Fenster ohne Feuchte, fester Ausgleich statt Korrektur.
 - **Oberfläche:** `Rooms.svelte` mit `RoomControlCard.svelte` (Schalter, Lebenszeichen, Notfall-Automation zum
-  Kopieren, Fühlerpaar mit Meldeabstand/Auflösung) und `ThermostatPanel.svelte` (Stufe, Ziel/Ist, Zustand, Befehle
+  Kopieren, Fühlerpaar mit letzter Meldung je Fühler, längster Meldepause, Auflösung, Hinweis „vertauscht?“ und Knopf zum Tauschen) und `ThermostatPanel.svelte` (Stufe, Ziel/Ist, Zustand, Befehle
   und Bewegungen heute, Warnungen, Testlauf, Ventilverhalten); `RoomEditor.svelte` mit Korrektur-Grenze bzw.
   Ausgleich, Totzone, Abstand, Befehle je Tag.
 
@@ -442,7 +445,8 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
 
 ## 7. Tests
 
-- Python: 397 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.0
+- Python: 406 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.1
+  `test_testrun_probe.py` mit der echten Nacht 21./22.11. im Bad; neu in 1.4.0
   `test_room_gate.py` und `test_rooms.py`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`, mit `add_myvaillant()`: Entitäten und
   Dienste der myVAILLANT-Integration wie im Quellcode der Integration). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
@@ -524,7 +528,10 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
     gerechnet (die Seite zeigt sie so lange). Nachtabsenkung und Blockbetrieb über die Thermostate kommen erst mit den
     Zonen (1.5.0). Wunsch W1 der Abnahme (Fremdwärme-Phasen) ist nicht umgesetzt. An der Anlage ungeprüft: die echten
     Namen der Neben-Entitäten (nach Zigbee2MQTT-Doku angenommen, `child_lock` als `lock`/`switch`), Rückmeldung und
-    Verhalten der W600 beim Testlauf, Meldeabstand des Fühlerpaars.
+    Verhalten der W600 beim Testlauf. Fühlerpaar beim Nutzer (Abnahme 1.4.0): Sonoff mit Sonde, Meldung nur bei
+    0,2 K Änderung, Pausen bis 90 min; Home Assistant zeigt unveränderte Meldungen nicht (`last_reported` =
+    `last_changed`), daher gilt ein Wert 2 h. Ein Fühler, der in dieser Zeit ausfällt, zählt so lange mit seinem
+    letzten Wert, außer Zigbee2MQTT meldet ihn „nicht verfügbar“.
 
 ## 10. Wo eine Prüfung am meisten bringt
 

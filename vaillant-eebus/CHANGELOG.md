@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.4.1
+
+**Der Testlauf startet auch mit Fühlern, die nur bei einer Änderung melden.** In 1.4.0 galt ein Wert des
+Fühlerpaars nur 15 Minuten. Viele Anlegefühler (etwa die wasserdichten Sonoff-Fühler mit Sonde) melden aber nur, wenn
+sich die Temperatur ändert; steht sie still, kommt eine Stunde lang nichts. Der Testlauf wartete dann mit „Das
+Fühlerpaar hängt nicht an diesem Heizkörper oder meldet nichts“ und startete nie; ein gestarteter Lauf wäre nach
+30 Minuten mit „Kein warmes Wasser“ abgebrochen.
+
+- Ein Wert des Fühlerpaars gilt jetzt **bis 2 Stunden** nach seiner Meldung, vor dem Start und während des Laufs.
+  Meldet ein Fühler „nicht verfügbar“, fehlt er wie bisher sofort.
+- **Vertauschte Fühler:** Ist der Rücklauf 15 Minuten lang mindestens 1 K wärmer als der Vorlauf, während warmes
+  Wasser am offenen Ventil (ab 20 %) ankommt, zeigt die Karte „Fühlerpaar“ einen Hinweis und den Knopf **„Vorlauf und
+  Rücklauf tauschen“**; im Protokoll steht es als Problem. Solange startet kein Testlauf, weil seine Messwerte falsch
+  wären.
+- **Wartegründe im Protokoll:** Wartet ein vorgemerkter Lauf zwischen 22 und 1 Uhr, steht jeder neue Grund einmal je
+  Nacht im Protokoll („Testlauf Bad wartet: …“), und um 1 Uhr „heute Nacht nicht gestartet: zuletzt …“. Ein Abbruch
+  von Hand nennt den letzten Wartegrund mit.
+- Die Wartegründe sind genauer: Fühlerpaar an einem anderen Heizkörper, Vorlauf- oder Rücklauf-Fühler seit über 2 h
+  ohne Meldung, Fühler nicht verfügbar, Fühler vertauscht.
+- Die Karte „Fühlerpaar“ zeigt je Fühler, wann er zuletzt gemeldet hat, und die längste Meldepause (statt „meldet
+  etwa alle … min“, das nur die Zeit einer Änderung zeigte).
+
 ## 1.4.0
 
 **Raumregelung: die App stellt die Heizkörperthermostate** (Stufe 1, Punkt 1; vorgezogen vor die Zonen, die jetzt
