@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ApiError, getAutomation, saveProbe, setRoomControl } from '../lib/api';
-  import { maybe, moment } from '../lib/format';
+  import { duration, maybe, moment } from '../lib/format';
   import { ROOM_CONTROL_HINTS, ROOM_CONTROL_LABELS } from '../lib/texts';
   import type { RoomControlMode, RoomControlStatus, RoomsPage } from '../lib/types';
   import EntityPicker from './EntityPicker.svelte';
@@ -71,6 +71,21 @@
     } catch (err) {
       probeError = err instanceof ApiError ? err.message : 'Das Fühlerpaar konnte nicht gespeichert werden.';
     }
+  }
+
+  async function swapProbe(): Promise<void> {
+    probeError = null;
+    try {
+      onChange(await saveProbe(control.probe.return_entity, control.probe.flow_entity, control.probe.room_id));
+    } catch (err) {
+      probeError = err instanceof ApiError ? err.message : 'Das Fühlerpaar konnte nicht getauscht werden.';
+    }
+  }
+
+  /** "26,4 °C · vor 12 min" for a sensor of the pair. */
+  function reading(celsius: number | null, ageMin: number | null): string {
+    const value = maybe(celsius, 1, '°C');
+    return ageMin === null ? value : `${value} · gemeldet vor ${duration(ageMin)}`;
   }
 
   async function showAutomation(): Promise<void> {
@@ -157,23 +172,42 @@
   </details>
 
   <details>
-    <summary>Fühlerpaar für die Testläufe</summary>
+    <summary>Fühlerpaar für die Testläufe{control.probe.swapped ? ' – vertauscht?' : ''}</summary>
     <div class="details-body">
       <p class="hint">
         Ein Testlauf misst nachts ({control.test_start}–{control.test_end} Uhr, Start spätestens
         {control.test_latest_start} Uhr), wie das Thermostat auf seinen Sollwert reagiert. Dafür hängt ein Paar
-        Anlegefühler an Vor- und Rücklauf des Heizkörpers (gut anliegend, mit Isolierung darüber). Gut sind eine Meldung
-        mindestens alle 1–2 Minuten und eine Auflösung von 0,1 K.
+        Anlegefühler an Vor- und Rücklauf des Heizkörpers (gut anliegend, mit Isolierung darüber). Der Vorlauf ist das
+        Rohr am Thermostatventil. Fühler, die nur bei einer Änderung melden, sind in Ordnung: Ein Wert gilt bis
+        {maybe(control.probe.valid_hours, 0, 'h')} nach seiner Meldung. Gut ist eine Auflösung von 0,1–0,2 K.
       </p>
+      {#if control.probe.swapped}
+        <p class="warn" role="alert">
+          Der Vorlauf ist kälter als der Rücklauf, obwohl warmes Wasser am offenen Ventil ankommt: Sind die Fühler
+          vertauscht oder liegt der Vorlauf-Fühler schlecht an? Solange startet kein Testlauf.
+        </p>
+        {#if control.probe.flow_entity && control.probe.return_entity}
+          <div>
+            <button type="button" class="button small" onclick={() => void swapProbe()}>Vorlauf und Rücklauf tauschen</button>
+          </div>
+        {/if}
+      {/if}
+      {#if probeError && !editingProbe}
+        <p class="error" role="alert">{probeError}</p>
+      {/if}
       <dl class="grid-facts">
         <div>
           <dt>Vorlauf</dt>
-          <dd>{maybe(control.probe.flow_c, 1, '°C')} <span class="hint">{control.probe.flow_entity ?? 'nicht gewählt'}</span></dd>
+          <dd>
+            {reading(control.probe.flow_c, control.probe.flow_age_min)}
+            <span class="hint">{control.probe.flow_entity ?? 'nicht gewählt'}</span>
+          </dd>
         </div>
         <div>
           <dt>Rücklauf</dt>
           <dd>
-            {maybe(control.probe.return_c, 1, '°C')} <span class="hint">{control.probe.return_entity ?? 'nicht gewählt'}</span>
+            {reading(control.probe.return_c, control.probe.return_age_min)}
+            <span class="hint">{control.probe.return_entity ?? 'nicht gewählt'}</span>
           </dd>
         </div>
         <div>
@@ -184,8 +218,8 @@
           </dd>
         </div>
         <div>
-          <dt>Meldet etwa alle / kleinste Änderung</dt>
-          <dd>{maybe(control.probe.report_minutes, 1, 'min')} / {maybe(control.probe.resolution_k, 2, 'K')}</dd>
+          <dt>Längste Meldepause / kleinste Änderung</dt>
+          <dd>{duration(control.probe.longest_gap_min)} / {maybe(control.probe.resolution_k, 2, 'K')}</dd>
         </div>
       </dl>
       {#if editingProbe}
@@ -350,6 +384,11 @@
   .problems {
     margin: 0;
     padding-left: 20px;
+    color: var(--warn-text);
+    font-size: 14px;
+  }
+
+  .warn {
     color: var(--warn-text);
     font-size: 14px;
   }

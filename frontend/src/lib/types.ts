@@ -632,8 +632,13 @@ export interface ProbeStatus {
   return_c: number | null;
   flow_age_min: number | null;
   return_age_min: number | null;
-  report_minutes: number | null;
+  /** Longest silence between two reports since the app started. */
+  longest_gap_min: number | null;
   resolution_k: number | null;
+  /** A reading counts this long after its report. */
+  valid_hours: number;
+  /** The return was warmer than the flow with warm water at the open valve. */
+  swapped: boolean;
 }
 
 export interface TestStatus {
