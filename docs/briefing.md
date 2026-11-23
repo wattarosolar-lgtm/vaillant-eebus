@@ -266,7 +266,7 @@ Nachtabsenkung). Der Planer aus 1.1/1.2 (Warmwasser/Zonen nach Preis und PV, `pl
 
 | Modul (`hems/`) | Aufgabe |
 |---|---|
-| `config.py` | `HemsSettings`: Stufe (`off`/`preview`; `control` ist für 1.5.0 vorgesehen und wird beim Laden zu `preview`, die API antwortet 409), Wetter, Lernquellen, Haus (Normaußentemperatur, Heizlast), Zonen (`ZoneConfig`: Art Fußbodenheizung/Heizkörper, Vorlauf-Entitäten, Auslegung, Band), Quick-Veto-Grenzen und Cloud-Budget (erst 1.4.0), Nachtfenster, Verluste, Ziel Starts, Heizgrenze, Blockbetrieb, Zone-1-Schwelle; ungültige Werte einzeln verworfen |
+| `config.py` | `HemsSettings`: Stufe (`off`/`preview`/`control`; `control` aus Einstellungen vor 1.5.0 – ohne `zone1_mode` – wird beim Laden zu `preview`), Stufen je Funktion (`Function`: `zone1` F1 bis Steuern, `flow` F2 bis Vorschau bis nach 1.4.2; `FUNCTION_MODES`, wirksam ist `effective()` = die kleinere), Wetter, Lernquellen, Haus (Normaußentemperatur, Heizlast), Zonen (`ZoneConfig`: Art Fußbodenheizung/Heizkörper, Vorlauf-Entitäten, Auslegung, Band), Quick-Veto-Grenzen und Cloud-Budget, Nachtfenster, Verluste, Ziel Starts, Heizgrenze, Blockbetrieb, Zone-1-Schwelle; ungültige Werte einzeln verworfen |
 | `sources.py` | `HemsSources` (HA-Listener): Raum-, Thermostat-, Ventil-, Feuchte-, Vorlauf-, Puffer- und Wärmesensor-Zustände; meldet Änderungen (Fenster) und die Verbindung (neu planen) |
 | `forecast.py` | Open-Meteo `/v1/dwd-icon` (stündlich, `past_days=7`, Koordinaten auf 2 Stellen), höchstens stündlich, nach Fehler 10 min, alte Prognose bis 6 h; Rückfall `weather.get_forecasts`; Eichung (Median gemessen − Prognose je lokaler Stunde, ab 3 Tagen, ±5 K); Day-ahead-Werte in `/data/forecast_check.json` → mittlerer Fehler |
 | `statistics.py` | `StatisticsHistory`: HA-Langzeitstatistik (`ha_client.statistics()`, WebSocket `recorder/statistics_during_period`, nur lesen) für 400 Tage in Monatsstücken, danach nur Neues; `daily_values()` (lokale Tage) |
@@ -277,11 +277,15 @@ Nachtabsenkung). Der Planer aus 1.1/1.2 (Warmwasser/Zonen nach Preis und PV, `pl
 | `defrost.py` | Abtauraten je Außenband (Startwerte aus den Felddaten 09.–19.11.2026, 10 Laufstunden Gewicht), Feuchtefaktor, Risiko je Stunde |
 | `frost.py` | Frostschutz: < 4 °C länger als 4 h, auch für die Prognose-Stunden |
 | `windows.py` | Fenster (1.4.3, Teil B): Feuchte gegen die letzte Meldung (≤ 90 min, Schwelle 0,2 × (innen − außen) g/m³, 0,5–1,0, unter 1,5 g/m³ Unterschied zählt die Feuchte nicht), Temperatur (−0,5 K/15 min, −0,8 K/30 min bei Raum − außen ≥ 8 K), Thermostat-Fühler (−1 K gegen das Maximum der letzten 8 min, Raumsensor nicht gestiegen; ohne Raumsensor 1,5 K; Sperre 30 min nach Befehl/Ventilschluss), Schließen (+0,3 g/m³, +0,2 K, Thermostat +0,5 K, frühestens 3 min, spätestens 30 min); Fensterkontakt je Raum (`window_entity`) hat Vorrang, > 10 min stumm → Regeln; Ereignisse rufen die Raumregelung sofort (`on_window`) |
-| `rules.py` | `make_plan()` (reine Funktion): 48 h je Zone und Stunde, Verschiebung im Band und Schritt, Soll je Raum, Gründe: warmer Tag, vorausschauend (Verzögerung je Zonenart), Abtaurisiko (höchstens 3 h, vorher speichern in der Fußbodenheizung), Nachtabsenkung (nur wenn es sich lohnt, Feuchteschutz ab 65 %, rechtzeitig wieder auf), Blockbetrieb, Vorlauf-Verschiebung, Frostschutz |
+| `rules.py` | `make_plan()` (reine Funktion): 48 h je Zone und Stunde, Verschiebung im Band und Schritt, je Stunde mit ihren Teilen (`ZoneHour.parts`, `Part`: flow, ahead, warm, defrost, store, night; `shift_of()` summiert nur gewählte Teile), Soll je Raum, Gründe: warmer Tag, vorausschauend (Verzögerung je Zonenart), Abtaurisiko (höchstens 3 h, vorher speichern in der Fußbodenheizung), Nachtabsenkung (nur wenn es sich lohnt, Feuchteschutz ab 65 %, rechtzeitig wieder auf), Blockbetrieb, Vorlauf-Verschiebung, Frostschutz |
+| `executor.py` | `ZoneExecutor` (1.5.0, `plan-1.5.0-zonen.md` F0/F1): einziger Weg des Pakets zur Schreibsperre (`Source.PLANNER`); jeder Durchlauf (nach Plan und jedem Zustand, sonst jede Minute) erkennt fremde Änderungen (Quick-Veto erscheint/ändert sich/endet vor seiner Zeit, Betriebsart nicht von ihm; UI-Befehle über `gate.on_sent`) → Ruhe bis zur nächsten geplanten Änderung, höchstens 3 h; Quick-Veto aus den Teilen der Funktionen auf Steuern (`PART_FUNCTION`: flow/ahead/warm → F2; defrost/store/night noch nicht) = Programmwert (gemerkt, nicht während des Einschwingens) + Verschiebung, Dauer bis zur nächsten Änderung 1–4 h (ganze Stunden), Erneuern 10 min vor Ende, Abstand `min_interval_min`, Ende sofort bei 0; Vorschau-Spur simuliert und protokolliert „würde“ (`submit(preview=True)`), zählt `count_would`; F1 Zone 1 Aus/Auto nach `HemsService.zone1_would()` (Aus 5 min nach Auto, nicht bei Frost/Tagesgrenze), Automation erkannt (2 fremde Wechsel im Takt der WP) → hält an bis `resume_zone1`; Rückfall bei Stufenwechsel, `release()` vor Demo (api `to_demo`) und beim Stopp (15 s); Lebenszeichen `sensor.vaillant_eebus_zones_lifesign` (immer, Attribut `ausgeschaltet`), Vorlage `automation()`; Stand in `/data/zone_control.json` |
 | `service.py` | `HemsService`: beobachtet jeden Zustand (Takte, Abtauen, Frostschutz, Zone-1-Logik „würde“), Proben alle 5 min (Fenster, Versorgung, Vorlauf „würde“ mit Abstand), lernt (Statistik alle 6 h, Räume stündlich), plant alle 15 min und nach dem Verbinden mit HA; Status, Plan mit Rückblick (`/data/plan_history.json`), Räume, CSV, Sensoren, Protokoll (Kategorien `hems`, `rooms`); Hinweis auf eine offene Verschiebung in einer alten `/data/hems.json` |
 
-- **Kein Schreibweg:** Das Paket importiert weder `write_gate` noch den Bridge-Client noch `rooms` und ruft weder
-  `submit` noch `send_command`/`call_device_service`/`set_state` auf (Strukturtests). Seit 1.4.0 ruft `sample()` nach
+- **Schreibweg nur über den Executor (1.5.0):** Außer `executor.py` importiert kein Modul des Pakets `write_gate`;
+  keines den Bridge-Client oder `rooms`; `submit` ruft nur der Executor, immer mit `Source.PLANNER` (Strukturtests).
+  Die Schreibsperre lässt vom Planer nur `SetZoneOverride`, `EndZoneOverride` und `SetZoneMode` off/auto zu, nur
+  mit myVAILLANT, und zählt jeden myVAILLANT-Befehl im Cloud-Budget (`cloud_budget.py`, `/data/cloud_budget.json`,
+  Tag lokal; Warnung 80 %, an der Grenze nur `returns_control()`). `HemsService.on_update` weckt den Executor. Seit 1.4.0 ruft `sample()` nach
   den Proben und der Versorgung die Raumregelung auf (`on_sampled`), und ein „Berater“ der Raumregelung
   (`set_flow_advisor`) darf den Vorlauf-Hinweis einer Heizkörper-Zone auf „halten“ setzen, solange umverteilt wird;
   die Proben enthalten zusätzlich die Temperatur am Thermostat. „Würde“-Fenster und -Versorgung protokolliert das
@@ -291,11 +295,14 @@ Nachtabsenkung). Der Planer aus 1.1/1.2 (Warmwasser/Zonen nach Preis und PV, `pl
   Thermostat, Ventil, Feuchte, Raum-Soll, Zeitplan, Komfortband, Verluste, Drosseln, Notfallwert. `PUT api/settings`
   behält sie; `PUT api/rooms/{entity_id}` ändert sie. Ein Raum kann ein Thermostat (`climate.*`) als Temperatur
   haben (`current_temperature`); er zählt nicht im Zonen-Mittelwert.
-- **API:** `GET api/hems`, `PUT api/hems/settings`, `POST api/hems/mode` (`control` → 409), `GET api/hems/plan`,
+- **API:** `GET api/hems` (mit `functions` und `control`, dem Stand des Executors), `PUT api/hems/settings`,
+  `POST api/hems/mode`, `POST api/hems/function` (F2 `control` → 409), `GET api/hems/automation`,
+  `POST api/zones/{id}/override` (W6: eigene Übersteuerung 1–12 h), `GET api/hems/plan`,
   `GET api/hems/plan/export`, `GET api/rooms`, `PUT api/rooms/{entity_id}`; `api/ha/entities` mit `room`,
   `thermostat`, `humidity`, `percent`.
 - **Oberfläche:** Seiten `Plan.svelte`, `Rooms.svelte` (mit `RoomEditor.svelte`), Karten `HemsOverview.svelte`
-  (Nächste Änderungen, Takten und Abtauen), `HemsSettings.svelte` neu.
+  (Nächste Änderungen, Takten und Abtauen), `HemsSettings.svelte` neu; 1.5.0: `ZoneControlCard.svelte` (Stufen je
+  Funktion, Tagesgrenze, Zonen, letzte Befehle, Vorlage der Automation), `OverrideEnd.svelte` mit „Verlängern“.
 - **Export** (Gruppe `hems`): `hems_status`, `hems_next_change`, `hems_plan`, `starts_today`, `defrosts_today`,
   `binary_sensor.vaillant_eebus_frost_protection`.
 - **Bekannte Vereinfachungen:** Wärme je Zone nur nach Heizlast-Anteil geschätzt (myVAILLANT liefert Wärme nur fürs

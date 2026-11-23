@@ -268,8 +268,8 @@ nie liefert (etwa Vorlauftemperatur oder Energiezähler), bekommen keinen Sensor
 
 Seit Version 1.3.0 ist das Energiemanagement neu: Es lernt Haus und Räume kennen, schaut 48 Stunden voraus und plant
 je Stunde, wie die Zonen verschoben werden sollten – damit der Vorlauf möglichst niedrig bleibt, die Wärmepumpe
-seltener taktet und abtaut und nachts nur dann abgesenkt wird, wenn es sich lohnt. **In Version 1.3.0 beobachtet,
-lernt und plant es für die Zonen nur; an die Wärmepumpe sendet es nichts.** Steuern der Zonen kommt mit 1.5.0.
+seltener taktet und abtaut und nachts nur dann abgesenkt wird, wenn es sich lohnt. **Seit Version 1.5.0 kann es
+die Zonen auch steuern** (Abschnitt „Zonen steuern“): Funktion für Funktion, jede mit eigener Stufe.
 Die Heizkörperthermostate stellt seit 1.4.0 die Raumregelung (eigener Abschnitt).
 Der Planer der Versionen 1.1 und 1.2 (Warmwasser und Zonen nach Strompreis und PV) ist entfallen; PV-Überschuss
 kommt später neu auf dieser Grundlage.
@@ -279,7 +279,9 @@ kommt später neu auf dieser Grundlage.
 - **Aus** (Voreinstellung): Es wird nicht geplant. Takte, Abtauungen und Raumwerte zählt und lernt die App trotzdem.
 - **Vorschau:** Das Energiemanagement plant alle 15 Minuten neu und zeigt, was es tun würde: auf der Übersicht, auf
   der Seite **Plan** und im Protokoll („würde“). Es sendet nichts, auch nicht im Live-Betrieb.
-- **Steuern** ist sichtbar, aber erst ab Version 1.5.0 wählbar.
+- **Steuern:** Was die Funktionen auf „Steuern“ planen, geht an die Wärmepumpe; Funktionen auf „Vorschau“ zeigen
+  weiter nur, was sie tun würden. Wirksam ist je Funktion die kleinere der beiden Stufen. Im Demo-Betrieb und ohne
+  die Anbindung myVAILLANT wird nichts gesendet.
 
 **Was die App beobachtet und lernt:**
 
@@ -358,17 +360,60 @@ kommt später neu auf dieser Grundlage.
   (Ist und Soll, bei myVAILLANT „… circuit_0/1 … flow temperature“) und wie weit das Soll verschoben werden darf
   (Vorgabe: Fußbodenheizung −1 … +2 K, Heizkörper −2 … +2 K).
 - **Nachtabsenkung und Abtauen:** Nachtfenster und erlaubte Verluste (Vorgabe für alle Räume).
-- **Takten und Grenzen:** Ziel Starts je Tag, Blockbetrieb ab, Heizgrenze, Schwelle der Zone-1-Logik und – wirksam
-  ab 1.5.0 – Schritt und Abstand des Quick-Veto sowie die Tagesgrenze für Befehle an die Vaillant-Cloud.
+- **Takten und Grenzen:** Ziel Starts je Tag, Blockbetrieb ab, Heizgrenze, Schwelle der Zone-1-Logik, Schritt und
+  Abstand des Quick-Veto sowie die Tagesgrenze für Befehle an die Vaillant-Cloud.
 
 **Sensoren** (Export-Gruppe „Energiemanagement“): `sensor.vaillant_eebus_hems_status` (Aus, Vorschau),
 `sensor.vaillant_eebus_hems_next_change` (nächste geplante Änderung mit Zeit und Grund),
 `sensor.vaillant_eebus_hems_plan` (Zahl der geplanten Änderungen in 48 Stunden, die Liste als Attribut),
 `sensor.vaillant_eebus_starts_today`, `sensor.vaillant_eebus_defrosts_today` und
-`binary_sensor.vaillant_eebus_frost_protection`.
+`binary_sensor.vaillant_eebus_frost_protection`. Immer gemeldet (unabhängig von den Export-Gruppen):
+`sensor.vaillant_eebus_zones_lifesign`, das Lebenszeichen der Zonensteuerung (Attribute: ausgeschaltete Zonen,
+laufende Quick-Vetos, Befehle heute).
 
-**Was das Energiemanagement nie tut:** Heizkurve, Zeitprogramm, Warmwasser oder Leistungsdeckel ändern. In dieser
-Version ruft es die Schreibsperre gar nicht auf; ein Test der App prüft das. Die Thermostate stellt allein die
+### Zonen steuern
+
+Unter Einstellungen → Energiemanagement → **Zonensteuerung** hat jede Funktion ihre eigene Stufe (Aus, Vorschau,
+Steuern):
+
+- **Zone 1 Aus/Auto:** ersetzt die eigene Automation „Fußbodenheizung aus, solange die Wärmepumpe steht“. Liegt die
+  Leistung der Wärmepumpe länger als eine Minute unter der Schwelle (Vorgabe 30 W), schaltet die App die Zone mit
+  Fußbodenheizung auf **Aus**; steigt sie darüber, sofort wieder auf **Auto**. Nicht bei Frostschutz, nicht wenn ein
+  Raum der Zone unter sein Komfortband fällt, nicht an der Tagesgrenze, und Aus frühestens 5 Minuten nach dem letzten
+  Auto. **Vor „Steuern“ die eigene Automation in Home Assistant abschalten.** Schaltet sie weiter (zweimal am Tag im
+  Takt der Wärmepumpe von außen geschaltet), hält die Funktion an und warnt; nach dem Abschalten die Stufe neu
+  wählen.
+- **Vorlauf und Vorausschau:** die Verschiebung der Zonen aus Ventilstellungen, Vorausschau und warmen Tagen als
+  **Quick-Veto** (Programmwert ± Verschiebung). Das Quick-Veto gilt bis zur nächsten geplanten Änderung, mindestens
+  1 und höchstens 4 Stunden, wird 10 Minuten vor dem Ende erneuert und endet sofort, wenn keine Verschiebung mehr
+  geplant ist. Zwischen zwei Änderungen liegt mindestens der eingestellte Abstand (Vorgabe 30 min). Nur im
+  Auto-Betrieb und nur mit bekanntem Programmwert (in einer Absenkung des Zeitprogramms sendet die App nichts). In
+  dieser Version bis „Vorschau“; „Steuern“ kommt nach Version 1.4.2.
+- Abtaurisiko und Blockbetrieb (geplant für 1.6.0) und die Nachtabsenkung (nach 1.4.2) stehen weiter nur im Plan.
+
+**Änderungen von Hand haben Vorrang:** Ändert jemand Soll, Betriebsart oder Quick-Veto einer Zone – in myVAILLANT,
+am Regler oder in dieser App (auch „Verlängern“) –, lässt der Planer die Zone bis zur nächsten geplanten Änderung in
+Ruhe, höchstens 3 Stunden (Protokoll und Karte zeigen, bis wann). Das Eingreifen des Frostschutzes zählt nicht als
+Änderung von Hand.
+
+**Tagesgrenze für Befehle an myVAILLANT:** Die App zählt jeden Befehl an die Vaillant-Cloud (aus der Oberfläche, vom
+Planer, von Zone 1 Aus/Auto) je Tag. Ab 80 % der Grenze (Vorgabe 100) warnt sie; an der Grenze sendet der Planer an
+diesem Tag nur noch, was die Zonen zurückgibt (Quick-Veto beenden, Zone auf Auto). Änderungen von Hand gehen immer.
+In der Vorschau zählt die App, wie viele Befehle es gewesen wären.
+
+**Zurückgeben:** Geht das Energiemanagement oder eine Funktion von „Steuern“ weg, wechselt die App in den
+Demo-Betrieb oder stoppt sie, beendet sie nur ihre eigenen Quick-Vetos und setzt nur die Zonen, die sie selbst
+ausgeschaltet hat, zurück auf Auto. Stürzt die App ab, endet ein Quick-Veto von selbst (höchstens 4 h). Für eine
+ausgeschaltete Zone gibt es die Automation **„Zonen auf Auto, wenn die App schweigt“** (Karte Zonensteuerung →
+Vorlage anzeigen → kopieren; in Home Assistant unter Automationen → Automation erstellen → ⋮ → „In YAML bearbeiten“
+einfügen): Kommt 15 Minuten kein Lebenszeichen, setzt sie die Zonen, die die App ausgeschaltet hat, auf Auto.
+
+**Eigene Übersteuerung verlängern:** Läuft an einer Zone eine zeitweise Übersteuerung, lässt sie sich auf der
+Übersicht mit gleichem Soll für 1 bis 12 Stunden ab jetzt verlängern.
+
+**Was das Energiemanagement nie tut:** Heizkurve, Zeitprogramm, Warmwasser oder Leistungsdeckel ändern. Es sendet nur
+Quick-Veto, das Ende eines Quick-Veto und die Betriebsarten Aus und Auto einer Zone – über die Schreibsperre, die das
+prüft; ein Test der App stellt sicher, dass nur die Zonensteuerung sie aufruft. Die Thermostate stellt allein die
 Raumregelung über ihren eigenen Teil der Schreibsperre.
 
 **Wechsel von 1.2:** Hatte der alte Planer beim Update noch eine Verschiebung offen, steht ein Hinweis im Protokoll;

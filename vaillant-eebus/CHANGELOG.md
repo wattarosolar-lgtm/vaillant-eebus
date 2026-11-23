@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.5.0 (in Arbeit)
+
+**Zonen steuern, erster Teil: Zone 1 Aus/Auto, Quick-Veto, Tagesgrenze.** Das Energiemanagement kann jetzt an die
+Wärmepumpe senden – Funktion für Funktion, jede mit eigener Stufe (Aus, Vorschau, Steuern) unter Einstellungen →
+Energiemanagement → Zonensteuerung.
+
+- **Stufe „Steuern“** des Energiemanagements ist wählbar. Gespeicherte Einstellungen älterer Versionen mit „Steuern“
+  starten in „Vorschau“.
+- **Zone 1 Aus/Auto** ersetzt die eigene Automation: Zone mit Fußbodenheizung aus, solange die Wärmepumpe steht,
+  sofort Auto, wenn sie läuft; nicht bei Frostschutz, kalten Räumen oder an der Tagesgrenze, Aus frühestens 5 min nach
+  dem letzten Auto. Läuft die alte Automation noch, hält die Funktion an und warnt.
+- **Quick-Veto** für „Vorlauf und Vorausschau“ (Steuern nach 1.4.2): bis zur nächsten geplanten Änderung, 1–4 h,
+  erneuert 10 min vor dem Ende, Abstand zwischen Änderungen, sofortiges Ende ohne Verschiebung.
+- **Änderungen von Hand** (myVAILLANT, Regler, diese App) geben der Zone Ruhe bis zur nächsten geplanten Änderung,
+  höchstens 3 h.
+- **Tagesgrenze** für Befehle an myVAILLANT: jeder Befehl wird gezählt; Warnung ab 80 %, an der Grenze nur noch
+  Zurückgeben. In der Vorschau zählt die App, wie viele Befehle es gewesen wären.
+- **Zurückgeben** bei Stufenwechsel, Demo-Betrieb und Stopp; neues Lebenszeichen
+  `sensor.vaillant_eebus_zones_lifesign` und die Vorlage der Automation „Zonen auf Auto, wenn die App schweigt“.
+- **Übersteuerung verlängern:** an der Zonen-Kachel eine Dauer von 1–12 h wählen und verlängern.
+
 ## 1.4.3
 
 **Schneller lernen, Fenster sicher erkennen, Regelung lernt mit.** Mit 1.4.2 lernte das Thermostat sein
