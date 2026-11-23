@@ -8,7 +8,7 @@ values are as fresh as Home Assistant's last report.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from vaillant_eebus.ha_client import EntityState, HomeAssistantListener
 from vaillant_eebus.settings import SettingsStore
@@ -24,6 +24,8 @@ class HemsSources(HomeAssistantListener):
         self._states: dict[str, EntityState] = {}
         self._listeners: list[Callable[[str, EntityState | None], None]] = []
         self._on_connected: list[Callable[[], None]] = []
+        # Further entities to follow, e.g. the thermostats' last_seen found by the room control.
+        self._extra: list[Callable[[], Iterable[str]]] = []
         self.connected = False
 
     def watched(self) -> frozenset[str]:
@@ -37,7 +39,12 @@ class HemsSources(HomeAssistantListener):
             }
         probe = settings.room_control.probe
         pair = {entity for entity in (probe.flow_entity, probe.return_entity) if entity}
-        return frozenset(rooms) | settings.hems.entities() | pair
+        extra = {entity for provider in self._extra for entity in provider()}
+        return frozenset(rooms) | settings.hems.entities() | pair | extra
+
+    def follow(self, provider: Callable[[], Iterable[str]]) -> None:
+        """Follow these entities too (read at each change of the watched set)."""
+        self._extra.append(provider)
 
     def on_change(self, listener: Callable[[str, EntityState | None], None]) -> None:
         self._listeners.append(listener)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -440,6 +441,38 @@ async def test_a_quiet_event_stream_sends_pings_the_page_can_see(state: StateSer
 
     assert first.startswith("event: state\ndata: ")
     assert pings == ["event: ping\ndata: {}\n\n"] * 2
+    assert update.startswith("event: state\ndata: ")
+
+
+async def test_a_change_on_the_page_rooms_is_announced_and_held_together(state: StateService) -> None:
+    # 1.4.2: the page "Räume" reloads on an event "rooms"; several changes in a row make one event.
+    changes: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+
+    @contextlib.asynccontextmanager
+    async def rooms() -> AsyncIterator[asyncio.Queue[None]]:
+        yield changes
+
+    loop = asyncio.get_running_loop()
+    events = state_events(_OpenClient(), state, _quiet_state, keepalive=5, rooms=rooms, rooms_every=0.3)
+    try:
+        first = await anext(events)
+        changes.put_nowait(None)
+        async with asyncio.timeout(2):
+            one = await anext(events)
+        sent = loop.time()
+        changes.put_nowait(None)
+        async with asyncio.timeout(2):
+            two = await anext(events)
+        gap = loop.time() - sent
+        state.republish()
+        async with asyncio.timeout(2):
+            update = await anext(events)
+    finally:
+        await events.aclose()
+
+    assert first.startswith("event: state\ndata: ")
+    assert one == two == "event: rooms\ndata: {}\n\n"
+    assert gap >= 0.25
     assert update.startswith("event: state\ndata: ")
 
 

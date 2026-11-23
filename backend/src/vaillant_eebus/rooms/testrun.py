@@ -1,4 +1,4 @@
-"""The test run of one thermostat (punkt1-trv-regelung.md 3b, decided with the user 21.11.2026).
+"""The test run of one thermostat (punkt1-trv-regelung.md 3b; steps chosen by the valve since 1.4.2).
 
 Armed by hand for the radiator the probe pair (flow and return pipe sensors)
 is fixed to; it runs at night: it starts from 22:00 as soon as the room is
@@ -7,17 +7,29 @@ water reaches the radiator, at the latest at 1:00 - else it tries the next
 night, three nights at most. Then:
 
 1. setpoint = temperature at the thermostat (starting point);
-2. up in steps of 0.5 K (1 K while the valve has not moved yet) until the valve
-   is at least 90 % open, at most to the thermostat's limit;
-3. down in steps of 0.5 K until 1 K below the temperature at the thermostat;
+2. up until the valve is fully open (at least 85 %, or at least 50 % and 1 K
+   more brought less than 5 points), at most to the thermostat's limit;
+3. down until the valve is closed (at most 5 %), at most to 2 K below the
+   temperature at the thermostat;
 4. back to the setpoint from before the run, at the latest at 5:00.
+
+The steps follow the valve (plan-1.4.2-testlauf-lernt.md C, decided with the
+user 23.11.2026): the first of each direction is 1 K; after a step that moved
+the valve less than 10 % per K the next is 2 K, then 3 K (the largest); after
+one that moved it more than 40 points 0.5 K; else the step that brings the
+valve to about the next mark (25 / 50 / 75 / 85 % up, 50 / 25 / 5 % down). The
+run plans with the time until 5:00: when the steps left do not reach every
+mark, it aims at a later one. A run cut off at 5:00 (or by its budget) after
+the valve was fully open goes on the next night downward only, starting at the
+offset where it was fully open; so does a run armed for a thermostat whose
+valve map already knows "fully open" but not "closed".
 
 A step ends when valve and return temperature stood still for 10 minutes,
 after 20 to 40 minutes with warm water. It stops at once - back to the setpoint
 from before - when the room gets 1 K warmer than its setpoint, a window opens,
 the valve position or the warm water is missing for 30 minutes. At most 16
 commands a night; the way back is not counted (write gate: RESTORE). Complete
-is a run that opened the valve fully and closed it again. A night counts as a
+is a run that had the valve fully open and closed again. A night counts as a
 try only if its start window began after the run was armed.
 
 A reading of the probe pair counts up to two hours after its last report
@@ -32,7 +44,9 @@ sends what it asks for through the write gate.
 
 from __future__ import annotations
 
+import itertools
 import math
+import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -40,7 +54,8 @@ from enum import StrEnum
 from typing import Any
 
 from vaillant_eebus.hems.config import in_window
-from vaillant_eebus.rooms.curve import FULL_OPEN, OPEN_FROM, Step, TestResult
+from vaillant_eebus.rooms.curve import Step, TestResult
+from vaillant_eebus.rooms.learning import CLOSED, FULL_OPEN, PLATEAU_FROM, PLATEAU_GAIN, PLATEAU_K
 from vaillant_eebus.write_gate import TEST_COMMANDS_MAX, ThermostatLimits
 
 STEP_MIN = timedelta(minutes=20)
@@ -53,12 +68,23 @@ ROOM_OVER_K = 1.0
 START_BELOW_K = 0.5
 START_ABOVE_K = 0.2
 MAX_NIGHTS = 3
-STEP_K = 0.5
-JUMP_K = 1.0
-DOWN_BELOW_K = 1.0
+# Steps (1.4.2): the first of a direction, the smallest, the large ones; a step that moved the valve less than
+# WEAK_GAIN per K makes the next one large, one that moved it more than STRONG_CHANGE points makes it small.
+FIRST_STEP_K = 1.0
+SMALL_STEP_K = 0.5
+LARGE_STEP_K = 2.0
+LARGEST_STEP_K = 3.0
+WEAK_GAIN = 10.0
+STRONG_CHANGE = 40.0
+UP_MARKS = (25.0, 50.0, 75.0, FULL_OPEN)
+DOWN_MARKS = (50.0, 25.0, CLOSED)
+# A mark this close counts as reached.
+MARK_MARGIN = 2.0
+# How long a step takes until the run has measured its own.
+STEP_MINUTES = 30.0
+DOWN_BELOW_K = 2.0
 # Warm water at the radiator: its flow at least this much above the room.
 HEAT_K = 5.0
-UP_COMMANDS_MAX = 8
 # A reading of the probe pair counts this long after its last report. Sensors that report only on a change
 # (the Sonoff probes: by 0.2 K) stay silent for 45-90 minutes while the pipe's temperature stands still, and
 # Home Assistant does not show a report of an unchanged value (last_reported = last_changed).
@@ -70,6 +96,11 @@ SWAP_K = 1.0
 SWAP_FOR = timedelta(minutes=15)
 SWAP_VALVE = 20.0
 WAITING = "Wartet: "
+# A run ended this way after the valve was fully open goes on the next night, downward only.
+NIGHT_OVER = "Ende des Nachtfensters"
+BUDGET_USED = "Befehle des Testlaufs verbraucht"
+_GOES_ON = frozenset({NIGHT_OVER, BUDGET_USED})
+GOES_ON = "Geht in der nächsten Nacht weiter, nur abwärts"
 # Rated output's temperature difference to the room (flow/return mean - 20 °C) by basis.
 RATED_DELTA_K = {"75/65": 50.0, "55/45": 30.0, "50/40": 25.0}
 RADIATOR_EXPONENT = 1.3
@@ -130,7 +161,7 @@ class TestInputs:
 
 @dataclass(frozen=True, slots=True)
 class Action:
-    # "send": set the thermostat to celsius; "end": the run ended (back to celsius if given); "wait".
+    # "send": set the thermostat to celsius; "end": the night's run ended (back to celsius if given); "wait".
     kind: str
     celsius: float | None = None
     note: str = ""
@@ -149,6 +180,10 @@ class TestRun:
     counted_night: date | None = None
     # Why it has not started yet, or why it ended.
     message: str = ""
+    # Downward only, starting at this offset to the temperature at the thermostat (the valve was fully open
+    # there before).
+    down_only: bool = False
+    full_offset_k: float | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
     phase: Phase | None = None
@@ -160,13 +195,18 @@ class TestRun:
     last_tick: datetime | None = None
     no_heat_since: datetime | None = None
     no_valve_since: datetime | None = None
+    # The valve when the step's command went out, and the size of the last step of this direction.
     step_valve: float | None = None
+    phase_size: float | None = None
     moved_at: datetime | None = None
     readings: list[tuple[datetime, float, float | None]] = field(default_factory=list)
     steps: list[Step] = field(default_factory=list)
     reached_full: bool = False
-    # The way down reached 1 K below the temperature at the thermostat.
+    reached_closed: bool = False
+    # The way down reached 2 K below the temperature at the thermostat.
     reached_bottom: bool = False
+    # What the night measured, kept when the run goes on the next night.
+    outcome: TestResult | None = None
 
     @property
     def active(self) -> bool:
@@ -175,10 +215,7 @@ class TestRun:
     def result(self) -> TestResult | None:
         if self.started_at is None or self.ended_at is None:
             return None
-        # Complete: up to fully open and down to closed (a run cut off at the end of the night or by its
-        # budget before the valve closed is not).
-        closed = any(not step.rising and step.valve is not None and step.valve <= OPEN_FROM for step in self.steps)
-        complete = self.state is TestState.DONE and self.reached_full and (self.reached_bottom or closed)
+        complete = self.reached_full and self.reached_closed
         return TestResult(
             started_at=self.started_at,
             ended_at=self.ended_at,
@@ -202,6 +239,7 @@ def abort(run: TestRun, now: datetime, reason: str) -> Action:
     run.state = TestState.ABORTED
     run.message = reason
     run.ended_at = now
+    run.outcome = run.result() if was_running else None
     return Action("end", celsius=run.before_c if was_running else None, note=reason)
 
 
@@ -237,8 +275,18 @@ def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, en
         assert inputs.limits is not None and inputs.trv_c is not None
         run.state = TestState.RUNNING
         run.started_at = inputs.now
+        run.ended_at = None
         run.phase = Phase.BASELINE
         run.before_c = inputs.trv_setpoint_c
+        run.commands = 0
+        run.steps = []
+        run.outcome = None
+        run.reached_closed = run.reached_bottom = False
+        run.reached_full = run.down_only
+        run.phase_size = None
+        if run.down_only and run.full_offset_k is not None:
+            run.message = "Ausgangslage ganz offen, dann nur abwärts"
+            return _set(run, inputs, inputs.limits.round(inputs.trv_c + run.full_offset_k))
         run.message = "Ausgangslage"
         return _set(run, inputs, inputs.limits.round(inputs.trv_c))
     if in_window(moment, latest_start, end) and run.counted_night != night:
@@ -260,17 +308,17 @@ def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, en
 
 def _running(run: TestRun, inputs: TestInputs, start: time, end: time) -> Action:
     if not in_window(inputs.local.time(), start, end):
-        return _finish(run, inputs.now, "Ende des Nachtfensters")
+        return _finish(run, inputs, NIGHT_OVER)
     if not inputs.may_write:
-        return _finish(run, inputs.now, "Die App darf das Thermostat nicht mehr stellen")
+        return _finish(run, inputs, "Die App darf das Thermostat nicht mehr stellen")
     if inputs.room_c is not None and inputs.room_c > inputs.setpoint_c + ROOM_OVER_K:
-        return _finish(run, inputs.now, "Raum über Soll + 1 K")
+        return _finish(run, inputs, "Raum über Soll + 1 K")
     if inputs.window_open:
-        return _finish(run, inputs.now, "Fenster offen")
+        return _finish(run, inputs, "Fenster offen")
     if inputs.valve is None:
         run.no_valve_since = run.no_valve_since or inputs.now
         if inputs.now - run.no_valve_since >= MISSING_FOR:
-            return _finish(run, inputs.now, "Ventilstellung fehlt seit 30 min")
+            return _finish(run, inputs, "Ventilstellung fehlt seit 30 min")
     else:
         run.no_valve_since = None
     minutes = 0.0 if run.last_tick is None else min(2.0, (inputs.now - run.last_tick).total_seconds() / 60)
@@ -283,7 +331,7 @@ def _running(run: TestRun, inputs: TestInputs, start: time, end: time) -> Action
     else:
         run.no_heat_since = run.no_heat_since or inputs.now
         if inputs.now - run.no_heat_since >= MISSING_FOR:
-            return _finish(run, inputs.now, "Kein warmes Wasser seit 30 min")
+            return _finish(run, inputs, "Kein warmes Wasser seit 30 min")
     if (
         run.moved_at is None
         and inputs.valve is not None
@@ -293,7 +341,7 @@ def _running(run: TestRun, inputs: TestInputs, start: time, end: time) -> Action
         run.moved_at = inputs.now
     if not _settled(run, inputs.now):
         return Action("wait")
-    return _next(run, inputs)
+    return _next(run, inputs, end)
 
 
 def _settled(run: TestRun, now: datetime) -> bool:
@@ -309,45 +357,125 @@ def _settled(run: TestRun, now: datetime) -> bool:
     return max(valves) - min(valves) < STEADY_VALVE and (not returns or max(returns) - min(returns) < STEADY_RETURN_K)
 
 
-def _next(run: TestRun, inputs: TestInputs) -> Action:
+def _next(run: TestRun, inputs: TestInputs, end: time) -> Action:
     assert run.setpoint_c is not None and run.phase is not None and inputs.limits is not None
-    limits = inputs.limits
-    valve = inputs.valve
     rising = run.phase is not Phase.DOWN
     run.steps.append(_point(run, inputs, rising=rising))
-    if valve is not None and valve >= FULL_OPEN:
-        run.reached_full = True
     match run.phase:
+        case Phase.BASELINE if run.down_only:
+            # The start at "fully open" (known from before): from here downward.
+            return _turn_down(run, inputs, end)
         case Phase.BASELINE:
             run.phase = Phase.UP
-            jump = JUMP_K if valve is None or valve <= OPEN_FROM else STEP_K
-            return _set(run, inputs, limits.round(run.setpoint_c + jump))
+            run.phase_size = None
+            return _up(run, inputs, end)
         case Phase.UP:
-            up_commands = sum(1 for step in run.steps if step.rising)
-            if run.reached_full or run.setpoint_c >= limits.max_c - 1e-6 or up_commands > UP_COMMANDS_MAX:
-                run.phase = Phase.DOWN
-                return _down(run, inputs)
-            moved = any(step.valve is not None and step.valve > OPEN_FROM for step in run.steps)
-            return _set(run, inputs, limits.round(run.setpoint_c + (STEP_K if moved else JUMP_K)))
+            if _fully_open(run, inputs.valve):
+                run.reached_full = True
+                run.full_offset_k = run.steps[-1].offset_k
+                return _turn_down(run, inputs, end)
+            return _up(run, inputs, end)
         case Phase.DOWN:
-            return _down(run, inputs)
+            return _down(run, inputs, end)
     return Action("wait")
 
 
-def _down(run: TestRun, inputs: TestInputs) -> Action:
+def _fully_open(run: TestRun, valve: float | None) -> bool:
+    """At least 85 %, or at least 50 % and the last 1 K brought less than 5 points (the Comet stops at 88 %)."""
+    if valve is None:
+        return False
+    if valve >= FULL_OPEN:
+        return True
+    current = run.steps[-1]
+    for earlier in run.steps[:-1]:
+        if (
+            earlier.rising
+            and earlier.valve is not None
+            and earlier.valve >= PLATEAU_FROM
+            and current.setpoint_c - earlier.setpoint_c >= PLATEAU_K - 1e-6
+            and valve - earlier.valve < PLATEAU_GAIN
+        ):
+            return True
+    return False
+
+
+def _up(run: TestRun, inputs: TestInputs, end: time) -> Action:
     assert run.setpoint_c is not None and inputs.limits is not None
+    if TEST_COMMANDS_MAX - run.commands <= 0:
+        return _finish(run, inputs, BUDGET_USED)
+    target = inputs.limits.round(run.setpoint_c + _step(run, inputs, end, up=True))
+    if target <= run.setpoint_c + 1e-6:
+        # At the thermostat's upper limit: the valve opens no further by the setpoint.
+        return _turn_down(run, inputs, end)
+    return _set(run, inputs, target)
+
+
+def _turn_down(run: TestRun, inputs: TestInputs, end: time) -> Action:
+    run.phase = Phase.DOWN
+    run.phase_size = None
+    return _down(run, inputs, end)
+
+
+def _down(run: TestRun, inputs: TestInputs, end: time) -> Action:
+    assert run.setpoint_c is not None and inputs.limits is not None
+    if inputs.valve is not None and inputs.valve <= CLOSED and run.steps and not run.steps[-1].rising:
+        run.reached_closed = True
+        return _finish(run, inputs, "Fertig", done=True)
     reference = inputs.trv_c if inputs.trv_c is not None else run.setpoint_c
     bottom = inputs.limits.round(reference - DOWN_BELOW_K)
     if run.setpoint_c <= bottom + 1e-6:
         run.reached_bottom = True
-        return _finish(run, inputs.now, "Fertig", done=True)
+        return _finish(run, inputs, "Fertig (2 K unter dem Thermostat, Ventil nicht ganz zu)", done=True)
     # The way back is free of the budget (write gate: RESTORE).
-    left = TEST_COMMANDS_MAX - run.commands
-    if left <= 0:
-        return _finish(run, inputs.now, "Befehle des Testlaufs verbraucht", done=True)
-    needed = math.ceil((run.setpoint_c - bottom) / STEP_K - 1e-6)
-    step = STEP_K if needed <= left else JUMP_K
-    return _set(run, inputs, max(bottom, inputs.limits.round(run.setpoint_c - step)))
+    if TEST_COMMANDS_MAX - run.commands <= 0:
+        return _finish(run, inputs, BUDGET_USED)
+    target = max(bottom, inputs.limits.round(run.setpoint_c - _step(run, inputs, end, up=False)))
+    return _set(run, inputs, target)
+
+
+def _step(run: TestRun, inputs: TestInputs, end: time, *, up: bool) -> float:
+    """The size of the next step (plan-1.4.2-testlauf-lernt.md C)."""
+    valve = inputs.valve
+    last = run.phase_size
+    # How far the last step moved the valve the way it should go (a valve that moved the other way - a value
+    # from before that was not current - moved it by nothing).
+    moved = None
+    if valve is not None and run.step_valve is not None:
+        moved = max(0.0, valve - run.step_valve if up else run.step_valve - valve)
+    gain = moved / last if moved is not None and last else None
+    if valve is None:
+        marks: list[float] = []
+    elif up:
+        marks = [mark for mark in UP_MARKS if mark > valve + MARK_MARGIN]
+    else:
+        marks = [mark for mark in DOWN_MARKS if mark < valve - MARK_MARGIN]
+    needed = max(1, len(marks)) + (len(DOWN_MARKS) if up else 0)
+    left = steps_left(run, inputs, end)
+    short = left < needed
+    target = marks[min(max(0, needed - left), len(marks) - 1)] if marks else (FULL_OPEN if up else CLOSED)
+    toward = abs(target - valve) / gain if gain is not None and gain >= WEAK_GAIN and valve is not None else None
+    if last is None:
+        size = LARGE_STEP_K if short else FIRST_STEP_K
+    elif moved is not None and moved > STRONG_CHANGE:
+        size = toward if short and toward is not None else SMALL_STEP_K
+    elif gain is None or gain < WEAK_GAIN:
+        size = LARGE_STEP_K if last < LARGE_STEP_K - 1e-6 else LARGEST_STEP_K
+    else:
+        assert toward is not None
+        size = toward
+    size = max(SMALL_STEP_K, min(LARGEST_STEP_K, round(size / SMALL_STEP_K) * SMALL_STEP_K))
+    run.phase_size = size
+    return size
+
+
+def steps_left(run: TestRun, inputs: TestInputs, end: time) -> int:
+    """How many steps still fit into the night, by the run's own step durations."""
+    finish = datetime.combine(inputs.local.date(), end, tzinfo=inputs.local.tzinfo)
+    if finish <= inputs.local:
+        finish += timedelta(days=1)
+    durations = [step.minutes for step in run.steps]
+    minutes = max(STEP_MIN.total_seconds() / 60, statistics.median(durations)) if durations else STEP_MINUTES
+    return math.floor((finish - inputs.local).total_seconds() / 60 / minutes)
 
 
 def _set(run: TestRun, inputs: TestInputs, celsius: float) -> Action:
@@ -364,11 +492,21 @@ def _set(run: TestRun, inputs: TestInputs, celsius: float) -> Action:
     return Action("send", celsius=celsius)
 
 
-def _finish(run: TestRun, now: datetime, reason: str, *, done: bool = False) -> Action:
+def _finish(run: TestRun, inputs: TestInputs, reason: str, *, done: bool = False) -> Action:
     run.state = TestState.DONE if done else TestState.ABORTED
     run.message = reason
-    run.ended_at = now
-    return Action("end", celsius=run.before_c, note=reason)
+    run.ended_at = inputs.now
+    run.outcome = run.result()
+    action = Action("end", celsius=run.before_c, note=reason)
+    if reason in _GOES_ON and run.reached_full and not run.reached_closed and run.full_offset_k is not None:
+        # The night was too short after the valve was fully open: downward only, the next night.
+        run.state = TestState.ARMED
+        run.down_only = True
+        run.armed_at = inputs.now
+        run.nights = 0
+        run.counted_night = None
+        run.message = f"{GOES_ON} (ab {_signed(run.full_offset_k)} K)."
+    return action
 
 
 def _point(run: TestRun, inputs: TestInputs, *, rising: bool) -> Step:
@@ -490,6 +628,8 @@ def run_to_json(run: TestRun) -> dict[str, Any]:
         "message": run.message,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "before_c": run.before_c,
+        "down_only": run.down_only,
+        "full_offset_k": run.full_offset_k,
     }
 
 
@@ -497,6 +637,7 @@ def run_from_json(raw: Any) -> TestRun | None:
     if not isinstance(raw, dict):
         return None
     try:
+        full = raw.get("full_offset_k")
         run = TestRun(
             room_id=str(raw["room_id"]),
             trv=str(raw["trv"]),
@@ -507,6 +648,8 @@ def run_from_json(raw: Any) -> TestRun | None:
             message=str(raw.get("message", "")),
             started_at=datetime.fromisoformat(raw["started_at"]) if raw.get("started_at") else None,
             before_c=float(raw["before_c"]) if isinstance(raw.get("before_c"), int | float) else None,
+            down_only=bool(raw.get("down_only", False)),
+            full_offset_k=float(full) if isinstance(full, int | float) and not isinstance(full, bool) else None,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -515,13 +658,19 @@ def run_from_json(raw: Any) -> TestRun | None:
 
 def describe(steps: Sequence[Step]) -> str:
     """Short German summary, e.g. for the protocol."""
-    full = next((step.offset_k for step in steps if step.rising and (step.valve or 0) >= FULL_OPEN), None)
-    opened = next((step.offset_k for step in steps if step.rising and (step.valve or 0) > OPEN_FROM), None)
+    full = next((step.offset_k for step in steps if (step.valve or 0) >= FULL_OPEN), None)
+    opened = next((step.offset_k for step in steps if step.rising and (step.valve or 0) > CLOSED), None)
+    closed = next((step.offset_k for step in steps if not step.rising and (step.valve or 100) <= CLOSED), None)
     parts = [f"{len(steps)} Stufen"]
     if opened is not None:
-        parts.append(f"öffnet ab {_signed(opened)} K")
+        parts.append(f"offen ab {_signed(opened)} K")
     if full is not None:
         parts.append(f"ganz offen ab {_signed(full)} K")
+    if closed is not None:
+        parts.append(f"zu ab {_signed(closed)} K")
+    sizes = [abs(later.setpoint_c - earlier.setpoint_c) for earlier, later in itertools.pairwise(steps)]
+    if sizes:
+        parts.append(f"Schritte {_number(min(sizes))} bis {_number(max(sizes))} K")
     return ", ".join(parts)
 
 

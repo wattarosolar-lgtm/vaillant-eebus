@@ -10,6 +10,12 @@ higher flow; that request stays a hint until the zones are controlled
 test run and counts the valves' movements. When it stops - the app ends,
 the room control or a room leaves "Steuern", demo mode - every thermostat it
 has set gets its emergency value.
+
+Since 1.4.2 it also learns each thermostat's valve map every minute
+(learning.py: everyday points, step responses, drifts; test runs add their
+steps), asks the Aqara W600 for their valve position (reads.py, through the
+write gate) and tells the page "Räume" when something changed (changes()).
+A room may go to "Steuern" once its map knows the valve closed and fully open.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ import os
 import statistics
 import tempfile
 from collections import deque
-from collections.abc import Callable, Coroutine, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -35,14 +41,30 @@ from vaillant_eebus.ha_import import room_celsius
 from vaillant_eebus.hems.config import ZoneKind, in_window
 from vaillant_eebus.hems.room_model import FlowHint, Supply
 from vaillant_eebus.hems.samples import room_series
-from vaillant_eebus.hems.service import HemsService
+from vaillant_eebus.hems.service import SAMPLE_EVERY, HemsService
 from vaillant_eebus.home_assistant import HomeAssistant
+from vaillant_eebus.ids import MQTT_BASE_TOPIC
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.room_data import ProbePair, RoomControlMode, RoomStage, at_least, effective_stage
 from vaillant_eebus.rooms.controller import MODE_NAMES, Correction, Decision, RoomInputs, RoomMode, decide
 from vaillant_eebus.rooms.curve import Step, ValveCurve, curve_from_json, curve_to_json
+from vaillant_eebus.rooms.learning import (
+    KIND_NAMES,
+    CalmWatch,
+    Kind,
+    Source,
+    StepWatch,
+    ValveMap,
+    map_from_json,
+    map_to_json,
+    points_from_steps,
+    supply_class,
+)
+from vaillant_eebus.rooms.learning import SUPPLY_NAMES as WATER_NAMES
+from vaillant_eebus.rooms.reads import ReadPlan
 from vaillant_eebus.rooms.supply import SUPPLY_NAMES, HeatSupply, SupplyNow, heat_supply, restart_temperature
 from vaillant_eebus.rooms.testrun import (
+    GOES_ON,
     PROBE_VALID,
     STATE_NAMES,
     Action,
@@ -60,12 +82,21 @@ from vaillant_eebus.rooms.testrun import (
     swapped_text,
     waiting_for,
 )
-from vaillant_eebus.rooms.thermostats import MODEL_NAMES, Thermostat, TrvModel, blocking, read, side_entities
+from vaillant_eebus.rooms.thermostats import (
+    MODEL_NAMES,
+    Thermostat,
+    TrvModel,
+    blocking,
+    read,
+    seen_at,
+    side_entities,
+)
 from vaillant_eebus.settings import OperatingMode, Room, Settings, SettingsStore
 from vaillant_eebus.state import StateHub
 from vaillant_eebus.write_gate import (
     ROOM_REASON_NAMES,
     Held,
+    ReadValvePosition,
     RoomGate,
     RoomReason,
     SetThermostatSetpoint,
@@ -104,6 +135,18 @@ PROBE_KEEP = 60
 TREND_OVER = timedelta(minutes=30)
 RECOMMEND_DAYS = 7
 RECOMMEND_MIN_SAMPLES = 3 * 288
+# A valve position counts as current this long: a W600's since its last read (or report), another thermostat's
+# since its last report (the Comet reports with its messages, at least hourly).
+READ_FRESH = timedelta(minutes=10)
+REPORT_FRESH = timedelta(minutes=70)
+# Seconds between the reads of several W600 in one minute.
+READ_STAGGER = 10.0
+# Reads kept to match an answer (last_seen) to, and how much earlier than the read the answer may seem.
+READS_KEPT = 6
+ANSWER_SLACK = timedelta(seconds=5)
+# A command of the app and the setpoint change it caused are this close.
+OWN_CHANGE = timedelta(minutes=2)
+VALVE_TREND_OVER = timedelta(minutes=30)
 MODE_TEXTS = {
     RoomControlMode.OFF: "Raumregelung ausgeschaltet.",
     RoomControlMode.OBSERVE: "Raumregelung auf Beobachten: Sie lernt und zeigt Fenster und Versorgung als „würde“.",
@@ -158,17 +201,61 @@ class TestStatus:
 
 @dataclass(frozen=True, slots=True)
 class CurveStatus:
-    learned: bool
+    """The test runs of the thermostat: how many, and the steps of the last one."""
+
     runs: int
     complete_runs: int
     last_at: datetime | None
     last_ending: str | None
-    opening_k: float | None
-    full_k: float | None
-    closing_k: float | None
-    reaction_min: float | None
-    levels: list[float]
     steps: list[Step]
+
+
+@dataclass(frozen=True, slots=True)
+class MapCell:
+    offset_k: float
+    rising: bool
+    valve: float
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class MapStatus:
+    """What the app learned of the thermostat's valve (learning.py)."""
+
+    # "zu" and "ganz offen" are known: the room may go to "Steuern".
+    ready: bool
+    missing: list[str]
+    closed_k: float | None
+    full_k: float | None
+    full_valve: float | None
+    opening_k: float | None
+    kind: Kind
+    kind_name: str
+    pi_per_h_per_k: float | None
+    reaction_min: float | None
+    speed: float | None
+    settle_min: float | None
+    smallest_step_k: float | None
+    points_test: int
+    points_daily: int
+    responses: int
+    last_point_at: datetime | None
+    cells: list[MapCell]
+    # How warm the water was at the points (names).
+    water: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class ReadInfo:
+    """The reads of a W600's valve position (reads.py, write gate)."""
+
+    topic: str | None
+    # The device name found in Home Assistant (the room's own one may replace it).
+    found_name: str | None
+    last_read: datetime | None
+    today: int
+    limit: int
+    problem: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +292,13 @@ class RoomControlRoom:
     side: dict[str, str]
     test: TestStatus | None
     curve: CurveStatus
+    valve_map: MapStatus
+    # The W600's reads; None for thermostats that report their valve themselves.
+    read: ReadInfo | None
+    # When the thermostat last made itself heard, whether by last_seen, and when its valve position was confirmed.
+    life_sign_at: datetime | None
+    last_seen: bool
+    valve_at: datetime | None
     recommendation: str | None
     donor: bool
     cold: bool
@@ -237,6 +331,7 @@ class RoomControlStatus:
     test_start: str
     test_latest_start: str
     test_end: str
+    mqtt_base_topic: str
     probe: ProbeStatus
     rooms: list[RoomControlRoom]
     zones: list[ZoneControl]
@@ -305,6 +400,7 @@ class RoomControl:
         *,
         zone: tzinfo = UTC,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        read_stagger: float = READ_STAGGER,
     ) -> None:
         self._settings = settings
         self._state = state
@@ -315,8 +411,20 @@ class RoomControl:
         self._path = data_dir / STATE_FILE
         self._zone = zone
         self._clock = clock
+        self._read_stagger = read_stagger
         self._rooms: dict[str, _RoomState] = {}
         self._curves: dict[str, ValveCurve] = {}
+        self._maps: dict[str, ValveMap] = {}
+        self._calm: dict[str, CalmWatch] = {}
+        self._step_watch: dict[str, StepWatch] = {}
+        self._plans: dict[str, ReadPlan] = {}
+        # The thermostats' device names in Home Assistant (= Zigbee2MQTT's), and the setpoints they reported.
+        self._device_names: dict[str, str] = {}
+        self._trv_setpoints: dict[str, float] = {}
+        # The last reads that went out, per W600.
+        self._reads_sent: dict[str, deque[datetime]] = {}
+        self._dirty = False
+        self._listeners: set[asyncio.Queue[None]] = set()
         self._movements: dict[str, _Movements] = {}
         self._zones: dict[str, _Zone] = {}
         self._thermostats: dict[str, Thermostat] = {}
@@ -343,26 +451,31 @@ class RoomControl:
         hems.on_sampled(self.tick)
         hems.set_flow_advisor(self.flow_advice)
         hems.sources.on_change(self._source_changed)
+        hems.sources.follow(self._followed)
         if home_assistant.exporter is not None:
             home_assistant.exporter.add_source(self.sensors, always=True)
 
     # --- loops ---------------------------------------------------------------------------
 
     async def run(self) -> None:
+        loop = asyncio.get_running_loop()
         try:
             while True:
+                started = loop.time()
                 try:
                     await self.minute()
                 except Exception:
                     # A fault here must not stop the rest of the app; the life sign then stops.
                     _LOGGER.exception("Room control failed")
-                await asyncio.sleep(TICK)
+                # The reads of a minute take a few seconds; the beat stays a minute.
+                await asyncio.sleep(max(1.0, TICK - (loop.time() - started)))
         finally:
             self._save()
             await _despite_cancellation(self._release_on_stop())
 
     async def minute(self) -> None:
-        """Every minute: life sign, thermostats' other entities, movements and the test run."""
+        """Every minute: life sign, thermostats' other entities, movements, the test run, learning and the
+        W600's reads."""
         now = self._clock()
         async with self._lock:
             await self._discover(now)
@@ -371,6 +484,11 @@ class RoomControl:
             self._watch_probe(now)
             await self._restore_after_restart()
             await self._advance_test(now)
+            self._learn(now)
+            if self._dirty:
+                self._dirty = False
+                self._save()
+        await self._read_positions(self._due_reads(now))
         if self._healthy(now):
             self._alive_at = now
             self._stale_logged = False
@@ -411,6 +529,7 @@ class RoomControl:
                 await self._recommend(now, settings)
             self._save()
             self._ticked_at = now
+        self._notify()
 
     # --- for the API -----------------------------------------------------------------------
 
@@ -488,6 +607,31 @@ class RoomControl:
             f"hängt {where}.",
         )
 
+    async def set_base_topic(self, topic: str) -> None:
+        """Zigbee2MQTT's base topic for the reads of the W600's valve position."""
+        if not MQTT_BASE_TOPIC.match(topic):
+            raise WriteRejected(
+                422, "Das Basis-Topic besteht aus Buchstaben, Ziffern, „_“ und „-“, Teile getrennt durch „/“."
+            )
+        if topic == self._settings.current.room_control.mqtt_base_topic:
+            return
+        self._settings.update(
+            lambda current: replace(current, room_control=replace(current.room_control, mqtt_base_topic=topic))
+        )
+        self._log.add(LogCategory.SETTINGS, f"Basis-Topic von Zigbee2MQTT: {topic}.")
+        self._notify()
+
+    @contextlib.asynccontextmanager
+    async def changes(self) -> AsyncIterator[asyncio.Queue[None]]:
+        """A queue that holds a mark while something on the page "Räume" changed (thermostat, valve, room
+        sensor, probe, a decision or a command)."""
+        queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+        self._listeners.add(queue)
+        try:
+            yield queue
+        finally:
+            self._listeners.discard(queue)
+
     async def arm_test(self, room_id: str, *, confirm: bool) -> None:
         settings = self._settings.current
         room = self._room(room_id)
@@ -508,11 +652,20 @@ class RoomControl:
         if not confirm:
             raise WriteRejected(400, "Der Testlauf muss ausdrücklich bestätigt werden.")
         async with self._lock:
-            self._test = TestRun(room_id=room_id, trv=trv, armed_at=self._clock())
-            self._test.message = "Wartet auf die Nacht"
+            now = self._clock()
+            run = TestRun(room_id=room_id, trv=trv, armed_at=now)
+            run.message = "Wartet auf die Nacht"
+            known = self._maps.get(trv, ValveMap())
+            full = known.full(now, rising=True) or known.full(now)
+            if full is not None and known.closed_k(now) is None:
+                # "Fully open" is known already: the night goes downward only, to find "closed".
+                run.down_only, run.full_offset_k = True, full[0]
+                run.message = "Wartet auf die Nacht; „ganz offen“ ist bekannt, der Lauf geht nur abwärts"
+            self._test = run
             self._save()
         start = settings.room_control.test_start.strftime("%H:%M")
-        self._log.add(LogCategory.ROOMS, f"Testlauf {room.name} vorgemerkt: startet ab {start} Uhr.")
+        only = " (nur abwärts, „ganz offen“ ist schon bekannt)" if run.down_only else ""
+        self._log.add(LogCategory.ROOMS, f"Testlauf {room.name} vorgemerkt{only}: startet ab {start} Uhr.")
 
     async def cancel_test(self, room_id: str) -> None:
         async with self._lock:
@@ -723,6 +876,7 @@ class RoomControl:
             test_start=settings.room_control.test_start.strftime("%H:%M"),
             test_latest_start=settings.room_control.test_latest_start.strftime("%H:%M"),
             test_end=settings.room_control.test_end.strftime("%H:%M"),
+            mqtt_base_topic=settings.room_control.mqtt_base_topic,
             probe=self._probe_status(settings, now),
             rooms=rooms,
             zones=zones,
@@ -819,6 +973,7 @@ class RoomControl:
         red = zone.redistribution if zone is not None else None
         donor = red is not None and room.entity_id in red.donors and red.stage is stage
         state.trend_k_per_h = await self._trend(room.entity_id, now)
+        valve_map = self._maps.get(trv, ValveMap())
         inputs = RoomInputs(
             now=now,
             local=local,
@@ -834,7 +989,12 @@ class RoomControl:
             window_closed_at=state.window_closed_at,
             heat=heat,
             donor=donor,
-            curve=self._curves.get(trv),
+            valve_map=valve_map,
+            supply=supply_class(self._radiator_flow(room, settings, now)),
+            kind=valve_map.kind(),
+            settle_min=valve_map.settle_min(),
+            valve_trend_per_h=await self._valve_trend(room, now),
+            changed_at=self._gate.commands(trv, preview=stage is not RoomControlMode.CONTROL).last_sent,
             demand_valve=model.demand_valve.value if model is not None and model.demand_valve.learned else None,
             heating_rate=model.heating_rate.value if model is not None and model.heating_rate.learned else None,
             startup_min=model.startup_min.value if model is not None and model.startup_min.learned else None,
@@ -1069,6 +1229,7 @@ class RoomControl:
         inputs = self._test_inputs(room, run.trv, now, settings)
         was = run.state
         counted = run.counted_night
+        measured = len(run.steps) if run.state is TestState.RUNNING else 0
         action = advance(
             run,
             inputs,
@@ -1077,7 +1238,15 @@ class RoomControl:
             settings.room_control.test_end,
         )
         if was is TestState.ARMED and run.state is TestState.RUNNING:
-            self._log.add(LogCategory.ROOMS, f"Testlauf {room.name} gestartet.")
+            only = " (nur abwärts)" if run.down_only else ""
+            self._log.add(LogCategory.ROOMS, f"Testlauf {room.name} gestartet{only}.")
+        if run.state is TestState.RUNNING or was is TestState.RUNNING:
+            # The steps that settled go into the valve map at once.
+            new = run.steps[measured:]
+            if new:
+                self._maps[run.trv] = self._maps.get(run.trv, ValveMap()).add_points(points_from_steps(new, now))
+                self._dirty = True
+                self._notify()
         self._log_waiting(run, room, inputs.local, counted, settings)
         if action.kind == "send" and action.celsius is not None:
             command = SetThermostatSetpoint(room_id=room.entity_id, celsius=action.celsius, reason=RoomReason.TEST)
@@ -1089,6 +1258,7 @@ class RoomControl:
             if not result.sent and result.held is not Held.SAME:
                 await self._end_test(abort(run, now, f"Befehl nicht gesendet ({result.message})"))
                 return
+            self._notify()
         elif action.kind == "end":
             await self._end_test(action, run=run)
             return
@@ -1147,17 +1317,23 @@ class RoomControl:
         name = room.name if room is not None else run.room_id
         if restore and action.celsius is not None and room is not None:
             await self._restore_thermostat(room, action.celsius, f"Testlauf {name} beendet")
-        result = run.result()
+        result, run.outcome = run.outcome, None
         if result is not None:
             self._curves[run.trv] = self._curves.get(run.trv, ValveCurve()).add(result)
             summary = describe(result.steps)
             state = "fertig" if result.complete else "unvollständig"
-            self._log.add(LogCategory.ROOMS, f"Testlauf {name} {state} ({run.message}): {summary}.")
+            goes_on = f" {GOES_ON}." if run.state is TestState.ARMED else ""
+            self._log.add(LogCategory.ROOMS, f"Testlauf {name} {state} ({result.ending}): {summary}.{goes_on}")
+            known = self._maps.get(run.trv, ValveMap())
+            missing = known.missing(self._clock())
+            if not missing:
+                self._log.add(LogCategory.ROOMS, f"{name}: „zu“ und „ganz offen“ sind bekannt; „Steuern“ ist möglich.")
         elif run.state is TestState.FAILED:
             self._log.add(LogCategory.ROOMS, f"Testlauf {name}: {run.message}", problem=True)
         elif run.state is TestState.ABORTED:
             self._log.add(LogCategory.ROOMS, f"Testlauf {name} abgebrochen: {run.message}.")
         self._save()
+        self._notify()
 
     def _test_inputs(self, room: Room, trv: str, now: datetime, settings: Settings) -> TestInputs:
         sources = self._hems.sources
@@ -1247,6 +1423,7 @@ class RoomControl:
         today = now.astimezone(self._zone).date()
         run = self._test if self._test is not None and self._test.room_id == room.entity_id else None
         curve = self._curves.get(trv or "", ValveCurve())
+        valve_map = self._maps.get(trv or "", ValveMap())
         zone = self._zones.get(room.zone_id or "")
         red = zone.redistribution if zone is not None else None
         blocked = self._control_blocked(room, settings)
@@ -1283,6 +1460,11 @@ class RoomControl:
             side=dict(thermostat.side) if thermostat else {},
             test=_test_status(run) if run is not None else None,
             curve=_curve_status(curve),
+            valve_map=_map_status(valve_map, now),
+            read=self._read_info(room, thermostat),
+            life_sign_at=thermostat.life_sign if thermostat else None,
+            last_seen=thermostat.has_last_seen if thermostat else False,
+            valve_at=self._valve_confirmed(room, thermostat) if thermostat else None,
             recommendation=state.recommendation,
             donor=red is not None and room.entity_id in red.donors,
             cold=red is not None and red.cold == room.entity_id,
@@ -1297,8 +1479,9 @@ class RoomControl:
             return "Es ist kein Thermostat gewählt."
         if settings.operating_mode is not OperatingMode.LIVE:
             return "„Steuern“ geht nur im Live-Betrieb."
-        if not self._curves.get(trv, ValveCurve()).learned:
-            return "Erst ist ein vollständiger Testlauf nötig."
+        missing = self._maps.get(trv, ValveMap()).missing(self._clock())
+        if missing:
+            return f"Die App kennt noch nicht: {' und '.join(missing)} (aus einem Testlauf oder dem Alltag)."
         thermostat = self._thermostats.get(trv)
         if thermostat is not None and blocking(thermostat):
             return blocking(thermostat)[0]
@@ -1322,8 +1505,22 @@ class RoomControl:
             trv = room.details.trv_entity
             if trv is not None:
                 side[trv] = side_entities(trv, states)
+        followed = self._followed()
         self._side = side
         self._side_states = {entity: by_id[entity] for names in side.values() for entity in names.values()}
+        if self._followed() != followed:
+            # Follow the new last_seen entities live.
+            self._home_assistant.watch()
+        for trv, names in side.items():
+            if "position" not in names and "sensor" not in names:
+                continue
+            try:
+                name = await client.device_name(trv)
+            except (HomeAssistantUnavailable, ValueError) as err:
+                _LOGGER.info("The device name of %s is unknown: %s", trv, err)
+                continue
+            if name is not None:
+                self._device_names[trv] = name
 
     def _refresh_thermostats(self, now: datetime) -> None:
         sources = self._hems.sources
@@ -1332,13 +1529,16 @@ class RoomControl:
             trv = room.details.trv_entity
             if trv is None:
                 continue
+            side = self._side.get(trv, {})
+            seen = side.get("last_seen")
             thermostats[trv] = read(
                 trv,
                 sources.get(trv),
-                self._side.get(trv, {}),
+                side,
                 self._side_states,
                 valve=sources.get(room.details.valve_entity),
                 now=now,
+                last_seen=(sources.get(seen) or self._side_states.get(seen)) if seen else None,
             )
         self._thermostats = thermostats
 
@@ -1430,7 +1630,27 @@ class RoomControl:
         )
 
     def _source_changed(self, entity_id: str, state: EntityState | None) -> None:
-        probe = self._settings.current.room_control.probe
+        settings = self._settings.current
+        rooms = [
+            room
+            for room in settings.rooms
+            if entity_id
+            in (room.entity_id, room.details.trv_entity, room.details.valve_entity, room.details.humidity_entity)
+        ]
+        probe = settings.room_control.probe
+        if rooms or entity_id in self._followed() or entity_id in (probe.flow_entity, probe.return_entity):
+            self._notify()
+        for room in rooms:
+            if entity_id != room.details.trv_entity or state is None:
+                continue
+            reported = state.attributes.get("temperature")
+            if not isinstance(reported, int | float) or isinstance(reported, bool):
+                continue
+            before = self._trv_setpoints.get(entity_id)
+            self._trv_setpoints[entity_id] = float(reported)
+            if before is not None and abs(before - float(reported)) >= 0.01:
+                # A new setpoint (the app's, by hand or a schedule): read the valve 1 and 3 minutes later.
+                self._plans.setdefault(entity_id, ReadPlan()).after_change(self._clock())
         if entity_id not in (probe.flow_entity, probe.return_entity) or state is None:
             return
         try:
@@ -1443,6 +1663,186 @@ class RoomControl:
             # The same report again (read again after a reconnect), not a new one.
             return
         reports.append((reported, value))
+
+    # --- learning and reads (1.4.2) ---------------------------------------------------------------
+
+    def _learn(self, now: datetime) -> None:
+        """Every minute: everyday points, drifts and step responses of each thermostat with a valve."""
+        settings = self._settings.current
+        if settings.room_control.mode is RoomControlMode.OFF:
+            return
+        for room in settings.rooms:
+            trv = room.details.trv_entity
+            thermostat = self._thermostats.get(trv or "")
+            if trv is None or thermostat is None or room.details.valve_entity is None:
+                continue
+            valve = self._hems.sources.number(room.details.valve_entity)
+            fresh = self._valve_fresh(room, thermostat, now)
+            zone = self._zones.get(room.zone_id or "")
+            warm = zone is not None and zone.supply.usable
+            quiet = thermostat.available and not self._hems.window_open(room.entity_id) and not self._testing(room)
+            point, drift = self._calm.setdefault(trv, CalmWatch()).update(
+                now,
+                setpoint=thermostat.setpoint_c,
+                trv_c=thermostat.temperature_c,
+                valve=valve,
+                fresh=fresh,
+                warm=warm,
+                supply=supply_class(self._radiator_flow(room, settings, now)),
+                quiet=quiet,
+            )
+            response = self._step_watch.setdefault(trv, StepWatch()).update(
+                now, setpoint=thermostat.setpoint_c, valve=valve, fresh=fresh, own=self._own_change(trv, now)
+            )
+            if point is None and drift is None and response is None:
+                continue
+            valve_map = self._maps.get(trv, ValveMap())
+            was_ready = valve_map.ready(now)
+            if point is not None:
+                valve_map = valve_map.add_points([point])
+            if drift is not None:
+                valve_map = valve_map.add_drift(drift)
+            if response is not None:
+                valve_map = valve_map.add_response(response)
+            self._maps[trv] = valve_map
+            self._dirty = True
+            if not was_ready and valve_map.ready(now):
+                self._log.add(
+                    LogCategory.ROOMS,
+                    f"{room.name}: Die App kennt jetzt „zu“ und „ganz offen“ (aus dem Alltag); „Steuern“ ist möglich.",
+                )
+            self._notify()
+
+    def _due_reads(self, now: datetime) -> list[tuple[Room, str]]:
+        """The W600 whose valve position is to be read now (reads.py)."""
+        settings = self._settings.current
+        if settings.room_control.mode is RoomControlMode.OFF or not self._hems.sources.connected:
+            return []
+        next_beat = self._ticked_at + timedelta(seconds=SAMPLE_EVERY) if self._ticked_at is not None else None
+        due = []
+        for room in settings.rooms:
+            device = self._device_of(room)
+            trv = room.details.trv_entity
+            if trv is None or device is None:
+                continue
+            run = self._test
+            test_step = (
+                run.step_started
+                if run is not None and run.state is TestState.RUNNING and run.room_id == room.entity_id
+                else None
+            )
+            if self._plans.setdefault(trv, ReadPlan()).due(now, next_beat=next_beat, test_step_at=test_step):
+                due.append((room, device))
+        return due
+
+    async def _read_positions(self, due: Sequence[tuple[Room, str]]) -> None:
+        for index, (room, device) in enumerate(due):
+            if index and self._read_stagger > 0:
+                await asyncio.sleep(self._read_stagger)
+            trv = room.details.trv_entity
+            assert trv is not None
+            self._plans.setdefault(trv, ReadPlan()).done(self._clock())
+            try:
+                result = await self._gate.read_position(ReadValvePosition(room_id=room.entity_id, device=device))
+            except WriteRejected as err:
+                _LOGGER.info("Reading the valve of %s refused: %s", room.name, err)
+                continue
+            if result.sent:
+                sent = self._reads_sent.setdefault(trv, deque(maxlen=READS_KEPT))
+                sent.append(self._clock())
+
+    def _device_of(self, room: Room) -> str | None:
+        """The W600's name in Zigbee2MQTT; None for a thermostat that is not read."""
+        trv = room.details.trv_entity
+        thermostat = self._thermostats.get(trv or "")
+        if trv is None or thermostat is None or thermostat.model is not TrvModel.AQARA:
+            return None
+        return room.details.zigbee_name or self._device_names.get(trv)
+
+    def _read_info(self, room: Room, thermostat: Thermostat | None) -> ReadInfo | None:
+        trv = room.details.trv_entity
+        if trv is None or thermostat is None or thermostat.model is not TrvModel.AQARA:
+            return None
+        device = self._device_of(room)
+        status = self._gate.read_status(trv)
+        base = self._settings.current.room_control.mqtt_base_topic
+        return ReadInfo(
+            topic=f"{base}/{device}/get" if device else None,
+            found_name=self._device_names.get(trv),
+            last_read=status.last_read,
+            today=status.today,
+            limit=status.limit,
+            problem=status.problem,
+        )
+
+    def _valve_confirmed(self, room: Room, thermostat: Thermostat) -> datetime | None:
+        """When the valve position the app has was last confirmed by the thermostat.
+
+        A report of a change always is. For a W600 also a read: once last_seen shows its answer, or
+        - without last_seen - as soon as Home Assistant took it (an unchanged answer is not recorded).
+        For others their last message (last_seen).
+        """
+        valve = self._hems.sources.get(room.details.valve_entity)
+        if valve is None or self._hems.sources.number(room.details.valve_entity) is None:
+            return None
+        moments = [valve.last_reported]
+        seen_entity = thermostat.side.get("last_seen")
+        seen = (
+            seen_at(self._hems.sources.get(seen_entity) or self._side_states.get(seen_entity or ""))
+            if (seen_entity)
+            else None
+        )
+        if thermostat.model is TrvModel.AQARA:
+            if seen_entity is None:
+                # Without last_seen an answer that left the position unchanged does not show: a read Home
+                # Assistant took counts.
+                moments.append(self._gate.last_read(thermostat.entity_id))
+            elif seen is not None:
+                # The newest read that last_seen shows an answer to.
+                answered = [
+                    sent for sent in self._reads_sent.get(thermostat.entity_id, ()) if seen >= sent - ANSWER_SLACK
+                ]
+                moments.append(max(answered, default=None))
+        else:
+            moments.append(seen)
+        known = [moment for moment in moments if moment is not None]
+        return max(known) if known else None
+
+    def _valve_fresh(self, room: Room, thermostat: Thermostat, now: datetime) -> bool:
+        confirmed = self._valve_confirmed(room, thermostat)
+        limit = READ_FRESH if thermostat.model is TrvModel.AQARA else REPORT_FRESH
+        return confirmed is not None and now - confirmed <= limit
+
+    def _own_change(self, trv: str, now: datetime) -> bool:
+        sent = self._gate.commands(trv).last_sent
+        return sent is not None and now - sent <= OWN_CHANGE
+
+    def _radiator_flow(self, room: Room, settings: Settings, now: datetime) -> float | None:
+        """How warm the water at the radiator is: the probe pair's flow when it hangs there, else the zone's flow,
+        else the buffer."""
+        probe = settings.room_control.probe
+        if probe.room_id == room.entity_id:
+            flow, problem = self._probe_value(probe.flow_entity, "Vorlauf", now)
+            if problem is None and not self._swap.swapped:
+                return flow
+        zone_flow = self._flow_now(room.zone_id, settings)
+        if zone_flow is not None:
+            return zone_flow
+        return self._hems.sources.number(settings.hems.buffer_entity)
+
+    async def _valve_trend(self, room: Room, now: datetime) -> float | None:
+        name = room_series(room.entity_id, "valve")
+        series = await self._hems.samples.series_async([name], now - VALVE_TREND_OVER)
+        return _slope(series[name])
+
+    def _followed(self) -> set[str]:
+        """The thermostats' last_seen entities, followed live."""
+        return {names["last_seen"] for names in self._side.values() if "last_seen" in names}
+
+    def _notify(self) -> None:
+        for queue in self._listeners:
+            if queue.empty():
+                queue.put_nowait(None)
 
     def _flow_now(self, zone_id: str | None, settings: Settings) -> float | None:
         if zone_id is None:
@@ -1510,6 +1910,14 @@ class RoomControl:
             )
         for trv, item in (raw.get("curves") or {}).items():
             self._curves[trv] = curve_from_json(item)
+        for trv, item in (raw.get("maps") or {}).items():
+            self._maps[trv] = map_from_json(item)
+        for trv, curve in self._curves.items():
+            if trv not in self._maps:
+                # From 1.4.1: the steps of the test runs so far are the map's first points.
+                self._maps[trv] = ValveMap().add_points(
+                    point for result in curve.results for point in points_from_steps(result.steps, result.ended_at)
+                )
         run = run_from_json(raw.get("test"))
         if run is not None and run.state is TestState.RUNNING:
             # Interrupted by a restart: the thermostat goes back to its setpoint from before.
@@ -1532,6 +1940,7 @@ class RoomControl:
                 for room_id, state in self._rooms.items()
             },
             "curves": {trv: curve_to_json(curve) for trv, curve in self._curves.items()},
+            "maps": {trv: map_to_json(valve_map) for trv, valve_map in self._maps.items()},
             "test": run_to_json(self._test) if self._test is not None else None,
         }
         try:
@@ -1613,20 +2022,39 @@ def _test_status(run: TestRun) -> TestStatus:
 
 def _curve_status(curve: ValveCurve) -> CurveStatus:
     last = curve.last
-    complete = [result for result in curve.results if result.complete]
-    reference = complete[-1] if complete else last
     return CurveStatus(
-        learned=curve.learned,
         runs=len(curve.results),
-        complete_runs=len(complete),
+        complete_runs=sum(1 for result in curve.results if result.complete),
         last_at=last.ended_at if last else None,
         last_ending=last.ending if last else None,
-        opening_k=reference.opening_k if reference else None,
-        full_k=reference.full_k if reference else None,
-        closing_k=reference.closing_k if reference else None,
-        reaction_min=reference.reaction_min if reference else None,
-        levels=curve.levels(),
-        steps=list(reference.steps) if reference else [],
+        steps=list(last.steps) if last else [],
+    )
+
+
+def _map_status(valve_map: ValveMap, now: datetime) -> MapStatus:
+    full = valve_map.full(now)
+    counts = valve_map.counts()
+    kind = valve_map.kind()
+    return MapStatus(
+        ready=valve_map.ready(now),
+        missing=valve_map.missing(now),
+        closed_k=valve_map.closed_k(now),
+        full_k=full[0] if full is not None else None,
+        full_valve=full[1] if full is not None else None,
+        opening_k=valve_map.opening_k(now),
+        kind=kind,
+        kind_name=KIND_NAMES[kind],
+        pi_per_h_per_k=valve_map.pi_per_h_per_k() if kind is Kind.PI else None,
+        reaction_min=valve_map.reaction_min(),
+        speed=valve_map.speed(),
+        settle_min=valve_map.settle_min(),
+        smallest_step_k=valve_map.smallest_step_k(),
+        points_test=counts[Source.TEST],
+        points_daily=counts[Source.DAILY],
+        responses=len(valve_map.responses),
+        last_point_at=valve_map.points[-1].at if valve_map.points else None,
+        cells=[MapCell(cell.offset_k, cell.rising, cell.valve, cell.count) for cell in valve_map.merged(now)],
+        water=sorted({WATER_NAMES[point.supply] for point in valve_map.points}),
     )
 
 

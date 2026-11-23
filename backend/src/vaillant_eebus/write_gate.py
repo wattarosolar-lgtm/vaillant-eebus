@@ -50,6 +50,7 @@ import grpc
 from vaillant_eebus.bridge_client import BridgeClient
 from vaillant_eebus.ha_client import EntityState, HomeAssistantClient, ServiceCallFailed
 from vaillant_eebus.hems.sources import HemsSources
+from vaillant_eebus.ids import device_name_problem
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.pairing import NotPairedError, PairingService
 from vaillant_eebus.room_data import RoomControlMode, RoomDetails, effective_stage
@@ -1057,6 +1058,10 @@ _NIGHT_SHIFT = timedelta(hours=12)
 DEFAULT_TRV_STEP = 0.5
 ROOM_GATE_FILE = "room_gate.json"
 _NO_VALUE = frozenset({"unavailable", "unknown", ""})
+# Reading an Aqara thermostat's valve position (1.4.2): no command and not counted with them, but spaced and
+# capped per thermostat on its own (every 5 minutes, after commands and in test runs about 500 a day).
+READ_SPACING = timedelta(seconds=30)
+READS_PER_DAY = 720
 
 
 class RoomReason(StrEnum):
@@ -1072,6 +1077,8 @@ class RoomReason(StrEnum):
     # Back to the setpoint from before a test run.
     RESTORE = "restore"
     FALLBACK = "fallback"
+    # Reading the valve position (ReadValvePosition, 1.4.2); never a setpoint.
+    READ = "read"
 
 
 ROOM_REASON_NAMES = {
@@ -1084,6 +1091,7 @@ ROOM_REASON_NAMES = {
     RoomReason.TEST: "Testlauf",
     RoomReason.RESTORE: "Rückweg nach dem Testlauf",
     RoomReason.FALLBACK: "Rückfall auf den Notfallwert",
+    RoomReason.READ: "Abfrage",
 }
 # Valve sparing (punkt1-trv-regelung.md 3a): these reasons need no dead band and no interval ...
 _FREE_OF_SPARING = frozenset(
@@ -1124,6 +1132,37 @@ class Held(StrEnum):
     INTERVAL = "interval"
     LIMIT = "limit"
     PAUSED = "paused"
+
+
+@dataclass(frozen=True, slots=True)
+class ReadValvePosition:
+    """Ask Zigbee2MQTT to read the valve position of a room's thermostat (reason "Abfrage").
+
+    device is the thermostat's name in Zigbee2MQTT; the message goes to
+    "<base topic>/<device>/get" and is always {"running_state": ""}.
+    """
+
+    room_id: str
+    device: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReadResult:
+    sent: bool
+    message: str
+    held: Held | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReadStatus:
+    """What the gate counts of a thermostat's reads, for the page "Räume"."""
+
+    # The last read Home Assistant took.
+    last_read: datetime | None
+    today: int
+    limit: int
+    # Why the last read failed; None while they go out.
+    problem: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1202,6 +1241,17 @@ class _Trv:
     fallback_c: float | None = None
 
 
+@dataclass
+class _Reads:
+    day: date | None = None
+    count: int = 0
+    # The last read Home Assistant took, and the last one tried.
+    last_ok: datetime | None = None
+    last_try: datetime | None = None
+    problem: str | None = None
+    limit_logged: date | None = None
+
+
 class RoomGate:
     """The only place that writes to radiator thermostats (punkt1-trv-regelung.md 8).
 
@@ -1214,6 +1264,10 @@ class RoomGate:
     here, not only in the room control. A value still on its way counts as the
     thermostat's setpoint. Preview and demo mode send nothing; their counting is
     simulated separately, so the preview shows what control would send.
+
+    Besides, it asks Zigbee2MQTT to read a thermostat's valve position (1.4.2,
+    read_position): one fixed message, with the room control on - also in demo
+    mode and preview, as it changes nothing - spaced and capped on its own.
     """
 
     def __init__(
@@ -1243,6 +1297,7 @@ class RoomGate:
         # Last known range of each thermostat, for the fallback when its state is gone (stopping).
         self._limits: dict[str, ThermostatLimits] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._reads: dict[str, _Reads] = {}
         self._load()
         sources.on_change(self._changed)
 
@@ -1302,6 +1357,80 @@ class RoomGate:
             paused_until=state.paused_until,
         )
 
+    def read_status(self, trv: str) -> ReadStatus:
+        state = self._reads.get(trv) or _Reads()
+        self._new_read_day(state, self._clock())
+        return ReadStatus(last_read=state.last_ok, today=state.count, limit=READS_PER_DAY, problem=state.problem)
+
+    def last_read(self, trv: str) -> datetime | None:
+        """When Home Assistant last took a read of this thermostat's valve position."""
+        state = self._reads.get(trv)
+        return state.last_ok if state is not None else None
+
+    async def read_position(self, command: ReadValvePosition) -> ReadResult:
+        """Ask Zigbee2MQTT to read the valve position of the room's thermostat.
+
+        Raises WriteRejected when it may not be asked; a read Home Assistant did not take is
+        no error (ReadResult.sent is False, the problem is logged once).
+        """
+        settings = self._settings.current
+        room = next((item for item in settings.rooms if item.entity_id == command.room_id), None)
+        if room is None:
+            raise WriteRejected(404, "Diesen Raum gibt es nicht (mehr).")
+        trv = room.details.trv_entity
+        if trv is None:
+            raise WriteRejected(409, f"{room.name}: Es ist kein Thermostat gewählt.")
+        self._check_not_a_zone(trv, settings, room.name)
+        if any(other.details.trv_entity == trv for other in settings.rooms if other.entity_id != room.entity_id):
+            raise WriteRejected(409, f"{room.name}: Das Thermostat ist auch einem anderen Raum zugeordnet.")
+        if settings.room_control.mode is RoomControlMode.OFF:
+            raise WriteRejected(409, "Die Raumregelung ist aus; die App fragt keine Ventilstellung ab.")
+        problem = device_name_problem(command.device)
+        if problem is not None:
+            raise WriteRejected(422, f"{room.name}: {problem}")
+        if self._client is None:
+            raise WriteRejected(409, "Ohne Home Assistant kann die App keine Ventilstellung abfragen.")
+        async with self._locks.setdefault(trv, asyncio.Lock()):
+            now = self._clock()
+            state = self._reads.setdefault(trv, _Reads())
+            self._new_read_day(state, now)
+            if state.last_try is not None and now - state.last_try < READ_SPACING:
+                return ReadResult(sent=False, message="Mindestabstand", held=Held.INTERVAL)
+            if state.count >= READS_PER_DAY:
+                if state.limit_logged != state.day:
+                    state.limit_logged = state.day
+                    self._log.add(
+                        LogCategory.ROOMS,
+                        f"Thermostat {room.name}: {READS_PER_DAY} Abfragen der Ventilstellung heute erreicht; bis "
+                        "Mitternacht fragt die App nicht mehr ab.",
+                        problem=True,
+                    )
+                return ReadResult(sent=False, message="Höchstzahl erreicht", held=Held.LIMIT)
+            state.last_try = now
+            state.count += 1
+            base = settings.room_control.mqtt_base_topic
+            try:
+                await self._client.publish_position_read(base, command.device)
+            except ValueError as err:
+                raise WriteRejected(422, f"{room.name}: {err}") from err
+            except ServiceCallFailed as err:
+                if state.problem is None:
+                    self._log.add(
+                        LogCategory.ROOMS,
+                        f"Abfrage der Ventilstellung {room.name} ({base}/{command.device}/get) geht nicht "
+                        f"({err.code}). Läuft die MQTT-Integration in Home Assistant?",
+                        problem=True,
+                    )
+                state.problem = err.code
+                self._save()
+                return ReadResult(sent=False, message=f"Nicht abgefragt ({err.code})")
+            if state.problem is not None:
+                self._log.add(LogCategory.ROOMS, f"Abfrage der Ventilstellung {room.name} geht wieder.")
+            state.problem = None
+            state.last_ok = now
+            self._save()
+            return ReadResult(sent=True, message=f"Abgefragt: {base}/{command.device}/get")
+
     async def submit(self, command: SetThermostatSetpoint, *, preview: bool = False) -> RoomWriteResult:
         """Check the command and, in live mode with the room in "Steuern", send it to the thermostat.
 
@@ -1309,6 +1438,8 @@ class RoomGate:
         the command is not allowed, WriteNotExecuted when Home Assistant refused it and
         WriteOutcomeUnknown when it is unknown whether it arrived.
         """
+        if command.reason is RoomReason.READ:
+            raise WriteRejected(422, "Eine Abfrage stellt keinen Sollwert.")
         trv = self._thermostat_of(command, self._settings.current)
         async with self._locks.setdefault(trv, asyncio.Lock()):
             # Read inside the lock: the mode or the room may have changed while waiting for it.
@@ -1611,6 +1742,11 @@ class RoomGate:
         if state.test_night != night:
             state.test_night, state.test_count = night, 0
 
+    def _new_read_day(self, state: _Reads, now: datetime) -> None:
+        today = now.astimezone(self._zone).date()
+        if state.day != today:
+            state.day, state.count = today, 0
+
     def _room_of(self, trv: str) -> Room | None:
         return next((room for room in self._settings.current.rooms if room.details.trv_entity == trv), None)
 
@@ -1661,6 +1797,19 @@ class RoomGate:
                 )
             except (TypeError, ValueError):
                 _LOGGER.warning("Room gate state of %s unreadable, ignored", trv)
+        reads = raw.get("reads") if isinstance(raw, dict) else None
+        for trv, item in (reads or {}).items():
+            if not isinstance(item, dict):
+                continue
+            try:
+                self._reads[trv] = _Reads(
+                    day=date.fromisoformat(item["day"]) if item.get("day") else None,
+                    count=int(item.get("count", 0)),
+                    last_ok=_moment(item.get("last_ok")),
+                    problem=item["problem"] if isinstance(item.get("problem"), str) else None,
+                )
+            except (TypeError, ValueError):
+                _LOGGER.warning("Room gate reads of %s unreadable, ignored", trv)
 
     def _save(self) -> None:
         payload = {
@@ -1681,7 +1830,16 @@ class RoomGate:
                     "fallback_c": state.fallback_c,
                 }
                 for trv, state in self._live.items()
-            }
+            },
+            "reads": {
+                trv: {
+                    "day": reads.day.isoformat() if reads.day else None,
+                    "count": reads.count,
+                    "last_ok": reads.last_ok.isoformat() if reads.last_ok else None,
+                    "problem": reads.problem,
+                }
+                for trv, reads in self._reads.items()
+            },
         }
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)

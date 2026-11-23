@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
@@ -56,8 +57,9 @@ from vaillant_eebus.room_data import (
 )
 from vaillant_eebus.rooms.controller import Correction, RoomInputs, RoomMode, decide
 from vaillant_eebus.rooms.curve import Step, TestResult, ValveCurve, curve_from_json, curve_to_json
-from vaillant_eebus.rooms.service import LIFESIGN_ENTITY, RoomControl
-from vaillant_eebus.rooms.supply import HeatSupply, heat_supply, restart_temperature
+from vaillant_eebus.rooms.learning import MapPoint, Source, Supply, ValveMap, points_from_steps
+from vaillant_eebus.rooms.service import LIFESIGN_ENTITY, RoomControl, _Zone
+from vaillant_eebus.rooms.supply import HeatSupply, SupplyNow, heat_supply, restart_temperature
 from vaillant_eebus.rooms.testrun import TestInputs, TestRun, TestState, advance
 from vaillant_eebus.rooms.thermostats import TrvModel, blocking, read, side_entities
 from vaillant_eebus.settings import Connection, MyVaillantEntities, OperatingMode, Room, SettingsStore
@@ -205,16 +207,27 @@ def complete_curve() -> ValveCurve:
     return ValveCurve((result,))
 
 
-def test_the_curve_gives_the_offset_for_an_opening() -> None:
-    curve = complete_curve()
+def known_map() -> ValveMap:
+    """The valve map a complete test run leaves (its steps as points)."""
+    result = complete_curve().results[0]
+    return ValveMap().add_points(points_from_steps(result.steps, result.ended_at))
 
-    assert curve.learned
-    assert curve.levels() == [0.0, 20.0, 50.0, 80.0, 100.0]
-    assert curve.offset_for(50.0) == 1.5
-    assert curve.offset_for(0.0) == -1.0
+
+def test_the_steps_of_a_test_run_make_a_valve_map_that_gives_the_offset_for_an_opening() -> None:
+    curve = complete_curve()
+    valve_map = known_map()
+    now = T0 + timedelta(hours=5)
+
     assert curve_from_json(curve_to_json(curve)) == curve
-    partial = ValveCurve((replace(curve.results[0], complete=False),))
-    assert not partial.learned
+    assert valve_map.ready(now) and valve_map.missing(now) == []
+    assert valve_map.levels(now) == [0.0, 20.0, 40.0, 50.0, 80.0, 100.0]
+    assert valve_map.offset_for(50.0, rising=True, supply=Supply.UNKNOWN, now=now) == 1.5
+    # Falling, 40 % was reached at +1 K already (hysteresis).
+    assert valve_map.offset_for(40.0, rising=False, supply=Supply.UNKNOWN, now=now) == 1.0
+    # Closed: the highest offset still closed - falling the way down closed it at -1 K, rising it opened above 0 K.
+    assert valve_map.offset_for(0.0, rising=False, supply=Supply.UNKNOWN, now=now) == -1.0
+    assert valve_map.offset_for(0.0, rising=True, supply=Supply.UNKNOWN, now=now) == 0.0
+    assert valve_map.full(now) == (2.5, 100.0)
 
 
 def night_inputs(moment: datetime, run: TestRun, **changes: Any) -> TestInputs:
@@ -263,11 +276,13 @@ def test_a_test_run_steps_up_to_open_and_down_to_closed_at_night() -> None:
 
     assert run.state is TestState.DONE
     assert run.started_at == datetime(2026, 11, 23, 22, 0, tzinfo=UTC)
-    assert sent == [21.5, 22.5, 23.0, 23.5, 24.0, 23.5, 23.0, 22.5, 22.0, 21.5, 21.0, 20.5]
+    # 1 K first (25 %: 25 %/K), then 1 K to the 50 % mark (75 %: 50 points, too much), so 0.5 K (100 %, fully
+    # open); down 1 K first (50 %: 50 points), 0.5 K (25 %), 0.5 K to the 5 % mark (closed).
+    assert sent == [21.5, 22.5, 23.5, 24.0, 23.0, 22.5, 22.0]
     result = run.result()
     assert result is not None and result.complete
-    assert result.opening_k == 1.0 and result.full_k == 2.5
-    assert run.ended_at is not None and run.ended_at.hour < 5
+    assert result.opening_k == 1.0 and result.full_k == 2.5 and result.closing_k == 0.5
+    assert run.ended_at is not None and run.ended_at.hour < 2
     assert len(sent) + 1 <= 16
     heat = [item.heat_w for item in result.steps]
     assert all(value is not None and value > 0 for value in heat)
@@ -299,11 +314,12 @@ def test_a_test_run_stops_when_the_room_gets_too_warm() -> None:
 def test_a_test_run_ends_at_five_with_what_it_measured() -> None:
     run = TestRun(room_id=OFFICE, trv=TRV_OFFICE, armed_at=T0)
 
-    play(run, datetime(2026, 11, 24, 0, 50, tzinfo=UTC), 6 * 60, wobble=True)
+    # Every step takes its 40 minutes: from 0:50 the night is too short for open and closed.
+    play(run, datetime(2026, 11, 24, 0, 50, tzinfo=UTC), 6 * 60, wobble=True, valve=10.0)
 
     assert run.state is TestState.ABORTED and run.message == "Ende des Nachtfensters"
     assert run.ended_at == datetime(2026, 11, 24, 5, 0, tzinfo=UTC)
-    result = run.result()
+    result = run.outcome
     assert result is not None and not result.complete and len(result.steps) >= 5
 
 
@@ -415,7 +431,7 @@ def test_preheating_starts_an_hour_before_a_warmer_window() -> None:
 
 def test_the_cascade_picks_the_setpoint_for_the_opening_the_room_needs() -> None:
     decision, _ = decide(
-        room_inputs(curve=complete_curve(), room_c=20.5, valve=20.0, trv_setpoint_c=21.0, demand_valve=30.0),
+        room_inputs(valve_map=known_map(), room_c=20.5, valve=20.0, trv_setpoint_c=21.0, demand_valve=30.0),
         Correction(),
     )
 
@@ -535,7 +551,9 @@ async def world(
             settings_store, device, home, log_store, tmp_path, clock=clock, open_meteo_url=f"{fake_ha.url}/v1/dwd-icon"
         )
         room_gate = RoomGate(client, settings_store, home.hems_sources, log_store, tmp_path, clock=clock)
-        control = RoomControl(settings_store, device, hems, room_gate, home, log_store, tmp_path, clock=clock)
+        control = RoomControl(
+            settings_store, device, hems, room_gate, home, log_store, tmp_path, clock=clock, read_stagger=0
+        )
         gate = WriteGate(
             bridge_client,
             pairing,
@@ -582,7 +600,7 @@ async def messages(log: LogStore, category: LogCategory | None = None) -> list[s
 
 def learned(world: World, trv: str) -> None:
     # As if a test run had been done (it takes a night).
-    world.control._curves[trv] = complete_curve()
+    world.control._maps[trv] = known_map()
 
 
 async def test_the_bathroom_in_control_gets_its_setpoint_plus_offset(world: World) -> None:
@@ -627,7 +645,7 @@ async def test_control_needs_a_complete_test_run_and_a_confirmation(world: World
     assert confirmed.status_code == 200
     bath = next(room for room in confirmed.json()["control"]["rooms"] if room["name"] == "Bad")
     assert bath["stage"] == "control" and bath["effective"] == "control"
-    assert bath["curve"]["learned"]
+    assert bath["valve_map"]["ready"] and bath["valve_map"]["missing"] == []
 
 
 async def test_demo_mode_hands_the_thermostats_back_first(world: World) -> None:
@@ -821,12 +839,13 @@ def test_too_warm_lowers_the_correction_once() -> None:
 
 def test_the_cascade_sets_a_manual_change_back_to_its_own_value() -> None:
     decision, _ = decide(
-        room_inputs(curve=complete_curve(), room_c=21.0, valve=20.0, trv_setpoint_c=23.0, expected_c=21.0),
+        room_inputs(valve_map=known_map(), room_c=21.0, valve=20.0, trv_setpoint_c=23.0, expected_c=21.0),
         Correction(),
     )
 
-    # Finding 10: 30 % -> the 20 % step at +1 K above the thermostat's 21.5 °C. Compared with the hand's 23 °C the
-    # hysteresis would keep 23 °C; compared with what the app set (21 °C) it goes to 22.5 °C.
+    # Finding 10: 30 % -> the 20 % step (falling, from 20 % open: reached at +1 K above the thermostat's 21.5 °C).
+    # Compared with the hand's 23 °C the hysteresis would keep 23 °C; compared with what the app set (21 °C) it
+    # goes to 22.5 °C.
     assert (decision.target_c, decision.reason) == (22.5, RoomReason.MANUAL)
 
 
@@ -844,6 +863,7 @@ def test_a_test_run_is_complete_only_when_the_valve_closed_again() -> None:
     assert result is not None and not result.complete
 
     run.steps.append(step(-1.0, 0.0, rising=False))
+    run.reached_closed = True
     result = run.result()
     assert result is not None and result.complete
 
@@ -1137,3 +1157,213 @@ async def test_what_an_armed_run_waits_for_is_logged_once_a_night(world: World) 
         f"Testlauf Büro heute Nacht nicht gestartet: zuletzt {band}.",
         f"Testlauf Büro abgebrochen: vom Nutzer abgebrochen; wartete zuletzt: {band}.",
     ]
+
+
+# --- 1.4.2: reads of the W600, learning, the live page ------------------------------------------------------
+
+READ_PAYLOAD = '{"running_state": ""}'
+
+
+def reads(world: World) -> list[dict[str, Any]]:
+    return [body for service, body, _query in world.fake.service_calls if service == "mqtt.publish"]
+
+
+async def room_status(world: World, name: str) -> dict[str, Any]:
+    page = (await world.http.get("/api/rooms")).json()["control"]
+    room: dict[str, Any] = next(room for room in page["rooms"] if room["name"] == name)
+    return room
+
+
+async def test_the_w600_is_read_through_the_write_gate_and_the_comet_is_not(world: World) -> None:
+    world.fake.positions["Thermostat Büro"] = 55.0
+
+    await world.control.minute()
+
+    assert reads(world) == [
+        {"topic": "zigbee2mqtt/Thermostat Büro/get", "payload": READ_PAYLOAD, "qos": 0, "retain": False}
+    ]
+    await eventually(lambda: world.home.hems_sources.number(TRV_OFFICE_VALVE) == 55.0)
+    office, bath = await room_status(world, "Büro"), await room_status(world, "Bad")
+    assert office["read"]["topic"] == "zigbee2mqtt/Thermostat Büro/get"
+    assert office["read"]["found_name"] == "Thermostat Büro" and office["read"]["today"] == 1
+    assert bath["read"] is None
+
+
+async def test_reads_go_out_in_demo_mode_too_but_not_with_the_room_control_off(world: World) -> None:
+    world.settings.update(lambda current: replace(current, operating_mode=OperatingMode.DEMO))
+    await world.control.minute()
+    assert len(reads(world)) == 1
+
+    world.settings.update(
+        lambda current: replace(current, room_control=replace(current.room_control, mode=RoomControlMode.OFF))
+    )
+    world.clock.now += timedelta(minutes=10)
+    await world.control.minute()
+
+    assert len(reads(world)) == 1
+
+
+async def test_the_regular_read_comes_shortly_before_the_beat(world: World) -> None:
+    await beat(world, 0)
+    first = len(reads(world))
+    times: list[int] = []
+    for minute in range(1, 11):
+        world.clock.now += timedelta(minutes=1)
+        await world.control.minute()
+        if len(reads(world)) > first + len(times):
+            times.append(minute)
+        if minute % 5 == 0:
+            await world.hems.sample()
+
+    # The beat (samples, then the room control) at 0, 5 and 10 minutes. After the read at the start the next waits
+    # 4 minutes (1 minute before the beat at 5), then 2 minutes before the beat at 10.
+    assert times == [4, 8]
+
+
+async def test_a_new_setpoint_is_followed_by_reads_one_and_three_minutes_later(world: World) -> None:
+    await world.control.minute()
+    world.fake.change(TRV_OFFICE, temperature=22.5)
+    await eventually(lambda: world.home.hems_sources.attribute(TRV_OFFICE, "temperature") == 22.5)
+
+    for _ in range(4):
+        world.clock.now += timedelta(minutes=1)
+        await world.control.minute()
+
+    # The first read at the start, then 1 and 3 minutes after the change by hand (the next regular one later).
+    assert len(reads(world)) == 3
+
+
+def seen_state(world: World, entity_id: str) -> str | None:
+    state = world.home.hems_sources.get(entity_id)
+    return state.state if state is not None else None
+
+
+async def test_last_seen_shows_whether_the_w600_answered_a_read(world: World) -> None:
+    world.fake.clock = world.clock
+    long_ago = T0 - timedelta(hours=13)
+    world.fake.set(TRV_OFFICE_VALVE, "30", unit="%", name="Thermostat Büro Ventil", reported=long_ago)
+    seen = world.fake.add_last_seen(at=long_ago)
+
+    await world.control.minute()
+    await eventually(lambda: seen_state(world, seen) == T0.isoformat())
+    office = await room_status(world, "Büro")
+
+    assert office["last_seen"] and office["side"]["last_seen"] == seen
+    # The position was unchanged (Home Assistant shows nothing new), last_seen shows the answer.
+    assert datetime.fromisoformat(office["valve_at"]) == T0
+
+    # It stops answering: the reads go out, the position counts from its last answer.
+    del world.fake.z2m_devices["Thermostat Büro"]
+    world.clock.now += timedelta(minutes=5)
+    await world.control.minute()
+    office = await room_status(world, "Büro")
+    assert datetime.fromisoformat(office["read"]["last_read"]) == T0 + timedelta(minutes=5)
+    assert datetime.fromisoformat(office["valve_at"]) == T0
+
+
+def test_a_silent_thermostat_is_named_by_its_life_sign_not_by_an_old_valve() -> None:
+    old = T0 - timedelta(hours=13)
+    trv = EntityState(TRV_OFFICE, "heat", {"min_temp": 5, "max_temp": 30, "temperature": 21}, old)
+    valve = EntityState(TRV_OFFICE_VALVE, "30", {}, old)
+    seen_entity = TRV_OFFICE.replace("climate.", "sensor.") + "_last_seen"
+    side = {"last_seen": seen_entity}
+    silent = "Das Thermostat hat sich seit über 12 h nicht gemeldet."
+
+    assert silent in read(TRV_OFFICE, trv, {}, {}, valve=valve, now=T0).warnings
+    seen = EntityState(seen_entity, (T0 - timedelta(minutes=3)).isoformat(), {}, old)
+    heard = read(TRV_OFFICE, trv, side, {}, valve=valve, now=T0, last_seen=seen)
+    assert silent not in heard.warnings and heard.life_sign == T0 - timedelta(minutes=3) and heard.has_last_seen
+    assert not any("Ventilstellung" in warning for warning in heard.warnings)
+
+
+async def test_the_page_rooms_hears_of_a_change_at_once(world: World) -> None:
+    async with world.control.changes() as changes:
+        world.fake.set(OFFICE, "21.4", unit="°C", name="Büro Temperatur")
+        async with asyncio.timeout(2):
+            await changes.get()
+        await beat(world)
+        async with asyncio.timeout(2):
+            await changes.get()
+
+
+async def test_everyday_points_free_control_without_a_test_run(world: World) -> None:
+    closed = MapPoint(T0, -0.5, False, Supply.MILD, 0.0, Source.DAILY)
+    world.control._maps[TRV_BATH] = ValveMap().add_points([closed])
+
+    refused = await world.http.put(
+        f"/api/rooms/{TRV_BATH_TEMPERATURE}/stage", json={"stage": "control", "confirm": True}
+    )
+    world.control._maps[TRV_BATH] = world.control._maps[TRV_BATH].add_points(
+        [MapPoint(T0, 2.0, True, Supply.MILD, 92.0, Source.DAILY)]
+    )
+    allowed = await world.http.put(
+        f"/api/rooms/{TRV_BATH_TEMPERATURE}/stage", json={"stage": "control", "confirm": True}
+    )
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == (
+        "Die App kennt noch nicht: „ganz offen“ bei warmem Wasser (aus einem Testlauf oder dem Alltag)."
+    )
+    assert allowed.status_code == 200
+    bath = next(room for room in allowed.json()["control"]["rooms"] if room["name"] == "Bad")
+    assert bath["valve_map"]["ready"] and bath["valve_map"]["points_daily"] == 2
+    assert (bath["valve_map"]["closed_k"], bath["valve_map"]["full_k"]) == (-0.5, 2.0)
+
+
+async def test_a_calm_half_hour_in_everyday_operation_is_a_point_of_the_bathrooms_map(world: World) -> None:
+    world.control._zones[MV_ZONE_2] = _Zone(supply=SupplyNow(HeatSupply.HEAT_PUMP))
+
+    for _ in range(31):
+        await world.control.minute()
+        world.clock.now += timedelta(minutes=1)
+
+    # The Comet: setpoint 22 °C, 22.5 °C at the thermostat, 40 % open; warm water from the buffer at 34 °C.
+    points = world.control._maps[TRV_BATH].points
+    assert [(item.offset_k, item.valve, item.supply, item.source) for item in points] == [
+        (-0.5, 40.0, Supply.MILD, Source.DAILY)
+    ]
+
+
+async def test_a_test_run_for_a_valve_known_fully_open_goes_down_only(world: World) -> None:
+    world.control._maps[TRV_OFFICE] = ValveMap().add_points([MapPoint(T0, 2.5, True, Supply.MILD, 90.0, Source.TEST)])
+    await hang_probe_at_the_office(world)
+
+    armed = await world.http.post(f"/api/rooms/{OFFICE}/test", json={"action": "arm", "confirm": True})
+
+    assert armed.status_code == 200
+    run = world.control._test
+    assert run is not None and run.down_only and run.full_offset_k == 2.5
+    assert (
+        "Testlauf Büro vorgemerkt (nur abwärts, „ganz offen“ ist schon bekannt): startet ab 22:00 Uhr."
+        in await messages(world.log, LogCategory.ROOMS)
+    )
+
+
+async def test_the_test_runs_of_1_4_1_become_the_first_points_of_the_map(world: World, tmp_path: Path) -> None:
+    world.control._curves[TRV_BATH] = complete_curve()
+    world.control._save()
+    saved = json.loads((tmp_path / "rooms.json").read_text(encoding="utf-8"))
+    del saved["maps"]
+    (tmp_path / "rooms.json").write_text(json.dumps(saved), encoding="utf-8")
+
+    again = RoomControl(world.settings, world.control._state, world.hems, world.gate, world.home, world.log, tmp_path)
+
+    assert again._maps[TRV_BATH].ready(T0 + timedelta(hours=5))
+    assert again._maps[TRV_BATH].counts()[Source.TEST] == 7
+
+
+async def test_the_base_topic_and_a_rooms_own_device_name_go_into_the_topic(world: World) -> None:
+    bad = await world.http.put("/api/rooms/mqtt", json={"base_topic": "z2m/#"})
+    good = await world.http.put("/api/rooms/mqtt", json={"base_topic": "z2m"})
+    details = {"trv_entity": TRV_OFFICE, "valve_entity": TRV_OFFICE_VALVE, "setpoint_c": 21.0}
+    writes = await world.http.put(f"/api/rooms/{OFFICE}", json={**details, "zigbee_name": "Heizung/set"})
+    named = await world.http.put(f"/api/rooms/{OFFICE}", json={**details, "zigbee_name": "Heizung Büro"})
+
+    assert bad.status_code == 422 and good.status_code == 200
+    assert good.json()["control"]["mqtt_base_topic"] == "z2m"
+    assert writes.status_code == 422 and "get" in writes.json()["detail"]
+    assert named.status_code == 200
+    await world.control.minute()
+    assert reads(world)[-1]["topic"] == "z2m/Heizung Büro/get"
+    office = await room_status(world, "Büro")
+    assert office["read"]["topic"] == "z2m/Heizung Büro/get" and office["read"]["found_name"] == "Thermostat Büro"

@@ -22,6 +22,33 @@ OWN_ENTITY = re.compile(r"^(sensor|binary_sensor)\.vaillant_eebus_[a-z0-9_]+$")
 _IEEE = re.compile(r"^[a-z_]+\.(0x[0-9a-f]{16})(?:_[a-z0-9_]+)?$")
 
 
+# Zigbee2MQTT's MQTT base topic: plain segments, no wildcards.
+MQTT_BASE_TOPIC = re.compile(r"^[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+){0,3}$")
+DEFAULT_MQTT_BASE_TOPIC = "zigbee2mqtt"
+DEVICE_NAME_MAX = 100
+# Zigbee2MQTT splits "<base>/<name>/(get|set)[/<attribute>]" at the first "get" or "set" segment and ignores
+# names starting with "bridge" (lib/extension/publish.ts): such a name could turn a read into a write.
+_COMMAND_SEGMENTS = frozenset({"get", "set"})
+
+
+def device_name_problem(name: str) -> str | None:
+    """Why this Zigbee2MQTT device name may not be used in a topic; None when it may (German)."""
+    if not name or len(name) > DEVICE_NAME_MAX:
+        return f"Der Gerätename braucht 1 bis {DEVICE_NAME_MAX} Zeichen."
+    if name != name.strip():
+        return "Der Gerätename darf nicht mit einem Leerzeichen beginnen oder enden."
+    if any(ord(char) < 32 or char in "+#\u007f" for char in name):
+        return "Der Gerätename darf weder Steuerzeichen noch „+“ oder „#“ enthalten."
+    segments = name.split("/")
+    if any(not segment.strip() for segment in segments):
+        return "Der Gerätename darf keine leeren Teile zwischen „/“ haben."
+    if any(segment.strip().lower() in _COMMAND_SEGMENTS for segment in segments):
+        return "Der Gerätename darf keinen Teil „get“ oder „set“ haben."
+    if name.lower().startswith("bridge"):
+        return "Der Gerätename darf nicht mit „bridge“ beginnen."
+    return None
+
+
 def is_own_entity(entity_id: str) -> bool:
     return OWN_ENTITY.match(entity_id) is not None
 

@@ -2,13 +2,15 @@
 
 The app reads the states of the entities the user chose and reports its own
 sensors: set_state() and remove_state() refuse every entity outside this
-app's prefix. It calls three kinds of services: weather.get_forecasts, which
+app's prefix. It calls four kinds of services: weather.get_forecasts, which
 reads a weather forecast for the energy management; with the connection
 myVAILLANT the few services in DEVICE_SERVICES that control the heat pump
-through the myVAILLANT integration's entities; and ROOM_SERVICES, the one
-service that sets a radiator thermostat's setpoint. Both kinds that change
-something are called only by the write gate (write_gate.py, for the heat pump
-through myvaillant.py; tests check it).
+through the myVAILLANT integration's entities; ROOM_SERVICES, the one
+service that sets a radiator thermostat's setpoint; and mqtt.publish with one
+fixed message that asks Zigbee2MQTT to read an Aqara thermostat's valve
+position (1.4.2). All but the forecast are called only by the write gate
+(write_gate.py, for the heat pump through myvaillant.py; tests check it). A
+template renders a device's name (read only).
 
 One WebSocket connection carries the state changes of the watched entities
 and the "homeassistant_started" event, and answers the reading of the
@@ -34,7 +36,13 @@ from typing import Any
 import aiohttp
 
 from vaillant_eebus.bridge_client import Backoff
-from vaillant_eebus.ids import CLIMATE_ENTITY, OWN_ENTITY, WATER_HEATER_ENTITY
+from vaillant_eebus.ids import (
+    CLIMATE_ENTITY,
+    MQTT_BASE_TOPIC,
+    OWN_ENTITY,
+    WATER_HEATER_ENTITY,
+    device_name_problem,
+)
 from vaillant_eebus.log_store import LogCategory, LogStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -60,6 +68,11 @@ ROOM_SERVICES: dict[tuple[str, str], re.Pattern[str]] = {
     ("climate", "set_temperature"): CLIMATE_ENTITY,
 }
 ROOM_SERVICE_FIELDS = frozenset({"temperature"})
+# The one MQTT message this app sends (1.4.2): Zigbee2MQTT reads an Aqara W600's valve position (attribute
+# 0x0360, exposed as running_state with a "get"). Only to "<base topic>/<device name>/get", only this payload,
+# never retained; the room gate sends it.
+POSITION_READ_SERVICE = ("mqtt", "publish")
+POSITION_READ_PAYLOAD = '{"running_state": ""}'
 # Seconds between reading the watched entities again.
 REFRESH_INTERVAL = 300.0
 # Seconds to wait for an answer of Home Assistant.
@@ -277,15 +290,42 @@ class HomeAssistantClient:
             raise ValueError(f"{domain}.{service}: only a temperature may be set, not {dict(data)!r}")
         await self._call_service(domain, service, entity_id, data, limit=ROOM_SERVICE_TIMEOUT)
 
+    async def publish_position_read(self, base_topic: str, device: str) -> None:
+        """Ask Zigbee2MQTT to read a thermostat's valve position; only the room gate does this.
+
+        Publishes POSITION_READ_PAYLOAD to position_read_topic(). Raises ValueError for an
+        invalid base topic or device name, ServiceCallFailed when the call failed.
+        """
+        topic = position_read_topic(base_topic, device)
+        domain, service = POSITION_READ_SERVICE
+        body = {"topic": topic, "payload": POSITION_READ_PAYLOAD, "qos": 0, "retain": False}
+        await self._post_service(domain, service, body, limit=ROOM_SERVICE_TIMEOUT)
+
+    async def device_name(self, entity_id: str) -> str | None:
+        """The name of the device a thermostat belongs to, as its integration named it (Zigbee2MQTT: the
+        device's friendly name, not a name given in Home Assistant); None without a device.
+
+        Renders a template, which reads only. Raises HomeAssistantUnavailable.
+        """
+        if not CLIMATE_ENTITY.match(entity_id):
+            raise ValueError(f"{entity_id!r} is not a climate entity")
+        template = "{{ device_attr(device_id('" + entity_id + "'), 'name') }}"
+        text = await self._rest("POST", "/api/template", body={"template": template}, text=True)
+        name = str(text).strip()
+        return None if name in ("", "None") else name
+
     async def _call_service(
         self, domain: str, service: str, entity_id: str, data: Mapping[str, Any], *, limit: float
     ) -> None:
+        await self._post_service(domain, service, {"entity_id": entity_id, **data}, limit=limit)
+
+    async def _post_service(self, domain: str, service: str, body: Mapping[str, Any], *, limit: float) -> None:
         if self._session is None:
             raise ServiceCallFailed("client not started", executed=False, code="NOT_STARTED")
         try:
             async with self._session.post(
                 f"{self._url}/api/services/{domain}/{service}",
-                json={"entity_id": entity_id, **data},
+                json=dict(body),
                 timeout=aiohttp.ClientTimeout(total=limit),
             ) as response:
                 if response.status in _REFUSED:
@@ -334,6 +374,7 @@ class HomeAssistantClient:
         body: Any = None,
         params: Mapping[str, str] | None = None,
         missing_ok: bool = False,
+        text: bool = False,
     ) -> Any:
         if self._session is None:
             raise HomeAssistantUnavailable("client not started")
@@ -349,6 +390,8 @@ class HomeAssistantClient:
                     return None
                 if response.status >= 400:
                     raise HomeAssistantUnavailable(f"{method} {path}: HTTP {response.status}")
+                if text:
+                    return await response.text()
                 return await response.json(content_type=None)
         except (aiohttp.ClientError, TimeoutError, ValueError) as err:
             raise HomeAssistantUnavailable(f"{method} {path}: {err!r}") from err
@@ -579,6 +622,17 @@ def _statistic_row(item: Any) -> StatisticRow | None:
     return StatisticRow(
         start=moment, mean=number("mean"), min=number("min"), max=number("max"), change=number("change")
     )
+
+
+def position_read_topic(base_topic: str, device: str) -> str:
+    """The topic that makes Zigbee2MQTT read a device's state; ValueError for anything that is not
+    "<base topic>/<device name>/get" with a plain base topic and a safe name (ids.device_name_problem)."""
+    if not MQTT_BASE_TOPIC.match(base_topic):
+        raise ValueError(f"{base_topic!r} is not an MQTT base topic")
+    problem = device_name_problem(device)
+    if problem is not None:
+        raise ValueError(problem)
+    return f"{base_topic}/{device}/get"
 
 
 def _check_own(entity_id: str) -> None:

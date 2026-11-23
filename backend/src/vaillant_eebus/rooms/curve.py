@@ -1,11 +1,10 @@
-"""How a thermostat's valve answers its setpoint, learned in test runs (punkt1-trv-regelung.md 3b).
+"""The test runs of a thermostat: their settled steps (punkt1-trv-regelung.md 3b).
 
 A test run moves the setpoint in steps; each step that settled is a point:
 the offset of the setpoint to the temperature at the thermostat and the valve
 opening, rising and falling, with the pipe temperatures of the probe pair.
-The W600 regulates with a PI controller, so the points describe how the
-thermostat behaves with warm water, not a fixed line; the app uses only the
-openings the thermostat really reached.
+Since 1.4.2 the steps also go into the thermostat's valve map (learning.py),
+which decides about "Steuern"; this module keeps the last runs for the page.
 """
 
 from __future__ import annotations
@@ -16,8 +15,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-FULL_OPEN = 90.0
-OPEN_FROM = 5.0
+from vaillant_eebus.rooms.learning import CLOSED as OPEN_FROM
+from vaillant_eebus.rooms.learning import FULL_OPEN
+
 # Results kept per thermostat.
 KEEP_RESULTS = 5
 
@@ -76,12 +76,9 @@ class TestResult:
 
 @dataclass(frozen=True, slots=True)
 class ValveCurve:
-    results: tuple[TestResult, ...] = ()
+    """The last test runs of a thermostat."""
 
-    @property
-    def learned(self) -> bool:
-        """At least one complete test run: required before the room may be controlled."""
-        return any(result.complete for result in self.results)
+    results: tuple[TestResult, ...] = ()
 
     @property
     def last(self) -> TestResult | None:
@@ -89,43 +86,6 @@ class ValveCurve:
 
     def add(self, result: TestResult) -> ValveCurve:
         return ValveCurve(results=(*self.results, result)[-KEEP_RESULTS:])
-
-    def rising(self) -> list[tuple[float, float]]:
-        """(offset, opening) of the rising steps of the complete runs, sorted by offset."""
-        points = [
-            (step.offset_k, step.valve)
-            for result in self.results
-            if result.complete
-            for step in result.steps
-            if step.rising and step.offset_k is not None and step.valve is not None
-        ]
-        return sorted(points)
-
-    def levels(self) -> list[float]:
-        """Openings the thermostat really reached, rounded to 10 %."""
-        return sorted({round(valve / 10) * 10.0 for _offset, valve in self.rising()})
-
-    def offset_for(self, opening: float) -> float | None:
-        """The smallest offset at which the thermostat opened at least this far (median over the runs)."""
-        if opening <= OPEN_FROM:
-            closing = [result.closing_k for result in self.results if result.complete and result.closing_k is not None]
-            return statistics.median(closing) if closing else None
-        per_run = []
-        for result in self.results:
-            if not result.complete:
-                continue
-            reached = [
-                step.offset_k
-                for step in result.steps
-                if step.rising and step.offset_k is not None and step.valve is not None and step.valve >= opening
-            ]
-            if reached:
-                per_run.append(min(reached))
-        return round(statistics.median(per_run), 2) if per_run else None
-
-    def nearest_level(self, opening: float) -> float | None:
-        levels = self.levels()
-        return min(levels, key=lambda level: abs(level - opening)) if levels else None
 
 
 def curve_to_json(curve: ValveCurve) -> list[dict[str, Any]]:

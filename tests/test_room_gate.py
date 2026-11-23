@@ -36,14 +36,21 @@ from vaillant_eebus import hems as hems_package
 from vaillant_eebus import rooms as rooms_package
 from vaillant_eebus.bridge_client import Backoff
 from vaillant_eebus.energy import EnergyMeter
-from vaillant_eebus.ha_client import ROOM_SERVICES, HomeAssistantClient
+from vaillant_eebus.ha_client import (
+    POSITION_READ_PAYLOAD,
+    POSITION_READ_SERVICE,
+    ROOM_SERVICES,
+    HomeAssistantClient,
+)
 from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.myvaillant import MyVaillantState
 from vaillant_eebus.room_data import RoomControlMode, RoomControlSettings, RoomDetails, RoomStage
 from vaillant_eebus.settings import Connection, MyVaillantEntities, OperatingMode, Room, SettingsStore
 from vaillant_eebus.write_gate import (
+    READS_PER_DAY,
     Held,
+    ReadValvePosition,
     RoomGate,
     RoomReason,
     SetThermostatSetpoint,
@@ -647,3 +654,122 @@ def test_the_energy_management_still_has_no_way_to_write() -> None:
             "write_gate" in name or "bridge_client" in name or name.startswith("vaillant_eebus.rooms")
             for name in imported
         ), source.name
+
+
+# --- reading a W600's valve position (1.4.2) ---------------------------------------------------------------
+
+
+def read_office(device: str = "Thermostat Büro") -> ReadValvePosition:
+    return ReadValvePosition(room_id=OFFICE, device=device)
+
+
+def mqtt(rig: Rig) -> list[dict[str, Any]]:
+    return [body for service, body, _query in rig.fake.service_calls if service == "mqtt.publish"]
+
+
+async def test_a_read_is_one_fixed_message_and_no_command(rig: Rig) -> None:
+    rig.fake.positions["Thermostat Büro"] = 12.0
+
+    result = await rig.gate.read_position(read_office())
+
+    assert result.sent
+    assert mqtt(rig) == [
+        {"topic": "zigbee2mqtt/Thermostat Büro/get", "payload": POSITION_READ_PAYLOAD, "qos": 0, "retain": False}
+    ]
+    await eventually(lambda: rig.home.hems_sources.number(TRV_OFFICE_VALVE) == 12.0)
+    # Not one of the commands a day, nothing in the protocol, the thermostat is not "touched".
+    assert rig.gate.commands(TRV_OFFICE).today == 0 and rig.gate.touched() == []
+    assert rig.gate.read_status(TRV_OFFICE).today == 1
+    assert not any("Abfrage" in text or "zigbee2mqtt" in text for text in await messages(rig.log))
+
+
+@pytest.mark.parametrize("mode", [OperatingMode.DEMO, OperatingMode.LIVE])
+async def test_a_read_goes_out_in_demo_mode_and_in_every_stage(rig: Rig, mode: OperatingMode) -> None:
+    configure(rig.settings, mode=mode)
+    rig.settings.update(
+        lambda current: replace(current, room_control=replace(current.room_control, mode=RoomControlMode.OBSERVE))
+    )
+
+    assert (await rig.gate.read_position(read_office())).sent
+
+
+async def test_no_read_with_the_room_control_off_or_a_name_that_could_write(rig: Rig) -> None:
+    for device in ("Büro/set", "bridge", "Büro #"):
+        with pytest.raises(WriteRejected) as rejected:
+            await rig.gate.read_position(read_office(device))
+        assert rejected.value.status == 422
+    rig.settings.update(
+        lambda current: replace(current, room_control=replace(current.room_control, mode=RoomControlMode.OFF))
+    )
+    with pytest.raises(WriteRejected):
+        await rig.gate.read_position(read_office())
+    with pytest.raises(WriteRejected):
+        await rig.gate.submit(SetThermostatSetpoint(room_id=OFFICE, celsius=21.0, reason=RoomReason.READ))
+    assert mqtt(rig) == [] and rig.calls() == []
+
+
+async def test_reads_are_spaced_and_capped_per_thermostat(rig: Rig) -> None:
+    assert (await rig.gate.read_position(read_office())).sent
+    held = await rig.gate.read_position(read_office())
+    rig.clock.advance(seconds=30)
+    again = await rig.gate.read_position(read_office())
+
+    assert held.held is Held.INTERVAL and again.sent
+    for _ in range(READS_PER_DAY):
+        rig.clock.advance(seconds=31)
+        await rig.gate.read_position(read_office())
+    capped = await rig.gate.read_position(read_office())
+    assert capped.held is Held.LIMIT and rig.gate.read_status(TRV_OFFICE).today == READS_PER_DAY
+    limit = [text for text in await messages(rig.log, problems=True) if "Abfragen der Ventilstellung heute" in text]
+    assert len(limit) == 1
+    rig.clock.now = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+    assert rig.new_gate().read_status(TRV_OFFICE).today == 0
+
+
+async def test_a_refused_read_is_logged_once_and_its_return(rig: Rig) -> None:
+    rig.fake.service_status["mqtt.publish"] = 404
+
+    first = await rig.gate.read_position(read_office())
+    rig.clock.advance(minutes=5)
+    await rig.gate.read_position(read_office())
+    del rig.fake.service_status["mqtt.publish"]
+    rig.clock.advance(minutes=5)
+    back = await rig.gate.read_position(read_office())
+
+    assert not first.sent and back.sent
+    texts = await messages(rig.log, LogCategory.ROOMS)
+    assert texts == [
+        "Abfrage der Ventilstellung Büro geht wieder.",
+        "Abfrage der Ventilstellung Büro (zigbee2mqtt/Thermostat Büro/get) geht nicht (HTTP 404). Läuft die "
+        "MQTT-Integration in Home Assistant?",
+    ]
+    assert rig.gate.read_status(TRV_OFFICE).problem is None
+
+
+def test_only_the_write_gate_asks_for_a_valve_position() -> None:
+    package = Path(ha_client_module.__file__).parent
+    callers = {
+        source.name: used
+        for source in package.rglob("*.py")
+        if (used := _attributes(source) & {"publish_position_read", "_post_service"})
+    }
+
+    assert callers == {"write_gate.py": {"publish_position_read"}, "ha_client.py": {"_post_service"}}
+
+
+def test_the_one_mqtt_message_is_a_read() -> None:
+    assert POSITION_READ_SERVICE == ("mqtt", "publish")
+    assert POSITION_READ_PAYLOAD == '{"running_state": ""}'
+    # "mqtt" appears in the client once: in POSITION_READ_SERVICE.
+    tree = ast.parse(Path(ha_client_module.__file__).read_text(encoding="utf-8"))
+    constants = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and node.value == "mqtt"]
+    assert constants == ["mqtt"]
+
+
+async def test_the_client_publishes_only_to_a_get_topic(fake_ha: FakeHomeAssistant) -> None:
+    async with HomeAssistantClient(fake_ha.url, TOKEN) as client:
+        for base, device in (("zigbee2mqtt", "Büro/set"), ("zigbee2mqtt/#", "Büro"), ("zigbee2mqtt", "")):
+            with pytest.raises(ValueError):
+                await client.publish_position_read(base, device)
+        await client.publish_position_read("z2m", "Etage 1/Büro")
+    assert fake_ha.mqtt_reads == ["z2m/Etage 1/Büro/get"]

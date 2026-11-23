@@ -18,7 +18,14 @@ from enum import StrEnum
 from typing import Any
 
 from vaillant_eebus.hems.config import in_window, is_number, on_step, parse_time
-from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY
+from vaillant_eebus.ids import (
+    CLIMATE_ENTITY,
+    DEFAULT_MQTT_BASE_TOPIC,
+    ENTITY_ID,
+    MQTT_BASE_TOPIC,
+    SENSOR_ENTITY,
+    device_name_problem,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +103,8 @@ class RoomControlSettings:
     test_start: time = time(22, 0)
     test_latest_start: time = time(1, 0)
     test_end: time = time(5, 0)
+    # Zigbee2MQTT's base topic, for reading the Aqara thermostats' valve positions (1.4.2).
+    mqtt_base_topic: str = DEFAULT_MQTT_BASE_TOPIC
 
 
 class SurfaceKind(StrEnum):
@@ -162,6 +171,8 @@ class RoomDetails:
     deadband_k: float = 0.5
     min_interval_min: int = 15
     max_commands: int = 24
+    # The thermostat's name in Zigbee2MQTT, if it differs from its device's name in Home Assistant (1.4.2).
+    zigbee_name: str | None = None
 
     def setpoint_at(self, moment: time) -> float:
         """The room's setpoint at this local time of day."""
@@ -217,6 +228,7 @@ def details_from_json(raw: Any) -> RoomDetails:
         deadband_k=_value(raw, "deadband_k", DEADBAND_K, defaults.deadband_k, step=0.5),
         min_interval_min=int(_value(raw, "min_interval_min", MIN_INTERVAL_MIN, defaults.min_interval_min, step=1)),
         max_commands=int(_value(raw, "max_commands", MAX_COMMANDS, defaults.max_commands, step=1)),
+        zigbee_name=_device_name(raw.get("zigbee_name")),
     )
 
 
@@ -258,6 +270,7 @@ def details_to_json(details: RoomDetails) -> dict[str, Any]:
         "deadband_k": details.deadband_k,
         "min_interval_min": details.min_interval_min,
         "max_commands": details.max_commands,
+        "zigbee_name": details.zigbee_name,
     }
 
 
@@ -291,6 +304,7 @@ def room_control_from_json(raw: Any, *, observe: bool) -> RoomControlSettings:
         test_start=_time(raw, "test_start", defaults.test_start),
         test_latest_start=_time(raw, "test_latest_start", defaults.test_latest_start),
         test_end=_time(raw, "test_end", defaults.test_end),
+        mqtt_base_topic=_base_topic(raw.get("mqtt_base_topic"), defaults.mqtt_base_topic),
     )
 
 
@@ -307,7 +321,26 @@ def room_control_to_json(settings: RoomControlSettings) -> dict[str, Any]:
         "test_start": settings.test_start.strftime("%H:%M"),
         "test_latest_start": settings.test_latest_start.strftime("%H:%M"),
         "test_end": settings.test_end.strftime("%H:%M"),
+        "mqtt_base_topic": settings.mqtt_base_topic,
     }
+
+
+def _device_name(raw: Any) -> str | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str) and device_name_problem(raw) is None:
+        return raw
+    _LOGGER.warning("Settings: invalid Zigbee2MQTT device name %r ignored", raw)
+    return None
+
+
+def _base_topic(raw: Any, default: str) -> str:
+    if raw is None:
+        return default
+    if isinstance(raw, str) and MQTT_BASE_TOPIC.match(raw):
+        return raw
+    _LOGGER.warning("Settings: invalid MQTT base topic %r, using %s", raw, default)
+    return default
 
 
 def _stage(raw: Any) -> RoomStage:

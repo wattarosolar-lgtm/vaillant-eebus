@@ -7,6 +7,11 @@ Aqara W600 must regulate with its own sensor ("internal"), run in "heat"
 without a preset, with its own window detection off; the Comet must be in
 trv_mode 2 (automatic). The child lock should be on (punkt1-trv-regelung.md 6).
 None of these is ever written.
+
+Zigbee2MQTT can report when it last heard of a device ("last_seen", 1.4.2): with
+sensor.<address>_last_seen enabled, the app takes it as the thermostat's life
+sign. Home Assistant does not record a value reported unchanged, so without it
+the life sign is the newest change of the thermostat or its valve.
 """
 
 from __future__ import annotations
@@ -34,11 +39,12 @@ SIDE_NAMES = frozenset(
         "position",
         "pi_heating_demand",
         "window_open",
+        "last_seen",
     }
 )
 LOW_BATTERY = 20.0
-# A valve position this old is shown as uncertain (the W600 reports on change only).
-VALVE_STALE = timedelta(hours=12)
+# A thermostat silent this long is shown as uncertain.
+SILENT = timedelta(hours=12)
 _ON = frozenset({"on", "true", "1"})
 _OFF = frozenset({"off", "false", "0"})
 
@@ -65,6 +71,10 @@ class Thermostat:
     # Other entities of the same device by their name, e.g. "child_lock".
     side: Mapping[str, str] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+    # When Zigbee2MQTT last heard of it (last_seen), else the newest change of it or its valve.
+    life_sign: datetime | None = None
+    # The last_seen entity exists (Zigbee2MQTT reports it).
+    has_last_seen: bool = False
 
 
 def side_entities(trv: str, states: Iterable[EntityState]) -> dict[str, str]:
@@ -98,9 +108,18 @@ def read(
     *,
     valve: EntityState | None = None,
     now: datetime | None = None,
+    last_seen: EntityState | None = None,
 ) -> Thermostat:
-    """The thermostat as Home Assistant shows it, with what the room control needs checked."""
+    """The thermostat as Home Assistant shows it, with what the room control needs checked.
+
+    last_seen is the state of its last_seen entity, read live (the side states are read every 15 minutes).
+    """
     model = model_of(side)
+    seen = seen_at(last_seen)
+    life_sign = max(
+        (moment for moment in (seen, *(item.last_reported for item in (state, valve) if item)) if moment),
+        default=None,
+    )
     if state is None or state.state in NO_VALUE:
         return Thermostat(
             entity_id=trv,
@@ -112,6 +131,8 @@ def read(
             preset=None,
             side=dict(side),
             warnings=("Das Thermostat ist nicht erreichbar.",),
+            life_sign=life_sign,
+            has_last_seen="last_seen" in side,
         )
     attributes = state.attributes
     preset = attributes.get("preset_mode")
@@ -144,13 +165,8 @@ def read(
     battery = _number(_state(side_states, side, "battery"))
     if battery is not None and battery < LOW_BATTERY:
         warnings.append(f"Batterie schwach ({battery:.0f} %).")
-    if (
-        valve is not None
-        and now is not None
-        and valve.last_reported is not None
-        and now - valve.last_reported > VALVE_STALE
-    ):
-        warnings.append("Die Ventilstellung ist seit über 12 h nicht gemeldet worden.")
+    if now is not None and life_sign is not None and now - life_sign > SILENT:
+        warnings.append("Das Thermostat hat sich seit über 12 h nicht gemeldet.")
     return Thermostat(
         entity_id=trv,
         model=model,
@@ -161,7 +177,20 @@ def read(
         preset=preset if isinstance(preset, str) else None,
         side=dict(side),
         warnings=tuple(warnings),
+        life_sign=life_sign,
+        has_last_seen="last_seen" in side,
     )
+
+
+def seen_at(state: EntityState | None) -> datetime | None:
+    """The time in a last_seen entity (ISO 8601 with offset); None without one."""
+    if state is None or state.state in NO_VALUE:
+        return None
+    try:
+        moment = datetime.fromisoformat(state.state)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
 
 
 def blocking(thermostat: Thermostat) -> list[str]:

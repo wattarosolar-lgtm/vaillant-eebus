@@ -17,7 +17,12 @@ add_thermostats() adds radiator thermostats as Zigbee2MQTT shows them (an
 Aqara W600 and a Eurotronic Comet with their other entities, invented IEEE
 addresses), a room sensor and the pair of pipe sensors; climate.set_temperature
 on a thermostat sets its setpoint (at once, after trv_lag seconds, or never for
-the ones in trv_silent).
+the ones in trv_silent). The template "{{ device_attr(device_id('<entity>'),
+'name') }}" gives a thermostat's device name (device_names); mqtt.publish of
+{"running_state": ""} to "zigbee2mqtt/<device name>/get" makes the Aqara show
+its real valve position (positions) as Zigbee2MQTT does: the position entity
+changes only when the value differs (Home Assistant drops unchanged MQTT
+values), the last_seen entity (add_last_seen()) always.
 """
 
 from __future__ import annotations
@@ -25,7 +30,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
-from collections.abc import Iterable
+import json
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -97,6 +104,16 @@ class FakeHomeAssistant:
         self.cloud_lag: float | None = None
         # Zigbee2MQTT thermostats: a setpoint arrives after trv_lag seconds, never for trv_silent.
         self.trvs: set[str] = set()
+        # Device names (Zigbee2MQTT's friendly names) by entity, for the template device_attr(..., 'name').
+        self.device_names: dict[str, str] = {}
+        # Zigbee2MQTT devices that answer a read: name -> (position entity, last_seen entity or None).
+        self.z2m_devices: dict[str, tuple[str, str | None]] = {}
+        # The Aqara's real valve position by device name; a read shows it.
+        self.positions: dict[str, float] = {}
+        # Topics of every mqtt.publish.
+        self.mqtt_reads: list[str] = []
+        # The time Zigbee2MQTT writes into last_seen.
+        self.clock: Callable[[], datetime] = lambda: datetime.now(UTC)
         self.trv_lag: float | None = None
         self.trv_silent: set[str] = set()
         self.connections = 0
@@ -114,6 +131,7 @@ class FakeHomeAssistant:
         app.router.add_get("/api/history/period/{start}", self._get_history)
         app.router.add_get("/api/config", self._get_config)
         app.router.add_post("/api/services/{domain}/{service}", self._call_service)
+        app.router.add_post("/api/template", self._template)
         app.router.add_get("/websocket", self._websocket)
         app.router.add_get("/v1/dwd-icon", self._open_meteo)
         self._runner = web.AppRunner(app)
@@ -231,6 +249,8 @@ class FakeHomeAssistant:
         self.set(f"binary_sensor.{AQARA}_valve_alarm", "off", name="Thermostat Büro Ventilalarm")
         self.set(f"sensor.{AQARA}_battery", "90", unit="%", name="Thermostat Büro Batterie")
         self.set(TRV_OFFICE_VALVE, "30", unit="%", name="Thermostat Büro Ventil")
+        self.device_names |= {TRV_OFFICE: "Thermostat Büro", TRV_BATH: "Thermostat Bad"}
+        self.z2m_devices["Thermostat Büro"] = (TRV_OFFICE_VALVE, None)
         self.set(
             TRV_BATH,
             "auto",
@@ -252,6 +272,16 @@ class FakeHomeAssistant:
         self.set(OFFICE_HUMIDITY, "48", unit="%", name="Büro Feuchte", attributes={"device_class": "humidity"})
         self.set(PROBE_FLOW, "40.0", unit="°C", name="Fühler A")
         self.set(PROBE_RETURN, "30.0", unit="°C", name="Fühler B")
+
+    def add_last_seen(self, *, at: datetime | None = None) -> str:
+        """Zigbee2MQTT's last_seen for the Aqara (enabled in its settings and in Home Assistant)."""
+        entity = f"sensor.{AQARA}_last_seen"
+        moment = at or datetime.now(UTC)
+        self.set(
+            entity, moment.isoformat(), name="Thermostat Büro Zuletzt gesehen", attributes={"device_class": "timestamp"}
+        )
+        self.z2m_devices["Thermostat Büro"] = (TRV_OFFICE_VALVE, entity)
+        return entity
 
     def change(self, entity_id: str, state: str | None = None, **attributes: Any) -> None:
         """Change an entity's state or some of its attributes, keeping the rest."""
@@ -369,6 +399,8 @@ class FakeHomeAssistant:
             return web.json_response({"message": "Failed"}, status=self.service_status[service])
         if service == "climate.set_temperature" and body.get("entity_id") in self.trvs:
             return self._thermostat(body)
+        if service == "mqtt.publish":
+            return self._publish(body)
         if service in _DEVICE_SERVICES:
             entity_id = body.get("entity_id")
             if entity_id not in self.states:
@@ -434,6 +466,33 @@ class FakeHomeAssistant:
         else:
             asyncio.get_running_loop().call_later(self.trv_lag, lambda: self.change(entity_id, temperature=celsius))
         return web.json_response([])
+
+    def _publish(self, body: dict[str, Any]) -> web.Response:
+        """What Zigbee2MQTT does with a read: the device answers with its state."""
+        topic = body.get("topic")
+        self.mqtt_reads.append(str(topic))
+        match = re.fullmatch(r"zigbee2mqtt/(?!bridge)(.+?)/get", str(topic))
+        if match is None or json.loads(body.get("payload", "null")) != {"running_state": ""}:
+            return web.json_response([])
+        device = self.z2m_devices.get(match.group(1))
+        if device is None:
+            return web.json_response([])
+        position, seen = device
+        real = self.positions.get(match.group(1))
+        if real is not None and self.states.get(position, {}).get("state") != f"{real:g}":
+            self.change(position, f"{real:g}")
+        if seen is not None:
+            self.change(seen, self.clock().isoformat())
+        return web.json_response([])
+
+    async def _template(self, request: web.Request) -> web.Response:
+        if not self._authorized(request):
+            return web.json_response({"message": "Unauthorized"}, status=401)
+        body = await request.json()
+        match = re.fullmatch(r"\{\{ device_attr\(device_id\('([a-z0-9_.]+)'\), 'name'\) \}\}", body.get("template", ""))
+        if match is None:
+            return web.json_response({"message": "template not supported by the fake"}, status=400)
+        return web.Response(text=self.device_names.get(match.group(1), "None"), content_type="text/plain")
 
     def _restore(self, entity_id: str, saved: dict[str, Any]) -> None:
         self.set(entity_id, saved["state"], attributes=saved["attributes"])

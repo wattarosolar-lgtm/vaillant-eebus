@@ -158,8 +158,11 @@ def test_the_night_with_the_sensors_swapped_starts_when_the_bathroom_reaches_its
     run = replay(SONDE_2, SONDE_1)
 
     assert run.started_at == datetime(2026, 11, 21, 23, 41, tzinfo=UTC)
-    # Through the quiet hour of the flow sensor (23:38 to 00:38) and the dip at 01:00 it keeps running.
-    assert run.state is TestState.RUNNING, run.message
+    # Through the quiet hour of the flow sensor (23:38 to 00:38) and the dip at 01:00 it keeps going: it is not
+    # stopped for missing warm water. (The thermostat stayed at 23 °C that night, so the replayed valve does not
+    # follow the steps; since 1.4.2 the run then takes large steps and may be through by 1:40.)
+    assert run.state in (TestState.RUNNING, TestState.DONE), run.message
+    assert "warmes Wasser" not in run.message and len(run.steps) >= 4
 
 
 def test_with_the_rule_of_1_4_0_the_swapped_night_stops_after_half_an_hour_without_reports() -> None:

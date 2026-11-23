@@ -6,6 +6,7 @@ All routes are relative to the ingress path prefix; the UI uses relative URLs.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -52,7 +53,16 @@ from vaillant_eebus.hems.config import (
 from vaillant_eebus.hems.service import HemsService, HemsStatus, ModeNotAvailable, PlanView, plan_csv
 from vaillant_eebus.history import PowerHistory
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
-from vaillant_eebus.ids import CLIMATE_ENTITY, ENTITY_ID, SENSOR_ENTITY, WATER_HEATER_ENTITY, ZONE_ID, is_own_entity
+from vaillant_eebus.ids import (
+    CLIMATE_ENTITY,
+    DEVICE_NAME_MAX,
+    ENTITY_ID,
+    SENSOR_ENTITY,
+    WATER_HEATER_ENTITY,
+    ZONE_ID,
+    device_name_problem,
+    is_own_entity,
+)
 from vaillant_eebus.log_store import PAGE_SIZE, LogCategory, LogPage, LogStore, csv_document
 from vaillant_eebus.pairing import ConnectionState, ForeignBridgeError, NotPairedError, PairingService, PairingStatus
 from vaillant_eebus.room_data import (
@@ -132,6 +142,10 @@ FOREIGN_BRIDGE_MESSAGE = (
 SSE_KEEPALIVE = 15.0
 # A named event, unlike an SSE comment, reaches the page's script.
 SSE_PING = "event: ping\ndata: {}\n\n"
+# Something on the page "Räume" changed (1.4.2): the page reloads it; at most every ROOMS_EVERY seconds.
+SSE_ROOMS = "event: rooms\ndata: {}\n\n"
+ROOMS_EVERY = 2.0
+type RoomChanges = Callable[[], contextlib.AbstractAsyncContextManager[asyncio.Queue[None]]]
 
 
 class RegisterRequest(BaseModel):
@@ -299,6 +313,12 @@ class RoomDetailsRequest(BaseModel):
     deadband_k: float = _range(DEADBAND_K, 0.5)
     min_interval_min: int = Field(default=15, ge=MIN_INTERVAL_MIN[0], le=MIN_INTERVAL_MIN[1])
     max_commands: int = Field(default=24, ge=MAX_COMMANDS[0], le=MAX_COMMANDS[1])
+    # The thermostat's name in Zigbee2MQTT when it differs from its device in Home Assistant.
+    zigbee_name: str | None = Field(default=None, max_length=DEVICE_NAME_MAX)
+
+
+class MqttRequest(BaseModel):
+    base_topic: str = Field(max_length=100)
 
 
 class RoomControlRequest(BaseModel):
@@ -429,32 +449,62 @@ async def state_events(
     api_state: Callable[[HeatPumpState | None], Awaitable[ApiState]],
     *,
     keepalive: float = SSE_KEEPALIVE,
+    rooms: RoomChanges | None = None,
+    rooms_every: float = ROOMS_EVERY,
 ) -> AsyncGenerator[str]:
-    """Server-sent events: the full state on connect and after every change, and
-    a ping after keepalive seconds without a change.
+    """Server-sent events: the full state on connect and after every change, an
+    event "rooms" when something on the page "Räume" changed (at most every
+    rooms_every seconds), and a ping after keepalive seconds without either.
 
     A failing bridge call skips one message instead of ending the stream; the
     next change or ping follows as usual.
     """
-    async with state.listen() as updates:
+    loop = asyncio.get_running_loop()
+    async with contextlib.AsyncExitStack() as stack:
+        updates = await stack.enter_async_context(state.listen())
+        changes = await stack.enter_async_context(rooms()) if rooms is not None else None
         current = state.current
-        while True:
-            try:
-                payload = json.dumps(jsonable_encoder(await api_state(current)), ensure_ascii=False)
-            except grpc.aio.AioRpcError as err:
-                _LOGGER.warning("Event stream: bridge call failed (%s), sending the next update", err.code().name)
-                yield ": bridge error\n\n"
-            else:
-                yield f"event: state\ndata: {payload}\n\n"
+        send_state = True
+        rooms_due: float | None = None
+        rooms_sent = -math.inf
+        next_state: asyncio.Future[HeatPumpState | None] | None = None
+        next_rooms: asyncio.Future[None] | None = None
+        try:
             while True:
+                if send_state:
+                    send_state = False
+                    try:
+                        payload = json.dumps(jsonable_encoder(await api_state(current)), ensure_ascii=False)
+                    except grpc.aio.AioRpcError as err:
+                        _LOGGER.warning(
+                            "Event stream: bridge call failed (%s), sending the next update", err.code().name
+                        )
+                        yield ": bridge error\n\n"
+                    else:
+                        yield f"event: state\ndata: {payload}\n\n"
+                if rooms_due is not None and loop.time() >= rooms_due:
+                    rooms_due, rooms_sent = None, loop.time()
+                    yield SSE_ROOMS
                 if await client.is_disconnected():
                     return
-                try:
-                    async with asyncio.timeout(keepalive):
-                        current = await updates.get()
-                    break
-                except TimeoutError:
+                next_state = next_state or asyncio.ensure_future(updates.get())
+                waiting: set[asyncio.Future[Any]] = {next_state}
+                if changes is not None and rooms_due is None:
+                    next_rooms = next_rooms or asyncio.ensure_future(changes.get())
+                    waiting.add(next_rooms)
+                timeout = keepalive if rooms_due is None else max(0.0, rooms_due - loop.time())
+                done, _pending = await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+                if next_state in done:
+                    current, next_state, send_state = next_state.result(), None, True
+                if next_rooms is not None and next_rooms in done:
+                    next_rooms = None
+                    rooms_due = max(loop.time(), rooms_sent + rooms_every)
+                if not done and rooms_due is None:
                     yield SSE_PING
+        finally:
+            for waiter in (next_state, next_rooms):
+                if waiter is not None:
+                    waiter.cancel()
 
 
 def create_app(
@@ -620,7 +670,7 @@ def create_app(
     @app.get("/api/events")
     async def get_events(request: Request) -> StreamingResponse:
         return StreamingResponse(
-            state_events(request, state, api_state),
+            state_events(request, state, api_state, rooms=rooms.changes if rooms is not None else None),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -804,6 +854,11 @@ def create_app(
         )
         return rooms_page()
 
+    @app.put("/api/rooms/mqtt")
+    async def put_room_mqtt(request: MqttRequest) -> RoomsPage:
+        await room_control().set_base_topic(request.base_topic)
+        return rooms_page()
+
     @app.get("/api/rooms/automation")
     async def get_automation() -> Automation:
         return Automation(yaml=room_control().automation())
@@ -859,6 +914,11 @@ def create_app(
         )
         if any(window.start == window.end for window in request.schedule):
             raise WriteRejected(422, "Ein Zeitfenster braucht verschiedene Zeiten für Beginn und Ende.")
+        if request.zigbee_name == "":
+            request.zigbee_name = None
+        name_problem = device_name_problem(request.zigbee_name) if request.zigbee_name is not None else None
+        if name_problem is not None:
+            raise WriteRejected(422, name_problem)
         current = home_assistant.settings
         known = next((room for room in current.rooms if room.entity_id == entity_id), None)
         if known is None:

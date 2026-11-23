@@ -5,10 +5,14 @@ Order of precedence: window open (smallest value), room too warm (room setpoint
 setpoint: the room's setpoint from its schedule (earlier while preheating)
 plus
 
-- for a room with its own sensor: the correction. With a learned valve curve
-  (test run) the app works out the opening the room needs and the setpoint
-  that brings it ("Kaskade"); without one, or when that does not work, a
-  simple correction in steps of 0.5 K after 0.2 K deviation for 30 minutes;
+- for a room with its own sensor: the correction. With a valve map that knows
+  the valve closed and fully open (learning.py, 1.4.2) the app works out the
+  opening the room needs and takes the smallest offset that reached it in the
+  current state - direction and warm water ("Kaskade"); a PI thermostat gets
+  time: no new value before its learned settling time (at least 30 minutes)
+  and none while its valve still wanders the right way. Without such a map, or
+  when that does not work, a simple correction in steps of 0.5 K after 0.2 K
+  deviation for 30 minutes;
 - for a room measured at its thermostat (the bathroom): a fixed offset.
 
 The correction does not rise while the valve is at least 90 % open (water or
@@ -25,7 +29,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 
 from vaillant_eebus.room_data import RoomDetails
-from vaillant_eebus.rooms.curve import ValveCurve
+from vaillant_eebus.rooms.learning import Kind, Supply, ValveMap
 from vaillant_eebus.write_gate import RoomReason, ThermostatLimits
 
 DEVIATION_K = 0.2
@@ -45,6 +49,10 @@ GAIN_PER_K = 30.0
 GAIN_PER_K_PER_H = 10.0
 # The cascade changes the thermostat only beyond the dead band plus this, against flapping.
 CASCADE_HYSTERESIS_K = 0.25
+# A PI thermostat keeps moving its valve after a change: the next one waits at least this long (or its learned
+# settling time), and none goes out while the valve still wanders this fast the right way.
+PI_WAIT = timedelta(minutes=30)
+PI_WANDERS = 5.0
 
 
 class RoomMode(StrEnum):
@@ -98,7 +106,14 @@ class RoomInputs:
     # Warm water reaches the radiators (heat pump or buffer).
     heat: bool
     donor: bool = False
-    curve: ValveCurve | None = None
+    # What the app learned of the thermostat's valve, how warm the water at the radiator is now, the
+    # controller it has, the valve's trend (%/h) and when the app last changed the setpoint.
+    valve_map: ValveMap | None = None
+    supply: Supply = Supply.UNKNOWN
+    kind: Kind = Kind.UNKNOWN
+    settle_min: float | None = None
+    valve_trend_per_h: float | None = None
+    changed_at: datetime | None = None
     demand_valve: float | None = None
     # For preheating: K/h per K of flow above the room, the startup in minutes and the flow now.
     heating_rate: float | None = None
@@ -226,9 +241,9 @@ def _update(inputs: RoomInputs, correction: Correction, base: float) -> Correcti
 
 
 def _cascade(inputs: RoomInputs, base: float) -> tuple[float, str] | None:
-    """The opening the room needs and the setpoint that brings it, from the learned valve curve."""
-    curve, limits = inputs.curve, inputs.limits
-    if curve is None or not curve.learned or limits is None or inputs.trv_c is None or inputs.valve is None:
+    """The opening the room needs and the setpoint that brings it, from the learned valve map."""
+    valve_map, limits, now = inputs.valve_map, inputs.limits, inputs.now
+    if valve_map is None or not valve_map.ready(now) or limits is None or inputs.trv_c is None or inputs.valve is None:
         return None
     assert inputs.room_c is not None
     deviation = base - inputs.room_c
@@ -240,9 +255,10 @@ def _cascade(inputs: RoomInputs, base: float) -> tuple[float, str] | None:
         wanted = inputs.valve
     if not inputs.heat and wanted > inputs.valve:
         wanted = inputs.valve
-    level = curve.nearest_level(wanted)
-    offset = curve.offset_for(level) if level is not None else None
-    if offset is None:
+    level = valve_map.nearest_level(wanted, now)
+    rising = level is not None and level > inputs.valve
+    offset = valve_map.offset_for(level, rising=rising, supply=inputs.supply, now=now) if level is not None else None
+    if offset is None or level is None:
         return None
     raw = inputs.trv_c + offset
     # Against what the app set, not a manual change it is about to set back.
@@ -250,6 +266,17 @@ def _cascade(inputs: RoomInputs, base: float) -> tuple[float, str] | None:
     if current is not None and abs(raw - current) < inputs.details.deadband_k + CASCADE_HYSTERESIS_K:
         raw = current
     note = f"braucht etwa {wanted:.0f} % Ventil (Stufe {level:.0f} %)"
+    if inputs.kind is Kind.PI and current is not None and abs(raw - current) >= 0.01:
+        wait = max(PI_WAIT, timedelta(minutes=inputs.settle_min or 0.0))
+        wandering = inputs.valve_trend_per_h
+        if inputs.changed_at is not None and now - inputs.changed_at < wait:
+            raw = current
+            note += f"; wartet das Nachlaufen ab (PI, {wait.total_seconds() / 60:.0f} min)"
+        elif wandering is not None and (
+            (raw > current and wandering >= PI_WANDERS) or (raw < current and wandering <= -PI_WANDERS)
+        ):
+            raw = current
+            note += f"; Ventil läuft noch nach ({wandering:+.0f} %/h)"
     return _clamp(limits, inputs.details, raw), note
 
 
