@@ -7,6 +7,7 @@
   import ThermostatPanel from '../components/ThermostatPanel.svelte';
   import { ApiError, getRooms } from '../lib/api';
   import { duration, formatNumber, maybe, moment, signed } from '../lib/format';
+  import { live } from '../lib/live.svelte';
   import { FLOW_HINT_LABELS, SUPPLY_LABELS, type Tone } from '../lib/texts';
   import type { RoomControlRoom, RoomsPage, RoomStatus, Supply, ZoneControl } from '../lib/types';
   import { hasUnsaved } from '../lib/unsaved';
@@ -14,6 +15,8 @@
   let { homeAssistantAvailable }: { homeAssistantAvailable: boolean } = $props();
 
   const RELOAD_MS = 60_000;
+  // After an event "rooms" the page waits this long for more before it reloads.
+  const LIVE_DELAY_MS = 500;
 
   let view = $state<RoomsPage | null>(null);
   let error = $state<string | null>(null);
@@ -35,10 +38,23 @@
     }
   }
 
+  let liveTimer: number | undefined;
+
   onMount(() => {
     void load();
     const timer = setInterval(loadIfVisible, RELOAD_MS);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      window.clearTimeout(liveTimer);
+    };
+  });
+
+  // Live: the backend says something on this page changed (thermostat, valve, room sensor, probe, a decision).
+  $effect(() => {
+    if (live.rooms > 0) {
+      window.clearTimeout(liveTimer);
+      liveTimer = window.setTimeout(loadIfVisible, LIVE_DELAY_MS);
+    }
   });
 
   const SUPPLY_TONES: Record<Supply, Tone> = { unknown: 'neutral', supplied: 'ok', under: 'warn', over: 'neutral' };
@@ -242,6 +258,8 @@
                   name={room.name}
                   details={room.details}
                   atThermostat={room.measured_at_thermostat}
+                  foundName={controlOf(room.entity_id)?.read?.found_name ?? null}
+                  readsValve={(controlOf(room.entity_id)?.read ?? null) !== null}
                   {homeAssistantAvailable}
                   onSaved={(next) => {
                     view = next;

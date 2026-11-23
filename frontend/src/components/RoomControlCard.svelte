@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ApiError, getAutomation, saveProbe, setRoomControl } from '../lib/api';
+  import { ApiError, getAutomation, saveProbe, setMqttBaseTopic, setRoomControl } from '../lib/api';
   import { duration, maybe, moment } from '../lib/format';
   import { ROOM_CONTROL_HINTS, ROOM_CONTROL_LABELS } from '../lib/texts';
   import type { RoomControlMode, RoomControlStatus, RoomsPage } from '../lib/types';
@@ -30,6 +30,21 @@
   let probeRoom = $state<string>('');
   let editingProbe = $state(false);
   let probeError = $state<string | null>(null);
+  let baseTopic = $state<string | null>(null);
+  let topicError = $state<string | null>(null);
+
+  async function storeBaseTopic(): Promise<void> {
+    if (baseTopic === null) {
+      return;
+    }
+    topicError = null;
+    try {
+      onChange(await setMqttBaseTopic(baseTopic.trim()));
+      baseTopic = null;
+    } catch (err) {
+      topicError = err instanceof ApiError ? err.message : 'Das Basis-Topic konnte nicht gespeichert werden.';
+    }
+  }
 
   const live = $derived(control.app_mode === 'live');
 
@@ -117,8 +132,8 @@
   </div>
   <p class="secondary">
     Die App gibt jedem Heizkörperthermostat seinen Sollwert vor, damit der Raum sein Soll hält. Jeder Raum hat dazu
-    eine eigene Stufe; es gilt die kleinere von beiden. „Steuern“ geht nur im Live-Betrieb und erst nach einem
-    vollständigen Testlauf des Thermostats.
+    eine eigene Stufe; es gilt die kleinere von beiden. „Steuern“ geht nur im Live-Betrieb und erst, wenn die App vom
+    Thermostat „zu“ und „ganz offen“ kennt – aus einem Testlauf oder aus dem Alltag.
   </p>
   <div class="segments stage" role="group" aria-label="Stufe der Raumregelung">
     {#each MODES as mode (mode)}
@@ -149,6 +164,42 @@
     Lebenszeichen an Home Assistant (<code>{control.lifesign_entity}</code>):
     {control.lifesign_at ? `zuletzt ${moment(control.lifesign_at)} Uhr` : 'noch keins'}
   </p>
+
+  <details>
+    <summary>Ventilstellung der Aqara W600 abfragen</summary>
+    <div class="details-body">
+      <p class="hint">
+        Der W600 meldet seine Ventilstellung nur selten. Die App fragt sie deshalb selbst ab – alle 5 Minuten, kurz nach
+        jedem neuen Sollwert und im Testlauf jede Minute – mit einer Nachricht an Zigbee2MQTT
+        (<code>{control.mqtt_base_topic}/&lt;Gerät&gt;/get</code> mit <code>{'{"running_state": ""}'}</code>). Das
+        liest nur und verstellt nichts, auch im Demo-Betrieb. Dafür braucht Home Assistant die MQTT-Integration.
+      </p>
+      <p class="hint">
+        Tipp: In Zigbee2MQTT „Zuletzt gesehen“ einschalten (Einstellungen → Erweitert → last_seen = ISO_8601) und in Home
+        Assistant die Entitäten „… Last seen“ der Thermostate aktivieren. Dann sieht die App, ob ein Thermostat auf die
+        Abfrage antwortet, und meldet ein stilles Thermostat erst, wenn es wirklich schweigt.
+      </p>
+      <label class="field topic">
+        <span class="field-label">Basis-Topic von Zigbee2MQTT</span>
+        <input
+          type="text"
+          maxlength="100"
+          autocomplete="off"
+          value={baseTopic ?? control.mqtt_base_topic}
+          oninput={(event) => (baseTopic = event.currentTarget.value)}
+        />
+      </label>
+      {#if baseTopic !== null && baseTopic !== control.mqtt_base_topic}
+        <div class="row">
+          <button type="button" class="button small" onclick={() => void storeBaseTopic()}>Speichern</button>
+          <button type="button" class="button small" onclick={() => (baseTopic = null)}>Verwerfen</button>
+        </div>
+      {/if}
+      {#if topicError}
+        <p class="error" role="alert">{topicError}</p>
+      {/if}
+    </div>
+  </details>
 
   <details>
     <summary>Notfall-Automation für Home Assistant</summary>

@@ -11,6 +11,8 @@
     name,
     details,
     atThermostat,
+    foundName = null,
+    readsValve = false,
     homeAssistantAvailable,
     onSaved,
     onCancel,
@@ -20,6 +22,10 @@
     details: RoomDetails;
     /** The room has no sensor of its own: its temperature comes from the thermostat. */
     atThermostat: boolean;
+    /** The thermostat's device name found in Home Assistant (Zigbee2MQTT's name). */
+    foundName?: string | null;
+    /** The app reads the thermostat's valve position (Aqara W600). */
+    readsValve?: boolean;
     homeAssistantAvailable: boolean;
     onSaved: (view: RoomsPage) => void;
     onCancel: () => void;
@@ -250,6 +256,23 @@
       Aqara W600: Sensor „position“; Eurotronic Comet: „pi_heating_demand“. Die Feuchte dient nur der Fenstererkennung und
       dem Schutz vor Schimmel bei der Nachtabsenkung.
     </p>
+    {#if readsValve || draft.zigbee_name}
+      <label class="field">
+        <span class="field-label">Gerätename in Zigbee2MQTT</span>
+        <input
+          type="text"
+          maxlength="100"
+          autocomplete="off"
+          placeholder={foundName ?? 'wie in Home Assistant'}
+          bind:value={draft.zigbee_name}
+        />
+      </label>
+      <p class="hint">
+        Die App fragt die Ventilstellung des W600 selbst ab (Zigbee2MQTT „get“ auf <code>running_state</code>). Sie nimmt
+        dafür den Namen des Geräts in Home Assistant{foundName ? ` („${foundName}“)` : ''}. Nur ausfüllen, wenn das
+        Gerät in Zigbee2MQTT anders heißt.
+      </p>
+    {/if}
   </fieldset>
 
   <fieldset>

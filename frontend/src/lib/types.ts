@@ -561,6 +561,8 @@ export interface RoomDetails {
   deadband_k: number;
   min_interval_min: number;
   max_commands: number;
+  /** The thermostat's name in Zigbee2MQTT when it differs from its device in Home Assistant. */
+  zigbee_name: string | null;
 }
 
 export interface RoomLearned {
@@ -669,18 +671,52 @@ export interface CurveStep {
   heat_w: number | null;
 }
 
+/** The test runs of a thermostat: how many, and the steps of the last one. */
 export interface CurveStatus {
-  learned: boolean;
   runs: number;
   complete_runs: number;
   last_at: string | null;
   last_ending: string | null;
-  opening_k: number | null;
-  full_k: number | null;
-  closing_k: number | null;
-  reaction_min: number | null;
-  levels: number[];
   steps: CurveStep[];
+}
+export type ControllerKind = 'unknown' | 'on_off' | 'p' | 'pi';
+export interface MapCell {
+  offset_k: number;
+  rising: boolean;
+  valve: number;
+  count: number;
+}
+/** What the app learned of the thermostat's valve (1.4.2). */
+export interface MapStatus {
+  /** "zu" and "ganz offen" are known: the room may go to "Steuern". */
+  ready: boolean;
+  missing: string[];
+  closed_k: number | null;
+  full_k: number | null;
+  full_valve: number | null;
+  opening_k: number | null;
+  kind: ControllerKind;
+  kind_name: string;
+  pi_per_h_per_k: number | null;
+  reaction_min: number | null;
+  speed: number | null;
+  settle_min: number | null;
+  smallest_step_k: number | null;
+  points_test: number;
+  points_daily: number;
+  responses: number;
+  last_point_at: string | null;
+  cells: MapCell[];
+  water: string[];
+}
+/** The reads of a W600's valve position. */
+export interface ReadInfo {
+  topic: string | null;
+  found_name: string | null;
+  last_read: string | null;
+  today: number;
+  limit: number;
+  problem: string | null;
 }
 
 export interface RoomControlRoom {
@@ -717,6 +753,12 @@ export interface RoomControlRoom {
   side: Record<string, string>;
   test: TestStatus | null;
   curve: CurveStatus;
+  valve_map: MapStatus;
+  /** Null for thermostats that report their valve themselves. */
+  read: ReadInfo | null;
+  life_sign_at: string | null;
+  last_seen: boolean;
+  valve_at: string | null;
   recommendation: string | null;
   donor: boolean;
   cold: boolean;
@@ -746,6 +788,7 @@ export interface RoomControlStatus {
   test_start: string;
   test_latest_start: string;
   test_end: string;
+  mqtt_base_topic: string;
   probe: ProbeStatus;
   rooms: RoomControlRoom[];
   zones: ZoneControl[];

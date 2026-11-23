@@ -1,6 +1,7 @@
 // HTTP access to the backend. All paths are relative because Home Assistant
 // ingress serves the app below a token path.
 
+import { live } from './live.svelte';
 import type {
   ApiState,
   AppSettings,
@@ -215,7 +216,12 @@ export async function setRoomControl(mode: RoomControlMode, confirm: boolean): P
   return putJson('api/rooms/control', { mode, confirm });
 }
 
-/** One room's stage; "control" needs confirm and a complete test run. */
+/** Zigbee2MQTT's base topic for reading the Aqara W600's valve position. */
+export async function setMqttBaseTopic(baseTopic: string): Promise<RoomsPage> {
+  return putJson('api/rooms/mqtt', { base_topic: baseTopic });
+}
+
+/** One room's stage; "control" needs confirm and a valve map that knows "zu" and "ganz offen". */
 export async function setRoomStage(entityId: string, stage: RoomStage, confirm: boolean): Promise<RoomsPage> {
   return putJson(`api/rooms/${encodeURIComponent(entityId)}/stage`, { stage, confirm });
 }
@@ -360,6 +366,12 @@ export function subscribeState(onState: (state: ApiState) => void, onOpenChange:
     current.addEventListener('ping', () => {
       if (current === source) {
         alive();
+      }
+    });
+    current.addEventListener('rooms', () => {
+      if (current === source) {
+        alive();
+        live.rooms += 1;
       }
     });
     current.addEventListener('error', () => {

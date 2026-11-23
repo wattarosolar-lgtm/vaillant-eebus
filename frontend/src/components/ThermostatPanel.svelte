@@ -24,6 +24,20 @@
   let error = $state<string | null>(null);
 
   const testActive = $derived(room.test !== null && (room.test.state === 'armed' || room.test.state === 'running'));
+  const learned = $derived(room.valve_map);
+  // The valve map by offset: rising and falling side by side.
+  const mapRows = $derived.by(() => {
+    const offsets = [...new Set(learned.cells.map((cell) => cell.offset_k))].sort((a, b) => a - b);
+    return offsets.map((offset) => ({
+      offset,
+      rising: learned.cells.find((cell) => cell.offset_k === offset && cell.rising) ?? null,
+      falling: learned.cells.find((cell) => cell.offset_k === offset && !cell.rising) ?? null,
+    }));
+  });
+
+  function kelvin(value: number | null): string {
+    return value === null ? '–' : `${signed(value)} K`;
+  }
   const preview = $derived(room.effective === 'preview' || (room.effective === 'control' && appMode === 'demo'));
   const commands = $derived(preview ? room.preview_commands_today : room.commands_today);
 
@@ -43,8 +57,8 @@
   async function arm(): Promise<void> {
     const confirm = window.confirm(
       `Testlauf ${room.name}: In der kommenden Nacht ab ${testStart} Uhr stellt die App das Thermostat Schritt für ` +
-        'Schritt höher und wieder tiefer (3–6 Stunden, höchstens 16 Befehle). Der Raum kann dabei bis zu 1 K wärmer ' +
-        'werden. Vormerken?',
+        'Schritt (0,5 bis 3 K, je nach Ventil) höher und wieder tiefer, bis 5 Uhr, höchstens 16 Befehle. Der Raum kann ' +
+        'dabei bis zu 1 K wärmer werden. Vormerken?',
     );
     if (confirm) {
       await act(() => roomTest(room.room_id, 'arm', true));
@@ -124,7 +138,32 @@
       <dt>Ventilbewegungen heute</dt>
       <dd>{room.movements_today}</dd>
     </div>
+    <div>
+      <dt>Ventil</dt>
+      <dd>
+        {maybe(room.valve, 0, '%')}
+        {#if room.valve_at}<span class="hint">bestätigt {moment(room.valve_at)} Uhr</span>{/if}
+      </dd>
+    </div>
+    <div>
+      <dt>{room.last_seen ? 'Zuletzt gesehen' : 'Zuletzt gemeldet'}</dt>
+      <dd>{room.life_sign_at ? `${moment(room.life_sign_at)} Uhr` : '–'}</dd>
+    </div>
+    {#if room.read}
+      <div class="wide">
+        <dt>Abfrage der Ventilstellung</dt>
+        <dd>
+          {room.read.last_read ? `zuletzt ${moment(room.read.last_read)} Uhr` : 'noch keine'} · heute {room.read.today}
+          {#if room.read.topic}<span class="hint topic">{room.read.topic}</span>{:else}<span class="hint"
+              >Gerätename unbekannt – im Raum-Editor eintragen</span
+            >{/if}
+        </dd>
+      </div>
+    {/if}
   </dl>
+  {#if room.read?.problem}
+    <p class="warn">Die Abfrage der Ventilstellung geht gerade nicht ({room.read.problem}).</p>
+  {/if}
   {#if room.donor}
     <p class="hint">Wird gerade gedrosselt, damit ein kalter Raum mehr Wasser bekommt.</p>
   {/if}
@@ -176,18 +215,73 @@
 
   <details>
     <summary>
-      Ventilverhalten {room.curve.learned ? 'gelernt' : 'noch nicht gelernt'}
-      ({room.curve.complete_runs} von {room.curve.runs} Testläufen vollständig)
+      Regelverhalten: {learned.ready ? '„zu“ und „ganz offen“ bekannt' : `es fehlt ${learned.missing.join(' und ')}`}
     </summary>
+    <p class="hint">
+      Gelernt aus {learned.points_test} Punkten von Testläufen und {learned.points_daily} aus dem Alltag (ruhige halbe
+      Stunde mit warmem Wasser), {learned.responses} Sprungantworten. Abweichung = Sollwert minus Temperatur am Thermostat.
+    </p>
+    <dl class="grid-facts">
+      <div>
+        <dt>Öffnet ab</dt>
+        <dd>{kelvin(learned.opening_k)}</dd>
+      </div>
+      <div>
+        <dt>Ganz offen ab</dt>
+        <dd>{kelvin(learned.full_k)}{learned.full_valve !== null ? ` (${formatNumber(learned.full_valve, 0)} %)` : ''}</dd>
+      </div>
+      <div>
+        <dt>Zu bis</dt>
+        <dd>{kelvin(learned.closed_k)}</dd>
+      </div>
+      <div>
+        <dt>Reglerart</dt>
+        <dd>
+          {learned.kind_name}{learned.pi_per_h_per_k !== null ? ` · ${formatNumber(learned.pi_per_h_per_k, 0)} %/h je K` : ''}
+        </dd>
+      </div>
+      <div>
+        <dt>Reagiert nach / steht nach</dt>
+        <dd>{maybe(learned.reaction_min, 0, 'min')} / {maybe(learned.settle_min, 0, 'min')}</dd>
+      </div>
+      <div>
+        <dt>Kleinster wirksamer Schritt</dt>
+        <dd>{maybe(learned.smallest_step_k, 1, 'K')}</dd>
+      </div>
+    </dl>
+    {#if mapRows.length > 0}
+      <div class="table-wrap">
+        <table aria-label={`Kennfeld ${room.name}`}>
+          <thead>
+            <tr>
+              <th scope="col">Abweichung</th>
+              <th scope="col">Ventil steigend</th>
+              <th scope="col">Ventil fallend</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each mapRows as row (row.offset)}
+              <tr>
+                <td>{signed(row.offset)} K</td>
+                <td>{row.rising ? `${formatNumber(row.rising.valve, 0)} % (${row.rising.count})` : '–'}</td>
+                <td>{row.falling ? `${formatNumber(row.falling.valve, 0)} % (${row.falling.count})` : '–'}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+      {#if learned.water.length > 0}
+        <p class="hint">Wärmeangebot der Punkte: {learned.water.join(', ')}.</p>
+      {/if}
+    {/if}
+  </details>
+
+  <details>
+    <summary>Testläufe ({room.curve.complete_runs} von {room.curve.runs} vollständig)</summary>
     {#if room.curve.steps.length === 0}
-      <p class="hint">Noch kein Testlauf. Empfohlen sind 2–3 Läufe an verschiedenen Tagen.</p>
+      <p class="hint">Noch kein Testlauf. Die App lernt auch im Alltag; ein Testlauf geht schneller.</p>
     {:else}
       <p class="hint">
-        Öffnet ab {room.curve.opening_k === null ? '–' : `${signed(room.curve.opening_k)} K`}, ganz offen ab
-        {room.curve.full_k === null ? '–' : `${signed(room.curve.full_k)} K`}, zu ab
-        {room.curve.closing_k === null ? '–' : `${signed(room.curve.closing_k)} K`} (Sollwert über der Temperatur am
-        Thermostat); reagiert nach etwa {maybe(room.curve.reaction_min, 0, 'min')}.
-        {#if room.curve.levels.length > 0}Erreichte Stufen: {room.curve.levels.map((level) => `${formatNumber(level, 0)} %`).join(', ')}.{/if}
         {#if room.curve.last_at}Letzter Lauf {moment(room.curve.last_at)} Uhr ({room.curve.last_ending}).{/if}
       </p>
       <div class="table-wrap">
@@ -283,6 +377,11 @@
     text-align: left;
     font-size: 15px;
     font-weight: 500;
+    overflow-wrap: anywhere;
+  }
+
+  .topic {
+    display: block;
   }
 
   .test {
