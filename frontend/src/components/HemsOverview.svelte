@@ -86,7 +86,20 @@
       </ol>
     {/if}
     {#if status && status.mode !== 'off'}
-      <p class="hint">Nur Vorschau: In dieser Version sendet das Energiemanagement nichts.</p>
+      <p class="hint">
+        {status.control?.live
+          ? 'Funktionen auf „Steuern“ senden an die Wärmepumpe; die übrigen zeigen nur, was sie tun würden.'
+          : 'Nur Vorschau: Das Energiemanagement sendet gerade nichts.'}
+        {#if status.control?.budget}
+          Befehle an myVAILLANT heute: {status.control.budget.sent} von {status.control.budget.limit}{status.control
+            .budget.would > 0
+            ? ` (Vorschau: ${status.control.budget.would} wären es)`
+            : ''}.
+        {/if}
+      </p>
+    {/if}
+    {#if status?.control?.zone1_halted}
+      <p class="hint warn-text">„Zone 1 Aus/Auto“ hält an: Läuft die Automation noch? (Einstellungen → Energiemanagement)</p>
     {/if}
     {#if status && status.problems.length > 0 && status.mode !== 'off'}
       <p class="hint warn-text">{status.problems[0]}</p>

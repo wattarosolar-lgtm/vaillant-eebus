@@ -138,7 +138,9 @@ export const PLANNER_MODE_HINTS: Record<PlannerMode, string> = {
   off: 'Das Energiemanagement plant nicht. Takte, Abtauungen und Raumwerte zählt und lernt die App trotzdem.',
   preview:
     'Das Energiemanagement plant 48 Stunden voraus und zeigt, was es tun würde. Es sendet nichts, auch im Live-Betrieb.',
-  control: 'Steuern der Zonen kommt mit Version 1.5.0; die Thermostate steuert die Raumregelung (Seite Räume).',
+  control:
+    'Das Energiemanagement sendet an die Zonen, was die Funktionen auf „Steuern“ planen (Quick-Veto, Zone 1 Aus/Auto). ' +
+    'Funktionen auf „Vorschau“ zeigen weiter nur, was sie tun würden. Im Demo-Betrieb wird nichts gesendet.',
 };
 
 export const RISK_LABELS: Record<RiskLevel, string> = {

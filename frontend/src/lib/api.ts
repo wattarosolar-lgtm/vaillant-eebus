@@ -10,6 +10,7 @@ import type {
   EntityChoice,
   EntityKind,
   ExportGroup,
+  HemsFunction,
   HemsSettings,
   HemsStatus,
   LogFilter,
@@ -105,7 +106,7 @@ export async function setOperatingMode(mode: OperatingMode, confirm: boolean): P
   return post<{ mode: OperatingMode }>('api/mode', { mode, confirm });
 }
 
-function zonePath(zoneId: string, what: 'setpoint' | 'mode' | 'override/end'): string {
+function zonePath(zoneId: string, what: 'setpoint' | 'mode' | 'override' | 'override/end'): string {
   return `api/zones/${encodeURIComponent(zoneId)}/${what}`;
 }
 
@@ -118,6 +119,16 @@ export async function setZoneSetpoint(zoneId: string, value: number, shown: Oper
 
 export async function setZoneMode(zoneId: string, mode: string, shown: OperatingMode): Promise<WriteResult> {
   return post<WriteResult>(zonePath(zoneId, 'mode'), { mode, operating_mode: shown });
+}
+
+/** myVAILLANT: the user's own quick veto for 1 to 12 hours, also to extend a running one. */
+export async function setZoneOverride(
+  zoneId: string,
+  value: number,
+  hours: number,
+  shown: OperatingMode,
+): Promise<WriteResult> {
+  return post<WriteResult>(zonePath(zoneId, 'override'), { value, hours, operating_mode: shown });
 }
 
 /** myVAILLANT: ends the zone's temporary override (quick veto). */
@@ -181,6 +192,16 @@ export async function saveHemsSettings(settings: Omit<HemsSettings, 'mode'>): Pr
 
 export async function setHemsMode(mode: PlannerMode): Promise<HemsStatus> {
   return post<HemsStatus>('api/hems/mode', { mode });
+}
+
+export async function setFunctionMode(fn: HemsFunction, mode: PlannerMode): Promise<HemsStatus> {
+  return post<HemsStatus>('api/hems/function', { function: fn, mode });
+}
+
+/** The automation that sets the zones back to auto when the app falls silent, as YAML. */
+export async function getZoneAutomation(): Promise<string> {
+  const body = (await (await send('api/hems/automation')).json()) as { yaml: string };
+  return body.yaml;
 }
 
 /** The plan for 48 hours and the look-back on the last 24. */

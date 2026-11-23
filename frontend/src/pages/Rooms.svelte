@@ -167,8 +167,8 @@
             </span>
             {#if zoneState.flow_hint === 'higher'}
               <p class="banner warn">
-                {zoneState.flow_text ?? 'Vorlauf höher nötig'}. Die App hebt den Vorlauf erst mit dem Zonen-Release (1.5.0)
-                an; bis dahin geht es von Hand in myVAILLANT.
+                {zoneState.flow_text ?? 'Vorlauf höher nötig'}. Die App hebt den Vorlauf erst, wenn „Vorlauf und
+                Vorausschau“ auf Steuern steht (nach Version 1.4.2); bis dahin geht es von Hand in myVAILLANT.
               </p>
             {:else if zoneState.flow_text}
               <span class="hint">Vorlauf: {zoneState.flow_text}</span>

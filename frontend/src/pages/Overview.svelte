@@ -6,6 +6,7 @@
   import PowerChart from '../components/PowerChart.svelte';
   import {
     endZoneOverride,
+    setZoneOverride,
     setHotWaterBoost,
     setHotWaterMode,
     setHotWaterSetpoint,
@@ -227,7 +228,14 @@
             {/if}
             {#if myVaillant && (zone.override || ending)}
               <!-- Stays while the end is on its way: the cloud may show the override once more. -->
-              <OverrideEnd mode={live.mode} {ending} send={(shown) => endZoneOverride(zone.id, shown)} />
+              <OverrideEnd
+                mode={live.mode}
+                {ending}
+                send={(shown) => endZoneOverride(zone.id, shown)}
+                extend={zone.setpoint
+                  ? (hours, shown) => setZoneOverride(zone.id, zone.setpoint?.value ?? 0, hours, shown)
+                  : null}
+              />
             {/if}
           </Dial>
         {/each}

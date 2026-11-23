@@ -7,6 +7,7 @@
   import { guardUnsaved } from '../lib/unsaved';
   import EntityPicker from './EntityPicker.svelte';
   import StatusPill from './StatusPill.svelte';
+  import ZoneControlCard from './ZoneControlCard.svelte';
 
   let {
     zones,
@@ -39,7 +40,8 @@
   }
 
   function withoutMode(settings: HemsSettings): string {
-    return JSON.stringify({ ...settings, mode: null });
+    // The stages are switched on their own, not saved with the form.
+    return JSON.stringify({ ...settings, mode: null, zone1_mode: null, flow_mode: null });
   }
 
   const changed = $derived(status !== null && draft !== null && withoutMode(draft) !== withoutMode(status.settings));
@@ -219,8 +221,9 @@
       <h3 id="hems-stage-title">Stufe</h3>
       <p class="secondary">
         Das Energiemanagement beobachtet die Wärmepumpe und die Räume, lernt Haus und Räume kennen und plant 48 Stunden
-        voraus: Vorlauf, Vorausschau, Abtauungen, Nachtabsenkung und Takten. Für die Zonen zeigt es in dieser Version
-        nur, was es tun würde, und sendet nichts. Die Heizkörperthermostate stellt die Raumregelung (Seite Räume).
+        voraus: Vorlauf, Vorausschau, Abtauungen, Nachtabsenkung und Takten. Auf „Steuern“ sendet es an die Zonen, was die
+        Funktionen auf „Steuern“ planen; die übrigen zeigen nur, was sie tun würden. Die Heizkörperthermostate stellt die
+        Raumregelung (Seite Räume).
       </p>
       <div class="segments stage" role="group" aria-label="Stufe des Energiemanagements">
         {#each MODES as mode (mode)}
@@ -231,7 +234,7 @@
             aria-pressed={status.mode === mode}
             disabled={switching || !available}
             title={available ? undefined : PLANNER_MODE_HINTS[mode]}
-            onclick={() => void switchMode(mode)}>{PLANNER_MODE_LABELS[mode]}{available ? '' : ' (ab 1.5.0)'}</button
+            onclick={() => void switchMode(mode)}>{PLANNER_MODE_LABELS[mode]}</button
           >
         {/each}
       </div>
@@ -247,6 +250,8 @@
         </ul>
       {/if}
     </section>
+
+    <ZoneControlCard {status} changed={(next) => (status = next)} />
 
     <div class="pair">
       <section class="card" aria-labelledby="hems-weather-title">
@@ -465,7 +470,7 @@
             <input type="number" min="5" max="500" step="1" bind:value={draft.zone1_threshold_w} oninput={edited} />
           </label>
         </div>
-        <h4>Quick-Veto (wirkt ab 1.5.0)</h4>
+        <h4>Quick-Veto und Cloud-Befehle</h4>
         <div class="numbers">
           <label class="field">
             <span class="field-label">Schritt (K)</span>

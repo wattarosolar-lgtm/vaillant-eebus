@@ -288,7 +288,7 @@ export type EntityKind =
 
 // --- energy management (hems/) ---------------------------------------------------
 
-/** Aus, Vorschau (plans, sends nothing); Steuern of the zones comes with 1.5.0. */
+/** Aus, Vorschau (plans, sends nothing), Steuern (1.5.0: sends through the write gate). */
 export type PlannerMode = 'off' | 'preview' | 'control';
 export type WeatherSource = 'open_meteo' | 'home_assistant';
 export type ZoneKind = 'floor' | 'radiator';
@@ -332,6 +332,65 @@ export interface HemsSettings {
   block_above_c: number;
   cloud_commands_max: number;
   zone1_threshold_w: number;
+  /** Stages of the functions; switched with setFunctionMode, not saved with the form. */
+  zone1_mode: PlannerMode;
+  flow_mode: PlannerMode;
+}
+
+/** F1 zone 1 off/auto, F2 flow and forecast (plan 1.5.0). */
+export type HemsFunction = 'zone1' | 'flow';
+
+export interface FunctionStatus {
+  function: HemsFunction;
+  name: string;
+  mode: PlannerMode;
+  /** The smaller of its own stage and the energy management's. */
+  effective: PlannerMode;
+  available_modes: PlannerMode[];
+}
+
+export type BudgetLevel = 'ok' | 'warning' | 'full';
+
+export interface BudgetStatus {
+  day: string;
+  sent: number;
+  would: number;
+  limit: number;
+  warn_from: number;
+  level: BudgetLevel;
+}
+
+export interface ZoneControlState {
+  zone_id: string;
+  label: string;
+  override_c: number | null;
+  override_until: string | null;
+  shift_k: number;
+  off: boolean;
+  rest_until: string | null;
+  rest_reason: string | null;
+  waiting: string | null;
+  preview_shift_k: number | null;
+}
+
+export interface ControlAction {
+  at: string;
+  text: string;
+  /** True: sent; false: would have been sent (preview). */
+  sent: boolean;
+}
+
+/** The zone executor (hems/executor.py). */
+export interface ControlStatus {
+  live: boolean;
+  problems: string[];
+  budget: BudgetStatus | null;
+  zones: ZoneControlState[];
+  zone1_halted: boolean;
+  automation_switches_today: number;
+  actions: ControlAction[];
+  lifesign_entity: string;
+  lifesign_at: string | null;
 }
 
 export interface WeatherHour {
@@ -475,6 +534,8 @@ export interface HemsStatus {
   flow: FlowStatus[];
   next_changes: Change[];
   plan_created_at: string | null;
+  functions: FunctionStatus[];
+  control: ControlStatus | null;
 }
 
 export interface ZoneHour {
