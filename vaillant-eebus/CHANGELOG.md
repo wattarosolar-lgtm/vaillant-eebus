@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.4.2
+
+**Das Thermostat lernt sein Regelverhalten** (Abnahme 1.4.0, Befunde 2 und 3). In 1.4.0/1.4.1 ließ sich „Steuern“
+in keinem Raum einschalten: Es brauchte einen vollständigen Testlauf, und der Testlauf im Bad (22./23.11.) wurde mit
+0,5-K-Schritten bis 5 Uhr nicht fertig; der Comet kam nie auf 90 %. Außerdem meldeten die Aqara W600 ihre
+Ventilstellung oft stundenlang nicht.
+
+- **Die App fragt die Ventilstellung der Aqara W600 selbst ab:** über die MQTT-Integration von Home Assistant eine
+  Nachricht an Zigbee2MQTT (`zigbee2mqtt/<Gerätename>/get` mit `{"running_state": ""}`) – nur diese, über den
+  Schreibschutz mit dem eigenen Grund „Abfrage“, nicht bei den 24 Befehlen am Tag. Alle 5 Minuten kurz vor dem Takt
+  der Regelung, 1 und 3 Minuten nach jedem neuen Sollwert (auch von Hand oder durch einen Zeitplan) und im Testlauf
+  jede Minute; höchstens alle 30 Sekunden und 720-mal am Tag je Thermostat. Die Abfrage liest nur und läuft deshalb
+  auch im Demo-Betrieb, ab „Beobachten“. Gerätename aus Home Assistant, je Raum änderbar; Basis-Topic einstellbar.
+  Namen, die Zigbee2MQTT als Schreibbefehl lesen könnte („…/set“, „get“, `+`, `#`), nimmt die App nicht. Der Comet
+  meldet seine Stellung selbst.
+- **Regelverhalten je Thermostat (Kennfeld):** Ventilstellung nach dem Einschwingen über der Abweichung (Sollwert
+  minus Temperatur am Thermostat, 0,5-K-Raster), steigend und fallend getrennt, nach Wärmeangebot (Vorlauf unter 30,
+  30 bis 35, über 35 °C); dazu Sprungantwort (Reaktion, Geschwindigkeit, Einschwingzeit), Reglerart (auf/zu, P, PI)
+  und kleinster wirksamer Schritt. Gelernt aus Testläufen und **aus dem Alltag** ab „Beobachten“, ohne Fühlerpaar
+  (Sollwert und Abweichung 30 Minuten ruhig, warmes Wasser, aktuelle Ventilstellung). Neuere Werte zählen mehr. Die
+  Testläufe von 1.4.1 werden übernommen.
+- **„Steuern“ ist frei, sobald „zu“ und „ganz offen“ bei warmem Wasser bekannt sind** – aus einem Testlauf oder aus
+  dem Alltag. „Ganz offen“ heißt jetzt mindestens 85 % (oder ab 50 % kein Zuwachs mehr bei +1 K; der Comet bleibt bei
+  88 %). Die Seite zeigt beim Raum, was noch fehlt.
+- **Testlauf mit Schritten nach dem Ventil:** zuerst 1 K; bewegt sich das Ventil um weniger als 10 % je K, 2 K, dann
+  3 K (größter Schritt); bewegt es sich um mehr als 40 Prozentpunkte, 0,5 K; sonst Richtung der nächsten Marke (25 /
+  50 / 75 / 85 % hoch, 50 / 25 / 5 % runter). Er plant mit der Zeit bis 5 Uhr und nimmt größere Schritte, wenn sie
+  nicht reicht. Runter bis „zu“, höchstens 2 K (bisher 1 K) unter die Temperatur am Thermostat. Endet ein Lauf nach
+  „ganz offen“ um 5 Uhr, fährt er in der nächsten Nacht nur noch abwärts; ebenso ein neuer Lauf, wenn „ganz offen“
+  schon bekannt ist. Nachgespielt mit der echten Nacht im Bad: fertig um 3:55 statt unvollständig um 5 Uhr.
+- **Regeln mit dem Kennfeld:** Für die Öffnung, die der Raum braucht, nimmt die App die kleinste Abweichung, die sie im
+  jetzigen Zustand (steigend/fallend, Wärmeangebot) erreicht hat. Bei PI-Thermostaten wartet sie nach jeder Änderung
+  die Einschwingzeit ab (mindestens 30 Minuten) und legt nicht nach, solange das Ventil noch in die richtige Richtung
+  läuft.
+- **Seite „Räume“ live:** Sie lädt neu, sobald sich Thermostat, Ventil, Raumsensor oder Fühlerpaar ändern oder die
+  App entscheidet oder sendet (über die bestehende Live-Verbindung, höchstens alle 2 Sekunden; sonst jede Minute).
+- **„Zuletzt gesehen“ (optional):** Gibt es `sensor.<Gerät>_last_seen` von Zigbee2MQTT, gilt es als Lebenszeichen
+  des Thermostats und zeigt, ob ein W600 auf die Abfrage geantwortet hat. Die falsche Warnung „Ventilstellung seit über
+  12 h nicht gemeldet“ entfällt; gewarnt wird erst, wenn sich das Thermostat 12 Stunden gar nicht meldet.
+
 ## 1.4.1
 
 **Der Testlauf startet auch mit Fühlern, die nur bei einer Änderung melden.** In 1.4.0 galt ein Wert des
