@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.4.1)
+# Briefing: Vaillant EEBUS (Stand v1.4.2)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -28,7 +28,10 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
   `climate.set_temperature` auf den Thermostaten der Räume, über `RoomGate` in `write_gate.py` (Abschnitt 5f).
   1.4.1 korrigiert den Befund 1 der Abnahme von 1.4.0: Der Testlauf startete mit Fühlern, die nur bei einer
   Änderung melden, nie (Werte galten 15 min, jetzt 2 h); vertauschte Fühler werden erkannt, Wartegründe stehen im
-  Protokoll.
+  Protokoll. **1.4.2** (Befunde 2 und 3 der Abnahme 1.4.0): Das Thermostat lernt sein Regelverhalten (Kennfeld aus
+  Testläufen und Alltag, `rooms/learning.py`), „Steuern“ ist frei, sobald „zu“ und „ganz offen“ bekannt sind, der
+  Testlauf wählt seine Schritte nach dem Ventil (0,5–3 K), und die App fragt die Ventilstellung der Aqara W600 selbst
+  ab (zweiter Weg über `RoomGate`: nur `mqtt.publish` mit `{"running_state": ""}` auf `<Basis>/<Gerät>/get`).
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a; Thermostate Abschnitt 5f). Nach der
   Installation läuft sie im Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -44,7 +47,7 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
 | 7 | Einstellungs-/Protokollseite fertig, Verlauf 24 h, Absicherung der Bridge, Doku, Release | umgesetzt (1.0.0), an der Anlage abgenommen (21.10.2026) |
 | 8 | Energiemanagement: Planer für Warmwasser und Zonen, Tarife, PV-Überschuss, Wetter, Stufen Aus/Vorschau/Steuern | umgesetzt (1.1.0), Abnahme an der Anlage offen (erst Vorschau, dann Steuern) |
 | 9 | Anbindung myVAILLANT (Entitäten der Integration) neben EEBUS, wählbar; Planer im Auto-Betrieb über Quick-Veto | umgesetzt (1.2.0), an der Anlage abgenommen (1.2.1) |
-| Stufe 1 | Energiemanagement neu: 1.3.0 beobachten, lernen, planen (Vorschau); 1.4.0 Thermostate (Raumregelung, vorgezogen); 1.5.0 Zonen | 1.3.0/1.3.1 veröffentlicht, Abnahme an der Anlage läuft; 1.4.0 veröffentlicht (21.11.2026), Abnahme läuft (`fehlerliste-abnahme-1.4.0.md`), 1.4.1 mit deren Befund 1; Prüfung (Aufwand max) offen, Steuern zuerst nur im Bad |
+| Stufe 1 | Energiemanagement neu: 1.3.0 beobachten, lernen, planen (Vorschau); 1.4.0 Thermostate (Raumregelung, vorgezogen); 1.5.0 Zonen | 1.3.0/1.3.1 veröffentlicht, Abnahme an der Anlage läuft; 1.4.0 veröffentlicht (21.11.2026), Abnahme läuft (`fehlerliste-abnahme-1.4.0.md`), 1.4.1 mit deren Befund 1, 1.4.2 mit Befund 2 und 3 (lernendes Thermostat, W600-Abfrage); Prüfung (Aufwand max) offen, Steuern zuerst nur im Bad |
 
 ## 2. Repositories
 
@@ -121,7 +124,7 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `bridge_auth.py` | Erzeugt einmalig selbstsigniertes Zertifikat (EC P-256, SAN `eebus-bridge` und `127.0.0.1`), Schlüssel und Token in `/data/eebus/grpc` (0600, alle drei zusammen über ein umbenanntes Verzeichnis); `BridgeCredentials.load()` für das Backend |
 | `bridge_client.py` | gRPC-Client (`grpc.aio`), mit Zugangsdaten TLS (vertraut nur diesem Zertifikat) und Bearer-Token, sonst Klartext (Fake-Bridge); `refused_tls()` erkennt einen fehlgeschlagenen TLS-Handshake (→ fremde Bridge): Server-Info, Gerätesuche, Kopplung, Gerätestatus, Snapshot, Ereignis-Streams, Struktur-Dump; **Schreibmethoden** (`WRITE_METHODS`: Zone-Soll/-Betriebsart mit `zone_id`, Warmwasser-Soll/-Betriebsart/Einmalladung, Leistungsdeckel, Failsafe, Verdichter-Flexibilität) mit 15 s Zeitlimit (die Bridge wartet bis zu 10 s auf das Gerät); Backoff, `RETRYABLE_CODES`, max. Nachrichtengröße 64 MB |
 | `pairing.py` | Kopplung und Verbindungszustand (`ConnectionState`); prüft, ob die eigene Bridge antwortet; erkennt fremde Bridge und belegten SHIP-Port; meldet das gekoppelte Gateway nach jedem Bridge-Neustart wieder an; `ConnectionLog` fasst abgelehnte Verbindungsversuche beim Start zusammen und schreibt Verbindungsereignisse deutsch ins Protokoll; Diagnose-Dump |
-| `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a); `RoomGate` für die Heizkörperthermostate (Abschnitt 5f). |
+| `write_gate.py` | **Einzige Stelle, die schreibt** (Abschnitt 5a); `RoomGate` für die Heizkörperthermostate und die Abfrage der W600-Ventilstellung (Abschnitt 5f). |
 | `energy.py` | `EnergyMeter`: summiert die gemeldete Gesamtleistung (`power_consumption`) über die Zeit zu Wh je Tag (die Anlage liefert keine Energiezähler); > 3 min ohne Messwert wird nicht überbrückt, der Tag gilt dann als lückenhaft (auch der erste Tag); Tageswechsel um Mitternacht in `TZ` (Rückfall UTC mit Warnung); `/data/energy.json` atomar, höchstens einmal pro Minute und beim Beenden, 400 Tage; kurzer Neustart (< 3 min) wird überbrückt. `today()` zählt das laufende Intervall bis jetzt mit. |
 | `ha_client.py` | Zugriff auf HA Core über den Supervisor (`SUPERVISOR_TOKEN`, `http://supervisor/core`): REST (Zustände, Verlauf `history()` über `/api/history/period`, eigene Sensoren setzen/entfernen) und eine WebSocket-Verbindung (Anmeldung, `subscribe_trigger` auf die gewählten Entitäten mit Rückfall auf `platform`, `homeassistant_started`), Wiederverbindung mit Backoff, alle 5 min erneutes Lesen (`last_reported`). Schreibt nur `sensor.vaillant_eebus_*`/`binary_sensor.vaillant_eebus_*` (`OWN_ENTITY`, sonst `ValueError`). Listener-Schnittstelle `HomeAssistantListener`. |
 | `ha_import.py` | Räume (Name, Zone), Mittelwert je Zone aus gültigen Werten (Zahl, °C/°F, ≤ 30 min alt), Wärme heute als Summe von bis zu 4 Sensoren (Wh/kWh/MWh, ≤ 3 h alt; Summe nur, wenn jeder einen Wert hat, Status = schlechtester); bei Verbindungsverlust werden Werte verworfen; meldet Änderungen gedrosselt (2 s) per `state.republish()`. |
@@ -134,7 +137,7 @@ Home Assistant ──Ingress (Supervisor 172.30.32.2)──▶ backend (Python, 
 | `hems/` | Energiemanagement, siehe Abschnitt 5d |
 | `rooms/` | Raumregelung (1.4.0), siehe Abschnitt 5f |
 | `room_data.py` | Raumdaten je Raum (`RoomDetails`: statischer Abgleich, Thermostat, Soll, Zeitplan, Komfortband, Verluste, Stufe der Raumregelung, Korrektur-Grenze, fester Ausgleich, Ventilschonung); Schalter `RoomControlSettings` (Stufe, Fühlerpaar, Nachtfenster des Testlaufs), `effective_stage()` |
-| `ids.py` | Formate von Entitäts- und Zonen-IDs (`ENTITY_ID`, `ZONE_ID`); `ieee_address()` (Zigbee2MQTT-Gerät einer Entität) |
+| `ids.py` | Formate von Entitäts- und Zonen-IDs (`ENTITY_ID`, `ZONE_ID`); `ieee_address()` (Zigbee2MQTT-Gerät einer Entität); `MQTT_BASE_TOPIC`, `device_name_problem()` (kein Teil „get“/„set“, kein `+`/`#`, nicht „bridge…“, damit eine Abfrage nie als Schreibbefehl gelesen wird) |
 | `settings.py` | `SettingsStore` ist alleiniger Besitzer der aktuellen Einstellungen (`current`, `update()`), damit Kopplung und Moduswechsel sich nicht überschreiben; `settings.json` atomar schreiben; beschädigte Datei wird beiseitegelegt (→ Demo) |
 
 ### Oberfläche (`frontend/src/`)
@@ -376,6 +379,15 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
   höchstens ein Befehl je 5 s (nicht für Rückweg und Rückfall). Testlauf: eigenes Budget 16 je Nacht (Mittag bis
   Mittag); der Rückweg zählt nicht. Ein gehaltener Befehl ist kein Fehler (`RoomWriteResult.held`: `same`,
   `deadband`, `interval`, `limit`, `paused`).
+- **Abfrage der Ventilstellung (1.4.2):** `ReadValvePosition(room_id, device)` → `RoomGate.read_position()` →
+  `ha_client.publish_position_read()` → `mqtt.publish` mit `topic` = `position_read_topic(base, device)`
+  (`<Basis>/<Gerät>/get`), `payload` = `POSITION_READ_PAYLOAD` (`{"running_state": ""}`), `qos` 0, `retain` false.
+  Erlaubt bei Raumregelung ≠ Aus, auch im Demo-Betrieb und in jeder Stufe (liest nur); nur für das Thermostat eines
+  Raums, nie eine myVAILLANT-Zone; höchstens 1 je 30 s und 720 je lokalem Tag je Thermostat (`READ_SPACING`,
+  `READS_PER_DAY`), eigene Zählung in `room_gate.json` (`reads`), nicht bei den Befehlen, `touched` bleibt unberührt.
+  Kein Protokolleintrag je Abfrage; ein Fehler einmal als Problem, die Rückkehr einmal. `submit()` weist
+  `RoomReason.READ` ab. Strukturtests: nur `write_gate.py` ruft `publish_position_read`, nur `ha_client.py` kennt
+  `_post_service`, „mqtt“ kommt im Client genau einmal vor.
 - Demo und Vorschau senden nie; ihre Zählung ist simuliert (eigener Zustand), damit die Vorschau zeigt, was
   „Steuern“ senden würde. Live: „Wird gesendet“ vor dem Aufruf in der Datenbank; abgewiesen → „Nicht ausgeführt“
   (zählt nicht), sonst „Ergebnis unbekannt“; bestätigt, wenn das Attribut `temperature` den Wert zeigt, sonst nach
@@ -387,16 +399,18 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
 
 | Modul | Aufgabe |
 |---|---|
-| `thermostats.py` | Thermostat aus HA lesen (Soll, Temperatur am Thermostat, Betrieb, Preset), Neben-Entitäten über die IEEE-Adresse (`sensor`, `window_detection`, `child_lock`, `valve_alarm`, `battery`, `trv_mode`, …), Modell Aqara/Comet/anderes, Warnungen; `blocking()` (nicht erreichbar, kein Bereich, Fühler nicht intern, `trv_mode` ≠ 2) hält das Steuern an |
+| `thermostats.py` | Thermostat aus HA lesen (Soll, Temperatur am Thermostat, Betrieb, Preset), Neben-Entitäten über die IEEE-Adresse (`sensor`, `window_detection`, `child_lock`, `valve_alarm`, `battery`, `trv_mode`, `last_seen`, …), Modell Aqara/Comet/anderes, Warnungen; Lebenszeichen = `last_seen` (live verfolgt), sonst die letzte Änderung von Thermostat oder Ventil; Warnung erst nach 12 h ohne Lebenszeichen (1.4.2; vorher „Ventilstellung seit 12 h nicht gemeldet“); `blocking()` (nicht erreichbar, kein Bereich, Fühler nicht intern, `trv_mode` ≠ 2) hält das Steuern an |
 | `supply.py` | Wärmeangebot je Heizkörper-Zone: Wärmepumpe (> 50 W und Vorlauf bzw. Puffer ≥ Raum + 8 K), Puffer (≥ Raum + 5 K und fällt ≥ 2 K/h, Restzeit bis zur gelernten Neustart-Temperatur, Start 28 °C), keins, unklar (Daten > 15 min, oder WP läuft ohne Vorlauf und Puffer) |
-| `controller.py` | `decide()` (rein): Fenster → kleinster Wert; Raum > Soll + Band + 0,5 K → Soll − 0,5 K; Spender → untere Komfortgrenze (+ Korrektur); sonst Raum-Soll (Vorheizen nach gelernter Aufheizzeit, höchstens 3 h, sonst 1 h) + Korrektur (0,5 K nach 0,2 K über 30 min, Ventil-Regeln ≥ 90 %/≤ 5 %, nicht ohne Wärme, Pause nach Fenster und Sollwechsel) bzw. fester Ausgleich (Raum am Thermostat gemessen); mit gelernter Kennlinie „Kaskade“ (Bedarfsöffnung + 30 %/K − 10 %/(K/h) → nächste erreichte Stufe → Abstand zur Temperatur am Thermostat; Hysterese Totzone + 0,25 K gegen den zuletzt gesetzten Wert); weicht der Soll vom zuletzt gesetzten ab → Handänderung (`MANUAL`); beim Übergang in „zu warm“ einmal Korrektur − 0,5 K (`Correction.too_warm`) |
-| `curve.py` | Ventilverhalten aus Testläufen: Punkte (Abstand, Öffnung, auf/ab, VL/RL, Wärme), vollständig = ganz offen und wieder zu (untere Grenze erreicht oder fallende Stufe ≤ 5 %); `offset_for()`, `levels()`; höchstens 5 Läufe je Thermostat |
-| `testrun.py` | Testlauf als reine Schrittfunktion `advance()` (jede Minute): vorgemerkt → Start 22–1 Uhr bei Raum −0,5…+0,2 K um Soll, kein Fenster, warmes Wasser am Heizkörper (Fühlerpaar VL ≥ Raum + 5 K), Fühlerpaar am Raum, Werte höchstens 2 h nach der Meldung (`PROBE_VALID`, `probe_reading`; 1.4.1, vorher 15 min) und nicht vertauscht (`SwapWatch`: RL ≥ VL + 1 K für 15 min bei Ventil ≥ 20 % und warmem Wasser); Stufen 20–40 min mit Wärme bis Ventil und Rücklauf 10 min ruhig; hoch (+1 K solange nichts öffnet, dann +0,5 K) bis ≥ 90 %, runter bis 1 K unter Temperatur am Thermostat (Schritt 1 K, wenn das Budget sonst nicht reicht), zurück; Ende spätestens 5 Uhr; Abbruch Raum > Soll + 1 K, Fenster, 30 min keine Ventilstellung oder kein warmes Wasser; nach 3 Nächten ohne Start „nicht möglich“ (eine Nacht, deren Startfenster vor dem Vormerken begann, zählt nicht) |
-| `service.py` | `RoomControl`: Takt nach den Proben (`tick`), jede Minute (`minute`: Lebenszeichen, Neben-Entitäten alle 15 min, Ventilbewegungen, Testlauf); Umverteilen je Heizkörper-Zone (kalter Raum und Spender in derselben wirksamen Stufe, nach 30 min Wärme, Prüfung nach 45 min, Spender höchstens 2 h, danach 1 h Ruhe, „hilft nicht“ nach 3 Fehlschlägen); Vorlauf-Berater für `hems`; Empfehlung Voreinstellung (7 Tage Proben); Stufen (`set_stage` ändert nur die Stufe am aktuellen Raum), Fühlerpaar (vertauscht? jede Minute per `SwapWatch`, im Protokoll als Problem; neue Wahl beurteilt neu), Wartegründe des vorgemerkten Laufs im Protokoll (jeder Grund einmal je Nacht, um 1 Uhr „heute Nacht nicht gestartet“, Abbruch von Hand mit letztem Grund; 1.4.1), Testlauf mit Rückweg (`RESTORE`; geht er nicht hinaus → `release`; nach einem Neustart mitten im Lauf erneut versucht), Rückfall (`release`, auch für verwaiste Thermostate), `before_rooms_change` vor `PUT api/settings`/`PUT api/rooms/{id}`, Vorlage der Notfall-Automation, Status; im Bad gilt ein Fenster 30 min nach eigenem Befehl oder Ventilschluss (> 30 % → ≤ 5 %) nicht; `/data/rooms.json` (Korrekturen, Umverteil-Statistik, Kennlinien, Testlauf) |
+| `controller.py` | `decide()` (rein): Fenster → kleinster Wert; Raum > Soll + Band + 0,5 K → Soll − 0,5 K; Spender → untere Komfortgrenze (+ Korrektur); sonst Raum-Soll (Vorheizen nach gelernter Aufheizzeit, höchstens 3 h, sonst 1 h) + Korrektur (0,5 K nach 0,2 K über 30 min, Ventil-Regeln ≥ 90 %/≤ 5 %, nicht ohne Wärme, Pause nach Fenster und Sollwechsel) bzw. fester Ausgleich (Raum am Thermostat gemessen); mit bereitem Kennfeld (1.4.2) „Kaskade“ (Bedarfsöffnung + 30 %/K − 10 %/(K/h) → nächste erreichte Stufe → kleinste Abweichung, die sie im jetzigen Zustand erreicht hat: Richtung steigend/fallend, Wärmeangebot, sonst Nachbarklasse; Hysterese Totzone + 0,25 K gegen den zuletzt gesetzten Wert; PI: nach eigener Änderung mindestens 30 min bzw. Einschwingzeit warten, nicht nachlegen, solange das Ventil ≥ 5 %/h in die richtige Richtung läuft); weicht der Soll vom zuletzt gesetzten ab → Handänderung (`MANUAL`); beim Übergang in „zu warm“ einmal Korrektur − 0,5 K (`Correction.too_warm`) |
+| `learning.py` | Kennfeld (1.4.2, rein): `ValveMap` mit Punkten (Abweichung im 0,5-K-Raster, steigend/fallend, Wärmeangebot `Supply` < 30 / 30–35 / > 35 °C / unbekannt, Ventil, Quelle Testlauf/Alltag; je Zelle die 10 neuesten, gewichtet mit Halbwertszeit 14 Tage), Sprungantworten (`Response`), Drifts (`Drift`); `closed_k()` (≤ 5 %), `full()` (≥ 85 % oder steigendes Plateau ab 50 %: +1 K < 5 Punkte), `missing()`/`ready()` (Freigabe „Steuern“), `offset_for()`, `levels()`, `kind()` (auf/zu ≥ 90 % der Punkte an den Anschlägen; PI Drift ≥ 10 %/h in Richtung der Abweichung; sonst P), `smallest_step_k()`; `CalmWatch` (Punkt nach 30 min ruhigem Soll, ruhiger Abweichung und warmem Wasser mit aktueller Ventilstellung, Median 10 min; Drift je ruhige Stunde), `StepWatch` (Reaktion ≥ 5 Punkte, Einschwingen 10 min ruhig, höchstens 60 min); `points_from_steps()` (Testlauf-Stufen, auch die gespeicherten von 1.4.1) |
+| `reads.py` | Wann ein W600 abgefragt wird (1.4.2, rein): `ReadPlan.due()` regulär alle 5 min, höchstens 2,5 min vor dem Takt (nach ≥ 4 min), ohne Takt alle 5 min; `after_change()` +1 und +3 min nach einem neuen Sollwert; im Testlauf 10 min lang jede Minute nach dem Schritt, dann alle 2 min |
+| `curve.py` | Die Testläufe (Verlauf für die Seite): Stufen (Abstand, Öffnung, auf/ab, VL/RL, Wärme), `TestResult` (vollständig = ganz offen und wieder zu), höchstens 5 Läufe je Thermostat; das Gelernte steht seit 1.4.2 im Kennfeld |
+| `testrun.py` | Testlauf als reine Schrittfunktion `advance()` (jede Minute): vorgemerkt → Start 22–1 Uhr bei Raum −0,5…+0,2 K um Soll, kein Fenster, warmes Wasser am Heizkörper (Fühlerpaar VL ≥ Raum + 5 K), Fühlerpaar am Raum, Werte höchstens 2 h nach der Meldung (`PROBE_VALID`, `probe_reading`; 1.4.1) und nicht vertauscht (`SwapWatch`); Stufen 20–40 min mit Wärme bis Ventil und Rücklauf 10 min ruhig; Schritte nach dem Ventil (1.4.2, `_step`): erster je Richtung 1 K, Wirkung < 10 %/K → 2 K, dann 3 K, Bewegung in Schrittrichtung > 40 Punkte → 0,5 K, sonst Richtung nächste Marke (25/50/75/85 bzw. 50/25/5 %), Zeitplanung bis 5 Uhr (`steps_left`, Stufendauer = Median, Start 30 min) mit späteren Marken; hoch bis ganz offen (≥ 85 % oder Plateau) oder Grenze, runter bis zu (≤ 5 %) oder 2 K unter der Temperatur am Thermostat; zurück; Ende spätestens 5 Uhr; endet die Nacht oder das Budget nach „ganz offen“ und vor „zu“, bleibt der Lauf vorgemerkt mit `down_only` und `full_offset_k` (nächste Nacht Start dort, nur abwärts; `outcome` hält das Ergebnis der Nacht); Abbruch Raum > Soll + 1 K, Fenster, 30 min keine Ventilstellung oder kein warmes Wasser; nach 3 Nächten ohne Start „nicht möglich“ |
+| `service.py` | `RoomControl`: Takt nach den Proben (`tick`), jede Minute (`minute`: Lebenszeichen, Neben-Entitäten alle 15 min, Ventilbewegungen, Testlauf); Umverteilen je Heizkörper-Zone (kalter Raum und Spender in derselben wirksamen Stufe, nach 30 min Wärme, Prüfung nach 45 min, Spender höchstens 2 h, danach 1 h Ruhe, „hilft nicht“ nach 3 Fehlschlägen); Vorlauf-Berater für `hems`; Empfehlung Voreinstellung (7 Tage Proben); Stufen (`set_stage` ändert nur die Stufe am aktuellen Raum), Fühlerpaar (vertauscht? jede Minute per `SwapWatch`, im Protokoll als Problem; neue Wahl beurteilt neu), Wartegründe des vorgemerkten Laufs im Protokoll (jeder Grund einmal je Nacht, um 1 Uhr „heute Nacht nicht gestartet“, Abbruch von Hand mit letztem Grund; 1.4.1), Testlauf mit Rückweg (`RESTORE`; geht er nicht hinaus → `release`; nach einem Neustart mitten im Lauf erneut versucht), Rückfall (`release`, auch für verwaiste Thermostate), `before_rooms_change` vor `PUT api/settings`/`PUT api/rooms/{id}`, Vorlage der Notfall-Automation, Status; im Bad gilt ein Fenster 30 min nach eigenem Befehl oder Ventilschluss (> 30 % → ≤ 5 %) nicht; 1.4.2: jede Minute `_learn` (CalmWatch, StepWatch je Thermostat ab „Beobachten“, nicht während des eigenen Testlaufs), Testlauf-Stufen sofort ins Kennfeld, `_due_reads`/`_read_positions` (W600 mit bekanntem Gerätenamen: `RoomDetails.zigbee_name` oder per Template `device_attr(device_id(…), 'name')`, 10 s gestaffelt), Ventil „aktuell“ (W600 ≤ 10 min nach Abfrage bzw. mit `last_seen` nach beantworteter Abfrage, sonst ≤ 70 min nach Meldung), `changes()` (Live-Signal für die Seite), `set_base_topic`, Vormerken nur abwärts, wenn „ganz offen“ bekannt und „zu“ nicht; `/data/rooms.json` (Korrekturen, Umverteil-Statistik, Testläufe, Kennfelder `maps`, Testlauf) |
 
 - **Stufen:** `room_control.mode` (Aus/Beobachten/Vorschau/Steuern) und `RoomDetails.stage` (Beobachten/Vorschau/
-  Steuern), wirksam die kleinere. Steuern für alle: nur live, `confirm`; je Raum zusätzlich ein vollständiger
-  Testlauf und keine blockierende Warnung. Ohne gespeicherte Einstellung (1.3.x): Beobachten, wenn der Planer auf
+  Steuern), wirksam die kleinere. Steuern für alle: nur live, `confirm`; je Raum zusätzlich ein Kennfeld, das „zu“
+  und „ganz offen“ kennt (1.4.2; vorher ein vollständiger Testlauf), und keine blockierende Warnung. Ohne gespeicherte Einstellung (1.3.x): Beobachten, wenn der Planer auf
   Vorschau stand, sonst Aus. `PUT api/rooms/{id}` behält die Stufe.
 - **Rückfall:** Raum verlässt Steuern, Schalter verlässt Steuern, Wechsel auf Demo (`api/mode`, `api/connection`,
   noch live), App-Ende (`run()`-finally, gegen doppelten Abbruch geschützt, höchstens 15 s), Raum entfernt oder
@@ -414,8 +428,10 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
   Zonen-Mittelwert, Fenster ohne Feuchte, fester Ausgleich statt Korrektur.
 - **Oberfläche:** `Rooms.svelte` mit `RoomControlCard.svelte` (Schalter, Lebenszeichen, Notfall-Automation zum
   Kopieren, Fühlerpaar mit letzter Meldung je Fühler, längster Meldepause, Auflösung, Hinweis „vertauscht?“ und Knopf zum Tauschen) und `ThermostatPanel.svelte` (Stufe, Ziel/Ist, Zustand, Befehle
-  und Bewegungen heute, Warnungen, Testlauf, Ventilverhalten); `RoomEditor.svelte` mit Korrektur-Grenze bzw.
-  Ausgleich, Totzone, Abstand, Befehle je Tag.
+  und Bewegungen heute, Ventil mit Bestätigung, zuletzt gesehen, Abfrage, Warnungen, Testlauf, Regelverhalten mit
+  Kennfeld-Tabelle, Testläufe); `RoomEditor.svelte` mit Korrektur-Grenze bzw. Ausgleich, Totzone, Abstand, Befehle je
+  Tag und Gerätename in Zigbee2MQTT. Seit 1.4.2 lädt `Rooms.svelte` neu, sobald der Event-Stream ein Ereignis `rooms`
+  bringt (`lib/live.svelte.ts`; Backend: `state_events(..., rooms=RoomControl.changes)`, höchstens alle 2 s).
 
 ## 6. Die echte Anlage (Feldbefunde)
 
@@ -445,14 +461,19 @@ regelt sein Ventil selbst, die App gibt den Sollwert vor.
 
 ## 7. Tests
 
-- Python: 406 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.1
+- Python: 471 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.2
+  `test_thermostat_learning.py` (Kennfeld, Alltag, Sprungantwort, Abfrage-Takt, Gerätenamen, Testlauf-Schritte) und
+  `test_night_bath.py` mit der echten Nacht 22./23.11. im Bad (Fühler, Comet-Temperatur und -Ventil aus dem
+  HA-Verlauf; mit 1.4.2 und einem Comet-Modell aus dieser Nacht fertig um 3:55), dazu Abfrage-Tests in
+  `test_room_gate.py` und `test_rooms.py`; neu in 1.4.1
   `test_testrun_probe.py` mit der echten Nacht 21./22.11. im Bad; neu in 1.4.0
   `test_room_gate.py` und `test_rooms.py`), gegen die Fake-Bridge (echter gRPC-Server, zwei Zonen wie die Anlage, Zone 2 ohne
   Raumfühler) und ein Fake-Home-Assistant (`tests/fake_home_assistant.py`, mit `add_myvaillant()`: Entitäten und
   Dienste der myVAILLANT-Integration wie im Quellcode der Integration). Die Fake-Bridge prüft Schreibbefehle wie die echte Bridge und zählt jeden in `write_calls`;
   Abnahmetest: im Demo-Betrieb erreicht kein Schreibbefehl die Bridge (alle Steuerungen, auch über die HTTP-API).
   Kein Test spricht mit echter Hardware. Das Fake-HA kennt seit 1.4.0 Zigbee2MQTT-Thermostate (`add_thermostats()`:
-  Aqara und Comet mit Neben-Entitäten, Raumsensor, Fühlerpaar; `trv_lag`, `trv_silent`).
+  Aqara und Comet mit Neben-Entitäten, Raumsensor, Fühlerpaar; `trv_lag`, `trv_silent`; seit 1.4.2 Template
+  `device_attr(…, 'name')`, `mqtt.publish`-Abfragen mit `positions` und `add_last_seen()` wie Zigbee2MQTT).
 - Go (Fork): `go test -race ./...`; neue Tests u. a. `internal/grpc/hvac_zones_test.go`,
   `internal/usecases/entity_test.go`, `roomheatingsysfn_adapter_test.go`, `classification_test.go`, `registry_test.go`.
 - Frontend: `svelte-check`, ESLint, Build; keine Unit-Tests der Oberfläche.
@@ -532,8 +553,19 @@ Damit sie nicht als neue Funde gemeldet werden – Bewertung und bessere Lösung
     0,2 K Änderung, Pausen bis 90 min; Home Assistant zeigt unveränderte Meldungen nicht (`last_reported` =
     `last_changed`), daher gilt ein Wert 2 h. Ein Fühler, der in dieser Zeit ausfällt, zählt so lange mit seinem
     letzten Wert, außer Zigbee2MQTT meldet ihn „nicht verfügbar“.
+18. Raumregelung 1.4.2, bewusst so: Ohne `last_seen` gilt eine Abfrage, die Home Assistant angenommen hat, als
+    Bestätigung der W600-Ventilstellung (HA übernimmt unveränderte MQTT-Werte nicht; ob das Gerät antwortete, sieht die
+    App dann nicht). Der Comet lässt sich nicht abfragen (Zigbee2MQTT hat für `pi_heating_demand` keinen „get“); er
+    meldet nach jedem Sollwert und etwa stündlich, sein Wert gilt 70 min. Punkte im Alltag brauchen „warmes Wasser“ aus
+    dem Wärmeangebot der Zone (alle 5 min gerechnet). Das Comet-Modell im Nacht-Test ist unterhalb von +1 K
+    angenommen (Schließen bei −1 K). Die Reaktionszeit hat Minutenauflösung (0 = in derselben Minute).
 
 ## 10. Wo eine Prüfung am meisten bringt
+
+1.4.2 (`feat/thermostat-lernt` gegen `v1.4.1`, `c91ea69`): neuer Lese-Weg `mqtt.publish` (nur Abfrage, Gerätename
+und Basis-Topic geprüft – kann ein Name eine Abfrage zu einem `set` machen?), Kennfeld und Freigabe „Steuern“ (kann ein
+falscher Punkt „zu“/„ganz offen“ vortäuschen?), Testlauf-Schritte und Fortsetzung über Nächte, PI-Warten, Live-Signal
+(`state_events` mit zwei Warteschlangen, Abbruch). Zuvor:
 
 Zu prüfen ist der Branch `feat/thermostate` (1.4.0) gegen `v1.3.1` (`c70845a`) – **vor** dem ersten Steuern an der
 Anlage (Aufwand max). Eine erste Prüfung (Aufwand xhigh, `pruefung-1.4.0.md` in den Notizen) ist eingearbeitet

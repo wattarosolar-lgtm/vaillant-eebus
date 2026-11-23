@@ -193,7 +193,8 @@ In der Kopfzeile schalten Sie zwischen **Demo** und **Live** um; der gewählte B
 
 - **Demo** (Voreinstellung nach der Installation): Ein blaues Band unter der Kopfzeile sagt, dass die App nur
   liest. Eine Änderung erscheint einige Sekunden lang blau als Vorschau, danach zeigt die Kachel wieder den echten
-  Wert der Anlage. Das Protokoll vermerkt „Würde senden: …“.
+  Wert der Anlage. Das Protokoll vermerkt „Würde senden: …“. Einzige Nachricht, die die App auch im Demo-Betrieb
+  verschickt: die Abfrage der Ventilstellung der Aqara W600 (Raumregelung, nur lesen, verstellt nichts).
 - **Live** (Umschalter orange): Die App sendet Änderungen an die Wärmepumpe. Das Umschalten muss bestätigt werden.
   Bis die Anlage den neuen Wert meldet, zeigt die Kachel ihn blass; danach normal. Sobald die Wärmepumpe den
   Befehl quittiert hat, können Sie weiter einstellen. Meldet die Anlage den Wert nicht innerhalb von 30 Sekunden
@@ -388,8 +389,13 @@ An die Wärmepumpe sendet die Raumregelung nichts.
   Versorgung als „würde“.
 - **Vorschau:** Die App rechnet alle 5 Minuten den Sollwert jedes Thermostats und schreibt ins Protokoll, was sie
   senden würde („Vorschau, würde senden“), mit den Grenzen der Ventilschonung wie beim echten Senden.
-- **Steuern:** nur im Live-Betrieb, mit Bestätigung, und je Raum erst nach einem **vollständigen Testlauf** des
-  Thermostats. Empfehlung: erst einige Tage Vorschau, dann ein einzelner Raum (etwa das Bad), dann die übrigen.
+- **Steuern:** nur im Live-Betrieb, mit Bestätigung, und je Raum erst, wenn die App vom Thermostat **„zu“ und
+  „ganz offen“ bei warmem Wasser** kennt – aus einem Testlauf oder aus dem Alltag (seit 1.4.2; siehe
+  „Regelverhalten“). Die Seite zeigt beim Raum, was noch fehlt. Empfehlung: erst einige Tage Vorschau, dann ein
+  einzelner Raum (etwa das Bad), dann die übrigen.
+
+Die Seite **Räume** aktualisiert sich live, sobald sich ein Thermostat, ein Ventil, ein Raumsensor oder das
+Fühlerpaar ändert oder die App etwas entscheidet oder sendet (sonst jede Minute).
 
 **Was die App je Raum tut:**
 
@@ -397,8 +403,12 @@ An die Wärmepumpe sendet die Raumregelung nichts.
   3 Stunden; solange das Aufheizen nicht gelernt ist, 1 Stunde vorher) plus eine **Korrektur**: Weicht der
   Raumsensor 30 Minuten lang um mindestens 0,2 K ab, ändert sie die Korrektur um 0,5 K (höchstens ± 5 K,
   einstellbar). Sie erhöht nicht, wenn das Ventil schon zu mindestens 90 % offen ist (dann fehlt Wasser oder Vorlauf)
-  oder kein warmes Wasser kommt, und senkt nicht, wenn das Ventil höchstens 5 % offen ist. Nach einem Testlauf
-  rechnet sie genauer: welche Ventilöffnung der Raum braucht und welcher Sollwert sie beim Thermostat bringt.
+  oder kein warmes Wasser kommt, und senkt nicht, wenn das Ventil höchstens 5 % offen ist. Kennt sie das
+  Regelverhalten des Thermostats („zu“ und „ganz offen“), rechnet sie genauer: welche Ventilöffnung der Raum braucht
+  und welche kleinste Abweichung (Sollwert über der Temperatur am Thermostat) diese Öffnung im jetzigen Zustand
+  erreicht hat – steigend oder fallend, bei so warmem Wasser wie jetzt. Bei einem PI-Thermostat (dessen Ventil bei
+  gleichem Sollwert weiterwandert, etwa der Comet) wartet sie nach jeder Änderung die gelernte Einschwingzeit ab
+  (mindestens 30 Minuten) und legt nicht nach, solange das Ventil noch in die richtige Richtung läuft.
 - **Raum ohne eigenen Sensor** (Bad mit Comet): Raum-Soll + **fester Ausgleich** (Voreinstellung 0 K). Ist es gefühlt
   zu kühl, den Ausgleich z. B. auf +1 K stellen.
 - **Fenster offen** (Temperatur und Luftfeuchte fallen): Thermostat sofort auf den kleinsten Wert (Aqara 5 °C,
@@ -426,7 +436,46 @@ Sicherheit, Rückweg und Rückfall. Ein Wert, der noch zum Thermostat unterwegs 
 Sollwert gilt erst als bestätigt, wenn das Thermostat ihn meldet; meldet es ihn zweimal nicht, sendet die App ihm eine
 Stunde lang nur Fenster, Sicherheit, Rückweg und Rückfall. Die Seite zeigt Befehle und Ventilbewegungen je Tag.
 
-**Testlauf** (je Thermostat, Pflicht vor „Steuern“): Er misst, wie das Thermostat auf seinen Sollwert reagiert.
+**Regelverhalten** (seit 1.4.2): Die App lernt je Thermostat ein **Kennfeld** – welche Ventilstellung sich nach
+dem Einschwingen bei welcher Abweichung einstellt (Sollwert minus Temperatur am Thermostat, in 0,5-K-Schritten),
+getrennt nach steigender und fallender Abweichung und danach, wie warm das Wasser am Heizkörper ist (Vorlauf unter 30,
+30 bis 35, über 35 °C; vom Fühlerpaar, sonst vom Vorlauf der Zone oder vom Puffer). Neuere Werte zählen mehr
+(Halbwertszeit 14 Tage). Sie lernt
+
+- im **Alltag** ab „Beobachten“, ohne Fühlerpaar: Stehen Sollwert und Abweichung 30 Minuten ruhig, kommt warmes
+  Wasser an und ist die Ventilstellung aktuell, wird daraus ein Punkt (Median der letzten 10 Minuten);
+- in **Testläufen** aus jeder eingeschwungenen Stufe.
+
+Dazu kommen aus jeder Änderung des Sollwerts (durch die App, von Hand oder durch einen Zeitplan) die **Sprungantwort**
+(nach wie vielen Minuten sich das Ventil bewegt, wie schnell, wann es steht), die **Reglerart** (auf/zu, P oder PI)
+und der **kleinste wirksame Schritt**. „Ganz offen“ heißt mindestens 85 % – oder mindestens 50 %, wenn 1 K mehr keine
+5 Prozentpunkte mehr bringt (der Comet kommt nicht über etwa 88 %). „Zu“ heißt höchstens 5 %. Beim Raum unter
+„Regelverhalten“ stehen das Kennfeld (steigend und fallend nebeneinander, mit der Zahl der Punkte), was fehlt und
+woher die Punkte stammen. Die Testläufe der Version 1.4.1 übernimmt die App als erste Punkte.
+
+**Ventilstellung der Aqara W600** (seit 1.4.2): Der W600 meldet seine Ventilstellung nur selten, mitunter einen Tag
+lang nicht. Die App fragt sie deshalb selbst ab, über die MQTT-Integration von Home Assistant: eine Nachricht an
+Zigbee2MQTT, `zigbee2mqtt/<Gerätename>/get` mit `{"running_state": ""}` – genau diese, nichts anderes, und nur für
+Thermostate der Räume. Sie liest nur und verstellt nichts, deshalb auch im Demo-Betrieb; bei ausgeschalteter
+Raumregelung nicht. Wann: alle 5 Minuten (kurz bevor die App rechnet), 1 und 3 Minuten nach jedem neuen Sollwert und
+im Testlauf 10 Minuten lang jede Minute, danach alle 2 Minuten – höchstens alle 30 Sekunden und höchstens 720-mal am
+Tag je Thermostat. Die Abfragen zählen nicht zu den Befehlen und stehen nicht einzeln im Protokoll; geht eine nicht
+(etwa ohne MQTT-Integration), steht das einmal als Problem darin. Die Seite zeigt je W600 die letzte Abfrage, die
+Zahl heute und das Topic.
+
+- **Gerätename:** der Name des Geräts in Home Assistant, so wie Zigbee2MQTT es angelegt hat (nicht ein Name, den Sie
+  in Home Assistant vergeben haben). Heißt das Gerät in Zigbee2MQTT anders, den Namen beim Raum eintragen (Bearbeiten
+  → „Gerätename in Zigbee2MQTT“). Namen mit einem Teil „get“ oder „set“, mit `+` oder `#` nimmt die App nicht.
+- **Basis-Topic:** `zigbee2mqtt`, änderbar auf der Karte „Raumregelung“ unter „Ventilstellung der Aqara W600
+  abfragen“.
+- **Zuletzt gesehen (empfohlen):** In Zigbee2MQTT unter Einstellungen → Erweitert „last_seen“ auf ISO_8601 stellen
+  und in Home Assistant die Entitäten „… Last seen“ der Thermostate aktivieren. Dann erkennt die App, ob ein
+  Thermostat auf die Abfrage antwortet; eine unveränderte Stellung gilt dann als bestätigt. Ohne „zuletzt gesehen“
+  gilt eine Abfrage, die Home Assistant angenommen hat, als Bestätigung. Der Eurotronic Comet meldet seine Stellung
+  mit seinen Nachrichten selbst (Zigbee2MQTT kann sie dort nicht abfragen).
+
+**Testlauf** (je Thermostat; nicht mehr Pflicht vor „Steuern“, aber der schnellste Weg zu „zu“ und „ganz offen“):
+Er misst, wie das Thermostat auf seinen Sollwert reagiert.
 
 1. Das **Fühlerpaar** an Vor- und Rücklauf des Heizkörpers befestigen (Anlegefühler, gut anliegend, mit Isolierung
    darüber; gut ist eine Auflösung von 0,1–0,2 K). Der **Vorlauf** ist das Rohr am Thermostatventil. Unter
@@ -441,10 +490,18 @@ Stunde lang nur Fenster, Sicherheit, Rückweg und Rückfall. Die Seite zeigt Bef
    eine Nacht, deren Startzeit beim Vormerken schon vorbei war, zählt nicht). Worauf er wartet, steht beim Raum
    („Wartet: …“) und – jeder neue Grund einmal je Nacht – im Protokoll; um 1 Uhr folgt „heute Nacht nicht
    gestartet: zuletzt …“.
-4. Die App stellt das Thermostat auf seine eigene Temperatur, dann in 0,5-K-Schritten höher, bis das Ventil offen
-   ist, danach bis 1 K unter die Temperatur am Thermostat und zurück auf den Wert von vorher – spätestens um 5 Uhr.
-   Jede Stufe dauert 20–40 Minuten mit warmem Wasser, bis Ventil und Rücklauf ruhig stehen. Höchstens 16 Befehle
-   je Nacht (sie zählen nicht zu den 24; der Rückweg zählt nicht mit).
+4. Die App stellt das Thermostat auf seine eigene Temperatur, dann höher, bis das Ventil **ganz offen** ist, danach
+   tiefer, bis es **zu** ist (höchstens bis 2 K unter die Temperatur am Thermostat), und zurück auf den Wert von
+   vorher – spätestens um 5 Uhr. Die **Schritte richten sich nach dem Ventil** (seit 1.4.2): der erste je Richtung
+   1 K; hat sich das Ventil um weniger als 10 % je K bewegt, folgen 2 K, dann 3 K (größter Schritt); hat es sich um
+   mehr als 40 Prozentpunkte bewegt, 0,5 K; sonst so viel, dass das Ventil etwa die nächste Marke erreicht (25, 50,
+   75, 85 % aufwärts, 50, 25, 5 % abwärts). Reicht die Zeit bis 5 Uhr nicht für alle Marken, werden die Schritte
+   größer. Jede Stufe dauert 20–40 Minuten mit warmem Wasser, bis Ventil und Rücklauf ruhig stehen. Höchstens 16
+   Befehle je Nacht (sie zählen nicht zu den 24; der Rückweg zählt nicht mit).
+   Endet die Nacht (oder das Budget), nachdem das Ventil ganz offen war, aber bevor es zu war, bleibt der Lauf
+   vorgemerkt und geht in der **nächsten Nacht nur abwärts** weiter: Er beginnt bei der Abweichung, bei der das Ventil
+   ganz offen war. Ebenso läuft ein neu vorgemerkter Testlauf nur abwärts, wenn die App „ganz offen“ schon kennt, „zu“
+   aber nicht (etwa im Bad nach der Nacht vom 22./23.11.).
 5. Abbruch (zurück auf den Wert von vorher): Raum über Soll + 1 K, Fenster offen, 30 Minuten keine Ventilstellung
    oder kein warmes Wasser, Abbruch durch Sie. Der Raum kann während des Laufs bis zu 1 K wärmer werden, und der Motor
    des Thermostats ist zu hören.
@@ -452,10 +509,10 @@ Stunde lang nur Fenster, Sicherheit, Rückweg und Rückfall. Die Seite zeigt Bef
    er nicht hinaus, setzt die App den Notfallwert. Danach gibt sie das Thermostat wieder frei, außer der Raum steht auf
    „Steuern“.
 
-Das Ergebnis steht unter „Ventilverhalten“: ab welchem Abstand das Ventil öffnet, ganz offen und wieder zu ist, nach
-wie vielen Minuten es reagiert, welche Stufen es erreicht, und je Stufe Vor- und Rücklauf und die geschätzte
-Wärmeabgabe. Vollständig ist ein Lauf, wenn das Ventil ganz offen und wieder zu war; erst dann ist „Steuern“
-möglich. Empfohlen sind 2–3 Läufe an verschiedenen Tagen; mit einem Fühlerpaar geht ein Lauf je Nacht.
+Jede eingeschwungene Stufe geht sofort ins Regelverhalten. Unter „Testläufe“ stehen die Stufen des letzten Laufs
+mit Sollwert, Abweichung, Ventil, Vor- und Rücklauf und der geschätzten Wärmeabgabe. Vollständig ist ein Lauf, wenn
+das Ventil ganz offen und wieder zu war. Mit einem Fühlerpaar geht ein Lauf je Nacht; die übrigen Räume lernen im
+Alltag.
 
 **Absicherung:**
 
@@ -477,13 +534,15 @@ möglich. Empfohlen sind 2–3 Läufe an verschiedenen Tagen; mit einem Fühlerp
 
 **Warnungen** (die App liest sie über die IEEE-Adresse des Thermostats und schreibt nichts davon): Aqara-Fühler nicht
 auf „internal“, Betrieb nicht „heat“ oder ein Preset aktiv, Comet nicht in `trv_mode` 2, eigene Fenstererkennung an,
-Kindersicherung aus, Ventilalarm, Batterie schwach, Ventilstellung lange nicht gemeldet. Bei Fühler oder `trv_mode`
-stellt die App das Thermostat nicht.
+Kindersicherung aus, Ventilalarm, Batterie schwach, Thermostat seit über 12 Stunden nicht gemeldet (mit „zuletzt
+gesehen“ nach seiner letzten Nachricht, sonst nach der letzten Änderung von Thermostat oder Ventil). Bei Fühler oder
+`trv_mode` stellt die App das Thermostat nicht.
 
 **Was die Raumregelung nie schreibt:** Kalibrierung, Fühlerwahl, externe Temperatur, `trv_mode`, Betrieb, Presets,
 Zeitpläne, Fenstererkennung und Kindersicherung der Thermostate – nur den Sollwert (`climate.set_temperature`), und
 nur auf dem Thermostat, das einem Raum zugeordnet ist, nie auf einer Zone von myVAILLANT (auch nicht auf einer
-Klima-Entität, die wie eine aussieht).
+Klima-Entität, die wie eine aussieht). Dazu kommt nur die Abfrage der Ventilstellung der W600 (`mqtt.publish` mit
+genau der Nachricht oben, nie gespeichert/retained).
 
 ## Protokoll
 
