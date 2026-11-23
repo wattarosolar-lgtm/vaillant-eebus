@@ -17,8 +17,10 @@ import uvicorn
 from vaillant_eebus.api import INGRESS_CLIENT, create_app
 from vaillant_eebus.bridge_auth import BridgeCredentials
 from vaillant_eebus.bridge_client import DEFAULT_ADDRESS, BridgeClient
+from vaillant_eebus.cloud_budget import CloudBudget
 from vaillant_eebus.energy import EnergyMeter, local_zone
 from vaillant_eebus.ha_client import SUPERVISOR_CORE_URL, HomeAssistantClient
+from vaillant_eebus.hems.executor import ZoneExecutor
 from vaillant_eebus.hems.service import HemsService
 from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogStore
@@ -140,20 +142,28 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> bool:
     if ha_client is None:
         _LOGGER.info("No Supervisor token: running without Home Assistant")
     myvaillant = settings.current.connection is Connection.MYVAILLANT
+    zone = local_zone(config.time_zone)
     state: StateHub
     if myvaillant:
         _LOGGER.info("Connection myVAILLANT: the heat pump is read and controlled through Home Assistant")
         device = MyVaillantState(settings, available=ha_client is not None)
         state = device
-        gate = WriteGate(bridge, pairing, state, settings, log, link=MyVaillantLink(ha_client, device, settings))
+        # Every command to the Vaillant cloud is counted per day (quota).
+        budget = CloudBudget(config.data_dir, settings, log, zone=zone)
+        gate = WriteGate(
+            bridge, pairing, state, settings, log, link=MyVaillantLink(ha_client, device, settings), budget=budget
+        )
     else:
         _LOGGER.info("Connection EEBUS: the heat pump is read and controlled through the bridge")
         state = StateService(bridge, pairing)
         gate = WriteGate(bridge, pairing, state, settings, log)
-    zone = local_zone(config.time_zone)
     energy = EnergyMeter(state, config.data_dir, zone=zone)
     home_assistant = HomeAssistant(settings, state, energy, log, ha_client)
     hems = HemsService(settings, state, home_assistant, log, config.data_dir, zone=zone)
+    # Carries the plan out at the zones (quick veto, floor heating off/auto) through the write gate.
+    executor = ZoneExecutor(hems, gate, state, settings, log, config.data_dir, zone=zone)
+    if home_assistant.exporter is not None:
+        home_assistant.exporter.add_source(executor.sensors, always=True)
     # The radiator thermostats: their own write gate, decided by the room control on the energy
     # management's samples.
     room_gate = RoomGate(ha_client, settings, home_assistant.hems_sources, log, config.data_dir, zone=zone)
@@ -171,6 +181,7 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> bool:
         zone=zone,
         hems=hems,
         rooms=rooms,
+        executor=executor,
         restart=restart.set,
     )
     server = uvicorn.Server(
@@ -201,6 +212,8 @@ async def run_backend(config: BackendConfig, bridge: BridgeClient) -> bool:
                 tasks.create_task(energy.run()),
                 tasks.create_task(home_assistant.run()),
                 tasks.create_task(hems.run()),
+                # On its way out it ends its quick vetos and sets its zones back to auto, at most 15 s.
+                tasks.create_task(executor.run()),
                 tasks.create_task(room_gate.run()),
                 # On its way out it hands the thermostats back (emergency values), at most 15 s.
                 tasks.create_task(rooms.run()),

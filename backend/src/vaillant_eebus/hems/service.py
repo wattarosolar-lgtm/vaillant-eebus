@@ -4,10 +4,11 @@ It watches the heat pump's power and outdoor temperature (starts, runs,
 pauses, defrosts, frost protection), samples the rooms every five minutes
 (room model, windows, supply), reads Home Assistant's long-term statistics
 (house model), fetches the 48-hour forecast and plans every quarter hour by
-rules. For the zones it only shows and logs what it would do: it never calls
-the write gate (a test checks that the package does not even import it). The
-room control (package rooms, 1.4.0) runs on its samples - it is called right
-after them - and tells it when a radiator zone really needs a higher flow.
+rules. It never calls the write gate itself: the zone executor (executor.py,
+1.5.0) carries out the plan and the floor heating's off/auto, and is woken
+after every plan and every new state. The room control (package rooms, 1.4.0)
+runs on its samples - it is called right after them - and tells it when a
+radiator zone really needs a higher flow.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from vaillant_eebus.ha_export import PREFIX, Sensor
 from vaillant_eebus.ha_import import room_celsius
 from vaillant_eebus.hems.config import (
     AVAILABLE_MODES,
+    FUNCTION_MODES,
+    Function,
     HemsSettings,
     PlannerMode,
     WeatherSource,
@@ -125,6 +128,19 @@ class ModeNotAvailable(Exception):
     """The stage comes with a later version."""
 
 
+FUNCTION_NAMES = {Function.ZONE1: "Zone 1 Aus/Auto", Function.FLOW: "Vorlauf und Vorausschau"}
+
+
+@dataclass(frozen=True, slots=True)
+class FunctionStatus:
+    function: Function
+    name: str
+    mode: PlannerMode
+    # The stage it works in: the smaller of its own and the energy management's.
+    effective: PlannerMode
+    available_modes: list[PlannerMode]
+
+
 @dataclass(frozen=True, slots=True)
 class ForecastStatus:
     source: WeatherSource | None
@@ -192,6 +208,9 @@ class HemsStatus:
     flow: list[FlowStatus]
     next_changes: list[Change]
     plan_created_at: datetime | None
+    functions: list[FunctionStatus]
+    # The zone executor's state (1.5.0); None without one.
+    control: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -365,6 +384,8 @@ class HemsService:
         self._wake = asyncio.Event()
         self._sampled: list[Callable[[datetime], Awaitable[None]]] = []
         self._flow_advisor: Callable[[str, FlowHint], tuple[FlowHint, str | None] | None] | None = None
+        self._updated: list[Callable[[], None]] = []
+        self._control_status: Callable[[], Any] | None = None
         self._load_state()
         self._load_history()
         self._check_legacy()
@@ -389,6 +410,25 @@ class HemsService:
     def on_sampled(self, listener: Callable[[datetime], Awaitable[None]]) -> None:
         """Called every five minutes right after the samples and the rooms' supply (the room control)."""
         self._sampled.append(listener)
+
+    def on_update(self, listener: Callable[[], None]) -> None:
+        """Called after every plan and every new state of the heat pump (the zone executor)."""
+        self._updated.append(listener)
+
+    def set_control_status(self, status: Callable[[], Any]) -> None:
+        self._control_status = status
+
+    @property
+    def frost_active(self) -> bool:
+        return self._frost.active
+
+    def floor_zone(self) -> str | None:
+        """The zone with floor heating: the one F1 switches off while the heat pump stands still."""
+        return self._floor_zone()
+
+    def zone1_would(self) -> str | None:
+        """What F1 would do now: "off", "auto", or None without power or zone."""
+        return self._zone1.would if self._floor_zone() is not None else None
 
     def set_flow_advisor(self, advisor: Callable[[str, FlowHint], tuple[FlowHint, str | None] | None]) -> None:
         """The room control's word on a radiator zone's flow hint: first redistribute, then the flow."""
@@ -448,12 +488,23 @@ class HemsService:
         self._settings.update(lambda settings: replace(settings, hems=replace(settings.hems, mode=mode)))
         self._log.add(LogCategory.HEMS, _MODE_LOG[mode])
         self.wake()
+        self._notify()
+        return mode
+
+    async def set_function_mode(self, function: Function, mode: PlannerMode) -> PlannerMode:
+        if mode not in FUNCTION_MODES[function]:
+            raise ModeNotAvailable(mode)
+        if mode is self._settings.current.hems.function_mode(function):
+            return mode
+        self._settings.update(lambda settings: replace(settings, hems=settings.hems.with_function(function, mode)))
+        self._log.add(LogCategory.HEMS, f"{FUNCTION_NAMES[function]}: Stufe {MODE_NAMES[mode]}.")
+        self._notify()
         return mode
 
     def change_settings(self, hems: HemsSettings) -> HemsSettings:
         """Save the user's settings (the stage stays) and plan again at once."""
         before = self._settings.current.hems
-        hems = replace(hems, mode=before.mode)
+        hems = replace(hems, mode=before.mode, zone1_mode=before.zone1_mode, flow_mode=before.flow_mode)
         if hems == before:
             return hems
         self._settings.update(lambda settings: replace(settings, hems=hems))
@@ -469,6 +520,14 @@ class HemsService:
             await self._make_plan()
         except Exception:
             _LOGGER.exception("Planning failed")
+        self._notify()
+
+    def _notify(self) -> None:
+        for listener in self._updated:
+            try:
+                listener()
+            except Exception:
+                _LOGGER.exception("A listener of the energy management failed")
 
     # --- status ------------------------------------------------------------------
 
@@ -502,6 +561,17 @@ class HemsService:
             flow=self._flow_status(),
             next_changes=self.changes(NEXT_CHANGES),
             plan_created_at=self._plan.created_at if self._plan else None,
+            functions=[
+                FunctionStatus(
+                    function=function,
+                    name=FUNCTION_NAMES[function],
+                    mode=settings.hems.function_mode(function),
+                    effective=settings.hems.effective(function),
+                    available_modes=sorted(FUNCTION_MODES[function], key=list(PlannerMode).index),
+                )
+                for function in Function
+            ],
+            control=self._control_status() if self._control_status is not None else None,
         )
 
     def plan_view(self) -> PlanView:
@@ -725,6 +795,7 @@ class HemsService:
                 except Exception:
                     # A fault here must not stop the rest of the app.
                     _LOGGER.exception("Observing the heat pump failed")
+                self._notify()
 
     async def _sampling(self) -> None:
         while True:
@@ -746,7 +817,7 @@ class HemsService:
         if outdoor is not None:
             self.cycles.feed_outdoor(now, outdoor.value)
         frost = frost_state(self.cycles.outdoor, now)
-        if frost.active != self._frost.active and self.mode is PlannerMode.PREVIEW:
+        if frost.active != self._frost.active and self.mode is not PlannerMode.OFF:
             self._log.add(
                 LogCategory.HEMS,
                 "Frostschutz der Wärmepumpe aktiv: länger als 4 h unter 4 °C. Die Anlage heizt jetzt auch in "
@@ -759,7 +830,7 @@ class HemsService:
         if self._detected_at is None or now - self._detected_at >= DETECT_EVERY:
             self._detected_at = now
             for item in self.cycles.update():
-                if self.mode is PlannerMode.PREVIEW:
+                if self.mode is not PlannerMode.OFF:
                     local = item.at.astimezone(self._zone)
                     outside = f", außen {_number(item.outdoor_c)} °C" if item.outdoor_c is not None else ""
                     self._log.add(
@@ -882,7 +953,7 @@ class HemsService:
             )
             before = self._supply.get(room.entity_id)
             if (
-                self.mode is PlannerMode.PREVIEW
+                self.mode is not PlannerMode.OFF
                 and self._observed(room)
                 and state.supply in (Supply.UNDER, Supply.OVER)
                 and (before is None or before.supply != state.supply)
@@ -936,7 +1007,7 @@ class HemsService:
                 else "Vorlauf tiefer: alle Räume versorgt, kein Ventil weit offen"
             )
             flow.offset_k, flow.changed_at, flow.reason = offset, now, reason
-            if self.mode is PlannerMode.PREVIEW:
+            if self.mode is not PlannerMode.OFF:
                 label = self._labels().get(zone_config.zone_id, zone_config.zone_id)
                 self._log.add(LogCategory.HEMS, f"{label} würde den Vorlauf ändern: {_signed(offset)} K ({reason}).")
             self._save_state()
@@ -1026,7 +1097,7 @@ class HemsService:
                 listener(room.entity_id)
             except Exception:
                 _LOGGER.exception("A window listener failed")
-        if self.mode is not PlannerMode.PREVIEW or not self._observed(room):
+        if self.mode is PlannerMode.OFF or not self._observed(room):
             return
         if event.opened:
             self._log.add(LogCategory.ROOMS, f"Fenster offen erkannt (würde): {room.name}, {event.describe()}.")
@@ -1144,7 +1215,7 @@ class HemsService:
 
     def _log_changes(self, now: datetime) -> None:
         """One protocol line when the coming changes of the next 12 hours change."""
-        if self.mode is not PlannerMode.PREVIEW:
+        if self.mode is PlannerMode.OFF:
             return
         changes = [change for change in self.changes(EXPORT_CHANGES) if change.at - now <= timedelta(hours=12)]
         key = [(change.at, change.text) for change in changes]
@@ -1152,7 +1223,7 @@ class HemsService:
             return
         self._logged_changes = key
         if not changes:
-            self._log.add(LogCategory.HEMS, "Plan (Vorschau): in den nächsten 12 h keine Änderung.")
+            self._log.add(LogCategory.HEMS, f"Plan ({MODE_NAMES[self.mode]}): in den nächsten 12 h keine Änderung.")
             return
         parts = []
         for change in changes[:4]:
@@ -1160,7 +1231,7 @@ class HemsService:
             reason = f" ({change.reasons[0]})" if change.reasons else ""
             parts.append(f"{local:%H} Uhr {change.text}{reason}")
         more = f" und {len(changes) - 4} weitere" if len(changes) > 4 else ""
-        self._log.add(LogCategory.HEMS, f"Plan (Vorschau): {'; '.join(parts)}{more}.")
+        self._log.add(LogCategory.HEMS, f"Plan ({MODE_NAMES[self.mode]}): {'; '.join(parts)}{more}.")
 
     # --- learning ----------------------------------------------------------------
 

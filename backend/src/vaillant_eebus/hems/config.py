@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import time
 from enum import StrEnum
 from typing import Any, TypeIs
@@ -42,12 +42,34 @@ class PlannerMode(StrEnum):
     OFF = "off"
     # Plans and shows what it would do; sends nothing, also in live mode.
     PREVIEW = "preview"
-    # Carries the plan out through the write gate; comes with 1.4.0.
+    # Carries the plan out through the write gate (1.5.0, hems/executor.py).
     CONTROL = "control"
 
 
-# Stages the app offers in this version: 1.3.0 only observes, learns and plans.
-AVAILABLE_MODES = frozenset({PlannerMode.OFF, PlannerMode.PREVIEW})
+# Stages of the energy management as a whole.
+AVAILABLE_MODES = frozenset({PlannerMode.OFF, PlannerMode.PREVIEW, PlannerMode.CONTROL})
+_ORDER = (PlannerMode.OFF, PlannerMode.PREVIEW, PlannerMode.CONTROL)
+
+
+class Function(StrEnum):
+    """The functions of the zone control (plan 1.5.0), each with its own stage."""
+
+    # F1: floor heating zone off while the heat pump stands still, auto when it runs.
+    ZONE1 = "zone1"
+    # F2: the zone setpoint after the valves and the forecast (quick veto); "Steuern" after 1.4.2.
+    FLOW = "flow"
+
+
+# Stages each function offers in this version.
+FUNCTION_MODES: dict[Function, frozenset[PlannerMode]] = {
+    Function.ZONE1: AVAILABLE_MODES,
+    Function.FLOW: frozenset({PlannerMode.OFF, PlannerMode.PREVIEW}),
+}
+
+
+def lower(first: PlannerMode, second: PlannerMode) -> PlannerMode:
+    """The smaller of two stages: the energy management's and a function's."""
+    return min(first, second, key=_ORDER.index)
 
 
 class WeatherSource(StrEnum):
@@ -131,6 +153,9 @@ class HemsSettings:
     cloud_commands_max: int = 100
     # The user's automation: floor heating off below this power of the heat pump, on above.
     zone1_threshold_w: float = 30.0
+    # Stages of the functions; what counts is the smaller of these and mode.
+    zone1_mode: PlannerMode = PlannerMode.PREVIEW
+    flow_mode: PlannerMode = PlannerMode.PREVIEW
 
     def zone(self, zone_id: str) -> ZoneConfig:
         return next((zone for zone in self.zones if zone.zone_id == zone_id), ZoneConfig(zone_id=zone_id))
@@ -142,6 +167,18 @@ class HemsSettings:
             chosen += [zone.flow_entity, zone.flow_setpoint_entity]
         return frozenset(entity for entity in chosen if entity)
 
+    def function_mode(self, function: Function) -> PlannerMode:
+        return self.zone1_mode if function is Function.ZONE1 else self.flow_mode
+
+    def effective(self, function: Function) -> PlannerMode:
+        """The stage a function works in: the smaller of its own and the energy management's."""
+        return lower(self.mode, self.function_mode(function))
+
+    def with_function(self, function: Function, mode: PlannerMode) -> HemsSettings:
+        if function is Function.ZONE1:
+            return replace(self, zone1_mode=mode)
+        return replace(self, flow_mode=mode)
+
 
 def hems_from_json(raw: Any) -> HemsSettings:
     if raw is None:
@@ -151,9 +188,9 @@ def hems_from_json(raw: Any) -> HemsSettings:
         return HemsSettings()
     defaults = HemsSettings()
     mode = _enum(raw, "mode", PlannerMode, defaults.mode)
-    if mode not in AVAILABLE_MODES:
-        # A planner of 1.1/1.2 in "control": this version only previews.
-        _LOGGER.warning("Settings: planner stage %s is not available in this version, using preview", mode)
+    if mode is PlannerMode.CONTROL and "zone1_mode" not in raw:
+        # "Steuern" of a planner before 1.5.0 (1.1/1.2): the zone control starts in preview.
+        _LOGGER.warning("Settings: planner stage control from an older version, using preview")
         mode = PlannerMode.PREVIEW
     weather_source = raw.get("weather_source")
     return HemsSettings(
@@ -183,6 +220,8 @@ def hems_from_json(raw: Any) -> HemsSettings:
         block_above_c=_value(raw, "block_above_c", BLOCK_ABOVE_C, defaults.block_above_c),
         cloud_commands_max=int(_value(raw, "cloud_commands_max", CLOUD_COMMANDS, defaults.cloud_commands_max, step=1)),
         zone1_threshold_w=_value(raw, "zone1_threshold_w", ZONE1_THRESHOLD_W, defaults.zone1_threshold_w),
+        zone1_mode=_function_mode(raw, Function.ZONE1, defaults.zone1_mode),
+        flow_mode=_function_mode(raw, Function.FLOW, defaults.flow_mode),
     )
 
 
@@ -210,6 +249,8 @@ def hems_to_json(settings: HemsSettings) -> dict[str, Any]:
         "block_above_c": settings.block_above_c,
         "cloud_commands_max": settings.cloud_commands_max,
         "zone1_threshold_w": settings.zone1_threshold_w,
+        "zone1_mode": settings.zone1_mode.value,
+        "flow_mode": settings.flow_mode.value,
     }
 
 
@@ -268,6 +309,14 @@ def _zones(raw: Any) -> tuple[ZoneConfig, ...]:
             )
         )
     return tuple(zones)
+
+
+def _function_mode(raw: dict[str, Any], function: Function, default: PlannerMode) -> PlannerMode:
+    mode = _enum(raw, f"{function.value}_mode", PlannerMode, default)
+    if mode not in FUNCTION_MODES[function]:
+        _LOGGER.warning("Settings: stage %s of %s is not available in this version, using preview", mode, function)
+        return PlannerMode.PREVIEW
+    return mode
 
 
 def _enum[E: StrEnum](raw: dict[str, Any], key: str, kind: type[E], default: E) -> E:

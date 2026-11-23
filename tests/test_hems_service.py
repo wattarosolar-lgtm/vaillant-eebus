@@ -412,14 +412,16 @@ async def test_the_settings_are_checked_and_saved_over_the_api(app: App) -> None
     assert "Einstellungen des Energiemanagements geändert." in await messages(app.log)
 
 
-async def test_control_comes_with_a_later_version(app: App) -> None:
-    refused = await app.http.post("/api/hems/mode", json={"mode": "control"})
+async def test_control_of_the_flow_comes_after_1_4_2(app: App) -> None:
+    control = await app.http.post("/api/hems/mode", json={"mode": "control"})
+    refused = await app.http.post("/api/hems/function", json={"function": "flow", "mode": "control"})
     off = await app.http.post("/api/hems/mode", json={"mode": "off"})
 
+    assert control.status_code == 200
     assert refused.status_code == 409
-    assert "1.5.0" in refused.json()["detail"]
+    assert "1.4.2" in refused.json()["detail"]
     assert off.json()["mode"] == "off"
-    assert off.json()["available_modes"] == ["off", "preview"]
+    assert off.json()["available_modes"] == ["off", "preview", "control"]
     assert "Energiemanagement ausgeschaltet." in await messages(app.log)
 
 
@@ -542,9 +544,14 @@ async def test_the_energy_management_is_reported_as_sensors(app: App) -> None:
 # --- safety ------------------------------------------------------------------------------------
 
 
-def test_the_energy_management_never_reaches_the_write_gate() -> None:
+def test_only_the_executor_reaches_the_write_gate() -> None:
     package = Path(hems_package.__file__).parent
+    executor = (package / "executor.py").read_text(encoding="utf-8")
+    # The executor sends as the planner only.
+    assert executor.count("self._gate.submit(") == executor.count("source=Source.PLANNER") == 2
     for source in package.rglob("*.py"):
+        if source.name == "executor.py":
+            continue
         tree = ast.parse(source.read_text(encoding="utf-8"))
         imported = {
             node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None

@@ -650,10 +650,12 @@ def test_the_energy_management_still_has_no_way_to_write() -> None:
     package = Path(hems_package.__file__).parent
     for source in package.rglob("*.py"):
         imported = _imports(source)
-        assert not any(
-            "write_gate" in name or "bridge_client" in name or name.startswith("vaillant_eebus.rooms")
-            for name in imported
-        ), source.name
+        # The zone executor (1.5.0) sends through the write gate, never to the rooms.
+        gate = source.name != "executor.py" and any("write_gate" in name for name in imported)
+        assert not gate, source.name
+        assert not any("bridge_client" in name or name.startswith("vaillant_eebus.rooms") for name in imported), (
+            source.name
+        )
 
 
 # --- reading a W600's valve position (1.4.2) ---------------------------------------------------------------

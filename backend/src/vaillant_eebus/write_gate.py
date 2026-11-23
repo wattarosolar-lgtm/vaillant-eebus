@@ -48,6 +48,7 @@ from typing import Protocol
 import grpc
 
 from vaillant_eebus.bridge_client import BridgeClient
+from vaillant_eebus.cloud_budget import CloudBudget
 from vaillant_eebus.ha_client import EntityState, HomeAssistantClient, ServiceCallFailed
 from vaillant_eebus.hems.sources import HemsSources
 from vaillant_eebus.ids import device_name_problem
@@ -297,6 +298,7 @@ class WriteGate:
         log: LogStore,
         *,
         link: Link | None = None,
+        budget: CloudBudget | None = None,
         rate_limit_s: float = RATE_LIMIT_S,
         confirm_timeout_s: float | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -305,6 +307,8 @@ class WriteGate:
         self._bridge = bridge
         self._pairing = pairing
         self._link = link
+        self._budget = budget
+        self._sent_listeners: list[Callable[[Command, Source], None]] = []
         self._state = state
         self._settings = settings
         self._log = log
@@ -353,6 +357,14 @@ class WriteGate:
         confirmed in time) the device's value says nothing about outside changes.
         """
         return self._link is not None and (control, zone_id) in self._pending
+
+    @property
+    def budget(self) -> CloudBudget | None:
+        return self._budget
+
+    def on_sent(self, listener: Callable[[Command, Source], None]) -> None:
+        """Called after a command went out in live mode (also when its outcome is unknown)."""
+        self._sent_listeners.append(listener)
 
     def set_mode(self, mode: OperatingMode, *, confirm: bool) -> OperatingMode:
         """Switch between demo and live; live needs the user's explicit confirmation."""
@@ -409,6 +421,15 @@ class WriteGate:
                 _validate(command, heat_pump, self.connection)
                 if self._link is not None:
                     self._link.check(command, heat_pump)
+                if source is Source.PLANNER:
+                    _check_planner(command, self.connection)
+                    budget = self._budget
+                    if not preview and budget is not None and not budget.allows(fallback=returns_control(command)):
+                        raise WriteRejected(
+                            429,
+                            f"Tagesgrenze für Befehle an myVAILLANT erreicht ({budget.limit}); der Planer sendet "
+                            "heute nur noch, was die Zonen zurückgibt.",
+                        )
             except WriteRejected as rejected:
                 if preview:
                     self._log.add(
@@ -423,7 +444,7 @@ class WriteGate:
                 return WriteResult(sent=False, mode=self.mode, message=message, would_send=_payload(command))
             if self.mode is OperatingMode.DEMO:
                 return self._demo(command, description)
-            return await self._send(command, key, ski, heat_pump, description)
+            return await self._send(command, key, ski, heat_pump, description, source)
 
     async def run(self) -> None:
         """Confirm sent values from the device's state and record outside changes."""
@@ -451,7 +472,13 @@ class WriteGate:
         return WriteResult(sent=False, mode=OperatingMode.DEMO, message=message, would_send=_payload(command))
 
     async def _send(
-        self, command: Command, key: _Key, ski: str | None, heat_pump: HeatPumpState, description: str
+        self,
+        command: Command,
+        key: _Key,
+        ski: str | None,
+        heat_pump: HeatPumpState,
+        description: str,
+        source: Source = Source.UI,
     ) -> WriteResult:
         target = _target(command)
         current = _device_values(heat_pump).get(key)
@@ -482,6 +509,9 @@ class WriteGate:
         # In the database before the bridge sees the command, so even a crash
         # of the app in the middle of a write leaves a trace.
         await self._log.record(LogCategory.WRITE, f"Wird gesendet: {description}")
+        if self._link is not None and self._budget is not None:
+            # Counted before the call: the cloud counts it even when the answer gets lost.
+            self._budget.count()
         if self._link is not None:
             # The myVAILLANT integration shows the new value while the call still
             # runs: known beforehand, it is not mistaken for an outside change.
@@ -512,6 +542,7 @@ class WriteGate:
                 problem=True,
             )
             self._follow(command, key, target, description, now, before=before)
+            self._notify_sent(command, source)
             raise WriteOutcomeUnknown(err.code) from err
         except grpc.aio.AioRpcError as err:
             code = err.code()
@@ -529,6 +560,7 @@ class WriteGate:
                 problem=True,
             )
             self._follow(command, key, target, description, now)
+            self._notify_sent(command, source)
             raise WriteOutcomeUnknown(code) from err
         except BaseException:
             # Refused before sending, or the app stops: nothing left to follow.
@@ -538,7 +570,15 @@ class WriteGate:
         message = f"Gesendet: {description}"
         self._log.add(LogCategory.WRITE, message)
         self._follow(command, key, target, description, now, before=before)
+        self._notify_sent(command, source)
         return WriteResult(sent=True, mode=OperatingMode.LIVE, message=message)
+
+    def _notify_sent(self, command: Command, source: Source) -> None:
+        for listener in self._sent_listeners:
+            try:
+                listener(command, source)
+            except Exception:
+                _LOGGER.exception("A listener of sent commands failed")
 
     def _follow(
         self,
@@ -836,6 +876,27 @@ def _validate(command: Command, heat_pump: HeatPumpState, connection: Connection
                 raise WriteRejected(422, f"Unbekannte Aktion „{action}“.")
             if start_time is not None and action != "schedule":
                 raise WriteRejected(422, "Eine Startzeit gibt es nur beim Einplanen.")
+
+
+# What the planner may send (plan 1.5.0, section 4): quick veto, its end, and a zone off or back to auto.
+PLANNER_ZONE_MODES = frozenset({"off", "auto"})
+
+
+def returns_control(command: Command) -> bool:
+    """The command gives a zone back to its own control: always allowed, also at the daily limit."""
+    return isinstance(command, EndZoneOverride) or (isinstance(command, SetZoneMode) and command.mode == "auto")
+
+
+def _check_planner(command: Command, connection: Connection) -> None:
+    if connection is not Connection.MYVAILLANT:
+        raise WriteRejected(409, "Der Planer steuert die Zonen nur mit der Anbindung myVAILLANT.")
+    match command:
+        case SetZoneOverride() | EndZoneOverride():
+            return
+        case SetZoneMode(mode=mode) if mode in PLANNER_ZONE_MODES:
+            return
+        case _:
+            raise WriteRejected(403, "Diesen Befehl sendet der Planer nicht.")
 
 
 def _find_zone(heat_pump: HeatPumpState | None, zone_id: str) -> Zone | None:

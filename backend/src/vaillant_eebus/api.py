@@ -44,12 +44,14 @@ from vaillant_eebus.hems.config import (
     TARGET_STARTS,
     ZONE1_THRESHOLD_W,
     ZONES_MAX,
+    Function,
     PlannerMode,
     WeatherSource,
     ZoneKind,
     hems_from_json,
     on_step,
 )
+from vaillant_eebus.hems.executor import ZoneExecutor
 from vaillant_eebus.hems.service import HemsService, HemsStatus, ModeNotAvailable, PlanView, plan_csv
 from vaillant_eebus.history import PowerHistory
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
@@ -112,6 +114,7 @@ from vaillant_eebus.write_gate import (
     SetHotWaterMode,
     SetHotWaterSetpoint,
     SetZoneMode,
+    SetZoneOverride,
     SetZoneSetpoint,
     WriteGate,
     WriteNotExecuted,
@@ -362,6 +365,18 @@ class HemsModeRequest(BaseModel):
     mode: PlannerMode
 
 
+class FunctionModeRequest(BaseModel):
+    function: Function
+    mode: PlannerMode
+
+
+class OverrideRequest(WriteRequest):
+    """myVAILLANT: a temporary override (quick veto) of the user for 1 to 12 hours (W6)."""
+
+    value: float = Field(allow_inf_nan=False)
+    hours: int = Field(ge=1, le=12)
+
+
 @dataclass(frozen=True, slots=True)
 class Location:
     latitude: float
@@ -529,6 +544,7 @@ def create_app(
     zone: tzinfo = UTC,
     hems: HemsService | None = None,
     rooms: RoomControl | None = None,
+    executor: ZoneExecutor | None = None,
     restart: Callable[[], None] | None = None,
 ) -> FastAPI:
     """zone is Home Assistant's time zone: protocol days and downloaded times are local.
@@ -568,6 +584,11 @@ def create_app(
             raise WriteRejected(503, "Die Raumregelung läuft nicht.")
         return rooms
 
+    def zone_control() -> ZoneExecutor:
+        if executor is None:
+            raise WriteRejected(503, "Die Zonensteuerung läuft nicht.")
+        return executor
+
     def rooms_page() -> RoomsPage:
         view = energy_management().rooms_view()
         return RoomsPage(
@@ -575,7 +596,9 @@ def create_app(
         )
 
     async def to_demo() -> None:
-        """Before demo mode: the room control hands the thermostats back while still live."""
+        """Before demo mode: the zones and thermostats are handed back while still live."""
+        if executor is not None and gate.mode is OperatingMode.LIVE:
+            await executor.release("Demo-Betrieb")
         if rooms is not None and gate.mode is OperatingMode.LIVE:
             await rooms.before_demo()
 
@@ -709,6 +732,12 @@ def create_app(
         command = SetZoneMode(zone_id=zone_id, mode=request.mode)
         return await gate.submit(command, expected_mode=request.operating_mode)
 
+    @app.post("/api/zones/{zone_id}/override")
+    async def set_zone_override(zone_id: ZoneId, request: OverrideRequest) -> WriteResult:
+        """myVAILLANT: the user's own quick veto with a chosen duration, also to extend a running one (W6)."""
+        command = SetZoneOverride(zone_id=zone_id, celsius=request.value, hours=request.hours)
+        return await gate.submit(command, expected_mode=request.operating_mode)
+
     @app.post("/api/zones/{zone_id}/override/end")
     async def end_zone_override(zone_id: ZoneId, request: WriteRequest) -> WriteResult:
         """myVAILLANT: end the zone's temporary override (quick veto); it follows its time program again."""
@@ -829,11 +858,28 @@ def create_app(
         try:
             await service.set_mode(request.mode)
         except ModeNotAvailable:
-            raise WriteRejected(
-                409, "„Steuern“ der Zonen kommt mit Version 1.5.0; diese Version plant die Zonen nur."
-            ) from None
+            raise WriteRejected(409, "Diese Stufe gibt es in dieser Version nicht.") from None
         await service.plan_now()
         return service.status()
+
+    @app.post("/api/hems/function")
+    async def set_function_mode(request: FunctionModeRequest) -> HemsStatus:
+        service = energy_management()
+        try:
+            await service.set_function_mode(request.function, request.mode)
+        except ModeNotAvailable:
+            raise WriteRejected(
+                409, "„Steuern“ von Vorlauf und Vorausschau kommt nach Version 1.4.2 (Thermostat lernt)."
+            ) from None
+        if request.function is Function.ZONE1 and executor is not None:
+            executor.resume_zone1()
+        if executor is not None:
+            await executor.step()
+        return service.status()
+
+    @app.get("/api/hems/automation")
+    async def get_zone_automation() -> Automation:
+        return Automation(yaml=zone_control().automation())
 
     @app.get("/api/hems/plan")
     async def get_plan() -> PlanView:

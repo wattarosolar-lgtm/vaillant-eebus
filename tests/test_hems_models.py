@@ -79,7 +79,7 @@ def test_invalid_values_fall_back_one_by_one() -> None:
         }
     )
 
-    # "Steuern" comes with 1.4.0: a planner of 1.1/1.2 in control previews.
+    # "Steuern" of a planner before 1.5.0 (1.1/1.2) previews.
     assert settings.mode is PlannerMode.PREVIEW
     assert settings.weather_source is WeatherSource.OPEN_METEO
     assert settings.heat_heating_entity is None

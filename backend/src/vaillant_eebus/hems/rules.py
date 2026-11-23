@@ -13,7 +13,8 @@ zone in steps within the zone's band, and a setpoint per room:
 - flow (point 2): the offset from the valves, carried on to every hour;
 - the Vaillant frost protection comes first: no block operation in its hours.
 
-In 1.3.0 the plan is only shown (Vorschau); nothing is sent.
+The plan itself sends nothing: the executor (1.5.0) carries out the parts of the
+shift whose function is on "Steuern" (Part).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
+from enum import StrEnum
 
 from vaillant_eebus.hems.config import HemsSettings, ZoneConfig, ZoneKind, in_window
 from vaillant_eebus.hems.defrost import LEVEL_NAMES, RiskHour, RiskLevel
@@ -71,6 +73,22 @@ class ZoneInput:
     flow_line: tuple[float, float] | None = None
 
 
+class Part(StrEnum):
+    """Where a zone's shift comes from; the executor sends only the parts of functions in "Steuern"."""
+
+    # Point 2: the flow after the valves.
+    FLOW = "flow"
+    # Point 4: cold, sun or warmth ahead, by the zone's lag.
+    AHEAD = "ahead"
+    # Point 4: a warm day is not heated.
+    WARM = "warm"
+    # Point 5: less load in defrost risk hours, store heat before them (1.6.0).
+    DEFROST = "defrost"
+    STORE = "store"
+    # Point 7: the night setback (F3, after 1.4.2).
+    NIGHT = "night"
+
+
 @dataclass(frozen=True, slots=True)
 class ZoneHour:
     zone_id: str
@@ -79,6 +97,8 @@ class ZoneHour:
     flow_c: float | None
     block: bool
     night: bool
+    # The shift's parts before the band and step, K.
+    parts: dict[Part, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,25 +169,27 @@ def make_plan(inputs: PlanInputs) -> Plan:
         zone_hours = []
         for item in inputs.zones:
             config = item.config
-            shift = 0.0
+            parts: dict[Part, float] = {}
             if warm:
-                shift = -config.down_k
+                parts[Part.WARM] = -config.down_k
             else:
-                shift += _ahead(hour, item, weather, settings, zone, reasons)
+                ahead = _ahead(hour, item, weather, settings, zone, reasons)
+                if ahead:
+                    parts[Part.AHEAD] = ahead
                 if hour.start in reduced and settings.defrost_loss_k >= settings.step_k:
-                    shift -= settings.step_k
+                    parts[Part.DEFROST] = -settings.step_k
                     _add(reasons, f"Abtaurisiko {LEVEL_NAMES[risk.level] if risk else ''}: weniger Last")
                 elif _stores(hour.start, reduced) and config.kind is not ZoneKind.RADIATOR:
-                    shift += settings.step_k
+                    parts[Part.STORE] = settings.step_k
                     _add(reasons, "Vorher Wärme speichern (Abtaurisiko danach)")
                 active_night = night.zones.get(item.zone_id, 0.0)
                 if active_night:
-                    shift -= active_night
+                    parts[Part.NIGHT] = -active_night
                 if item.flow_offset_k:
-                    shift += item.flow_offset_k
+                    parts[Part.FLOW] = item.flow_offset_k
                     if item.flow_reason:
                         _add(reasons, item.flow_reason)
-            shift = _clamp(shift, -config.down_k, config.up_k, settings.step_k)
+            shift = shift_of(parts, config, settings.step_k)
             target = round(item.base_c + shift, 1) if item.base_c is not None else None
             flow = None
             if item.flow_line is not None and hour.temperature_c is not None:
@@ -181,6 +203,7 @@ def make_plan(inputs: PlanInputs) -> Plan:
                     flow_c=flow,
                     block=block,
                     night=bool(night.zones.get(item.zone_id)),
+                    parts=parts,
                 )
             )
         rooms = [
@@ -361,6 +384,14 @@ def _warm_days(weather: Sequence[WeatherHour], limit_c: float, zone: tzinfo) -> 
         for day, values in by_day.items()
         if len(values) >= WARM_DAY_MIN_HOURS and statistics.fmean(values) >= limit_c
     }
+
+
+def shift_of(
+    parts: Mapping[Part, float], config: ZoneConfig, step: float, only: frozenset[Part] | None = None
+) -> float:
+    """The zone's shift from its parts (all, or only some): summed, within the band, on the step."""
+    total = sum(value for part, value in parts.items() if only is None or part in only)
+    return _clamp(total, -config.down_k, config.up_k, step)
 
 
 def _clamp(value: float, lowest: float, highest: float, step: float) -> float:
