@@ -124,8 +124,9 @@
   {:else}
     <section class="card">
       <p class="secondary">
-        Was das Energiemanagement in den nächsten 48 Stunden je Stunde vorhat, mit Grund. Nur zum Ansehen: In dieser
-        Version sendet es nichts (Stand „Vorschau“).
+        Was das Energiemanagement in den nächsten 48 Stunden je Stunde vorhat, mit Grund. Gesendet wird nur, was eine
+        Funktion auf „Steuern“ plant (Einstellungen → Energiemanagement → Zonensteuerung); alles andere ist Vorschau.
+        Abtaurisiko und Blockbetrieb zeigt der Plan nur (kommen mit 1.6.0).
         {#if plan.created_at}Geplant {moment(plan.created_at)} Uhr.{/if}
       </p>
       {#if status.problems.length > 0}

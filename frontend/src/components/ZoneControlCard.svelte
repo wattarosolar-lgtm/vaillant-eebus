@@ -136,7 +136,7 @@
               class:active={item.mode === mode}
               aria-pressed={item.mode === mode}
               disabled={switching !== null || !available}
-              title={available ? undefined : 'Kommt nach Version 1.4.2'}
+              title={available ? undefined : 'In dieser Version nicht verfügbar'}
               onclick={() => void switchFunction(item, mode)}>{PLANNER_MODE_LABELS[mode]}</button
             >
           {/each}
@@ -175,7 +175,7 @@
           ? '; Tagesgrenze erreicht: der Planer gibt die Zonen nur noch zurück'
           : ''}).
         {#if budget.would > 0}
-          Vorschau: {budget.would} Befehle wären es heute gewesen.
+          Vorschau: {budget.would === 1 ? '1 Befehl wäre' : `${budget.would} Befehle wären`} es heute gewesen.
         {/if}
       </p>
     {/if}
