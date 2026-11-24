@@ -155,6 +155,30 @@ def test_in_the_window_the_live_state_counts() -> None:
     assert night_part(result.hours[5], live) == 0.0
 
 
+def test_in_the_window_the_night_alone_shifts_the_zone() -> None:
+    # Seen in the preview: F2's -0.5 K and the night's -1 K added up to -1.5 K.
+    now = datetime(2026, 11, 21, 6, 10, tzinfo=LOCAL).astimezone(UTC)
+    live = replace(RADIATORS, night_active=True, night_shift_k=-1.0, flow_offset_k=-0.5, flow_reason="Vorlauf tiefer")
+    result = make_plan(
+        PlanInputs(
+            now=now,
+            zone=LOCAL,
+            settings=HemsSettings(),
+            weather=[replace(hour, start=hour.start + _hours_from(NOW, now)) for hour in weather(-2.0)],
+            risks={},
+            frost=frozenset(),
+            demand={},
+            zones=(FLOOR, live),
+            rooms=(ROOM_A,),
+        )
+    )
+
+    assert shift(result.hours[0], live) == -1.0
+    assert result.hours[0].zones[1].parts == {Part.NIGHT: -1.0}
+    # After the window F2's shift is back.
+    assert shift(result.hours[4], live) == -0.5
+
+
 def test_the_hour_before_the_window_starts_has_nothing_yet() -> None:
     # 5:10 local, the window opens at 5:30: the executor must not send from the hour's plan.
     now = datetime(2026, 11, 21, 5, 10, tzinfo=LOCAL).astimezone(UTC)

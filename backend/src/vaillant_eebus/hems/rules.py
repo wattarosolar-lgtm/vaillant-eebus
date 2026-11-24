@@ -190,9 +190,10 @@ def make_plan(inputs: PlanInputs) -> Plan:
                     parts[Part.STORE] = settings.step_k
                     _add(reasons, "Vorher Wärme speichern (Abtaurisiko danach)")
                 active_night = night.zones.get(item.zone_id, 0.0)
-                if active_night:
-                    parts[Part.NIGHT] = active_night
-                if item.flow_offset_k:
+                if active_night or item.zone_id in night.off:
+                    # In the night window F3 alone decides the zone's shift (F2 holds, the rest waits).
+                    parts = {Part.NIGHT: active_night} if active_night else {}
+                elif item.flow_offset_k:
                     parts[Part.FLOW] = item.flow_offset_k
                     if item.flow_reason:
                         _add(reasons, item.flow_reason)

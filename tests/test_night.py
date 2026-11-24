@@ -154,6 +154,14 @@ def test_the_buffer_above_a_steady_setpoint_is_the_minimum() -> None:
     assert {phase.power_w for phase in phases} == {540.0}
 
 
+def test_a_buffer_that_only_stays_above_the_setpoint_is_no_minimum() -> None:
+    # Seen in the preview: a steady buffer 1 K above the setpoint (a sensor offset) counted as minimum.
+    power, _buffer, target, outdoor = warm_day_run(local(12))
+    steady = [(moment, 32.0) for moment, _ in target]
+
+    assert minimum_phases(power=power, buffer=steady, target=target, outdoor=outdoor, dhw=[], defrosts=[]) == []
+
+
 def test_rising_below_the_setpoint_is_no_minimum() -> None:
     # After a start, a defrost or a hot water charge the buffer rises too - with high power and below the setpoint.
     power, buffer, target, outdoor = warm_day_run(local(12))

@@ -38,8 +38,9 @@ START_K = 1.0
 STEP_K = 0.5
 STEP_EVERY = timedelta(minutes=20)
 STOP_RAISE_K = 1.0
-# The heat pump at its minimum: buffer this far above the flow setpoint and not falling.
+# The heat pump at its minimum: the buffer rises (by RISING_K in 10 min) and is this far above the flow setpoint.
 OVERSHOOT_K = 0.5
+RISING_K = 0.2
 TARGET_STEADY_K = 0.3
 TARGET_STEADY_FOR = timedelta(minutes=20)
 RUNNING_FOR = timedelta(minutes=10)
@@ -230,8 +231,9 @@ def at_minimum(
     defrosts: Sequence[datetime],
     moment: datetime,
 ) -> bool:
-    """At this sample: running for 10 min, flow setpoint steady 20 min, buffer 0.5 K above it and not falling,
-    no defrost within 15 min and no hot water within 20 min."""
+    """At this sample: running for 10 min, flow setpoint steady 20 min, the buffer rising (0.2 K in 10 min) and
+    0.5 K above it, no defrost within 15 min and no hot water within 20 min. A buffer that only stays above the
+    setpoint (sensor offset, slow mixing) is no minimum: the user's sign is the rise (24.11.2026)."""
     running = [value for at, value in power.items() if timedelta(0) <= moment - at <= RUNNING_FOR]
     if len(running) < 2 or min(running) < RUNNING_W:
         return False
@@ -240,7 +242,7 @@ def at_minimum(
         return False
     now_top = buffer.get(moment)
     before = [value for at, value in buffer.items() if timedelta(minutes=9) <= moment - at <= timedelta(minutes=11)]
-    if now_top is None or now_top < aims[-1] + OVERSHOOT_K or (before and now_top < before[0] - 0.05):
+    if now_top is None or not before or now_top < aims[-1] + OVERSHOOT_K or now_top < before[0] + RISING_K:
         return False
     if any(abs(moment - at) <= DEFROST_AROUND for at in defrosts):
         return False
