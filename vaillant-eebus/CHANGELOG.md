@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.4
+
+**Rückfragen kommen wieder an.** Vor „Steuern“, dem schnellen Durchlauf, dem Testlauf und dem Zurücksetzen der
+Regelung fragte die App über das Bestätigungsfenster des Browsers. Hat man dort einmal „keine weiteren Dialoge
+zulassen“ angehakt, oder in der Home-Assistant-App, zeigte der Browser nichts mehr und antwortete sofort mit „nein“:
+Die Knöpfe schienen tot.
+
+- **Eigener Dialog:** Alle Rückfragen erscheinen jetzt in der App selbst, mit „Abbrechen“ (vorgewählt, auch mit
+  Escape) und einem Knopf, der sagt, was passiert („Starten“, „Auf Steuern“, „Vormerken“, „Zurücksetzen“,
+  „Verlassen“, „Verwerfen“).
+- **Schneller Durchlauf:** Geht schon der erste Befehl nicht hinaus (etwa weil das Thermostat pausiert ist), steht
+  der Grund jetzt unter dem Knopf. Bisher endete der Durchlauf sofort und ohne Spur auf der Seite; nur das Protokoll
+  nannte ihn.
+
 ## 1.4.3
 
 **Schneller lernen, Fenster sicher erkennen, Regelung lernt mit.** Mit 1.4.2 lernte das Thermostat sein

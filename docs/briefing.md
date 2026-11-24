@@ -1,4 +1,4 @@
-# Briefing: Vaillant EEBUS (Stand v1.4.3)
+# Briefing: Vaillant EEBUS (Stand v1.4.4)
 
 Dieses Dokument fasst alles Wichtige über den Code zusammen – für eine KI, die den Code prüft, und als Übergabe
 an eine neue Arbeitssitzung. Bitte den Prüfbericht **auf Deutsch** verfassen (Code-Begriffe dürfen englisch bleiben).
@@ -39,6 +39,9 @@ ohne eBUS-Adapter, ohne MQTT; Abschnitt 5e). Die App bringt eine eigene Oberflä
   Außentemperatur-Stufe, Verstärkung je Raum (Teil C, R1–R4); dazu Befund 4 der Abnahme 1.4.0 (sauberer Rückweg nach
   Testlauf/Durchlauf, Übernahme durch die Regelung in „Steuern“, Rückfall aufs Raum-Soll, Alter der Comet-Stellung
   und Spreizung als Plausibilität).
+  **1.4.4:** Rückfragen im eigenen Dialog statt `window.confirm` (unterdrückte Browser-Dialoge ließen „Steuern“ und
+  den Durchlauf-Knopf wortlos ins Leere laufen); ein Durchlauf, dessen erster Befehl nicht hinausgeht, meldet den
+  Grund am Knopf (409).
 - **Die App schreibt jetzt** – ausschließlich über `write_gate.py` (Abschnitt 5a; Thermostate Abschnitt 5f). Nach der
   Installation läuft sie im Demo-Betrieb und sendet nichts; erst nach ausdrücklicher Bestätigung im Live-Betrieb.
 - Konvention: Code und Kommentare englisch, Oberfläche und Nutzer-Doku deutsch.
@@ -166,7 +169,9 @@ Pfeiltasten als `role="slider"`, −/+; gesendet 1,2 s nach dem Loslassen bzw. l
 vor Ablauf der 5 s seit dem letzten Senden; Zone im Auto-Betrieb zeigt den gemeldeten Sollwert, gesperrt),
 `SetpointControl.svelte` (Anzeige und −/+), `ModeSegments.svelte`, `BoostSwitch.svelte`, `ModeSwitch.svelte`
 (Demo | Live), `ModeBanner.svelte` (Band nur im Demo-Betrieb, Bestätigung für Live), `HeaderStatus.svelte`,
-`StatusPill.svelte`, `DumpButton.svelte`. `lib/feedback.svelte.ts` hält Vorschau (nur Demo, 5 s, blau), den gerade
+`StatusPill.svelte`, `DumpButton.svelte`, `ConfirmDialog.svelte` (1.4.4: jede Rückfrage über `ask(text, ja)` aus
+`lib/confirm.svelte.ts`, modaler `<dialog>`, Fokus auf „Abbrechen“, Escape = nein; nie `window.confirm`, das
+unterdrückt sofort „nein“ liefert). `lib/feedback.svelte.ts` hält Vorschau (nur Demo, 5 s, blau), den gerade
 gesendeten Wert (bis das Gerät oder `pending` ihn zeigt, höchstens 5 s) und Fehler eines Bedienelements. Keine
 Statuszeilen mehr („Wird gesendet …“ usw.), nur für Screenreader (`.sr-only`); Fehler, „Ergebnis unbekannt“ und
 „Am Gerät nicht änderbar“ bleiben sichtbar. Bedienelemente sind nach der Quittung des Geräts wieder frei; der
@@ -481,7 +486,8 @@ Hinweis „vermutlich alt“); in `rooms.json` zusätzlich `quality`, `demand`, 
 
 ## 7. Tests
 
-- Python: 544 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.3
+- Python: 545 Tests (`pytest`, 1 übersprungen ohne Zeitzonen-Datenbank unter Windows; neu in 1.4.4 der Durchlauf,
+  dessen erster Befehl gehalten wird; neu in 1.4.3
   `test_regulation.py` (Regelgüte, Bedarf, Verstärkung, Kaskade, Durchlauf, Stellungen des Testlaufs) und in
   `test_rooms.py` Durchlauf per Knopf/für alle Räume/mit Fenster, Nacht-Testlauf mit Durchlauf, Regelgüte nach
   Mitternacht, Zurücksetzen, Neustart; Fenstertests mit den Lüftungsdaten vom 23.11. in `test_hems_models.py`; neu in 1.4.2
