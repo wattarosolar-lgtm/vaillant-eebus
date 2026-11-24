@@ -529,6 +529,12 @@ async def test_a_cold_morning_goes_down_to_the_minimum_power_step_by_step(app: A
     app.hems.cycles.feed_power(app.clock.now - timedelta(minutes=1), 0.0)
     await app.hems.sample()
     assert night_of(app, MV_ZONE_2).shift_k == -1.5
+
+    # Without a power for more than 10 min a stop would go unseen: no further step.
+    app.clock.now += timedelta(minutes=25)
+    await app.hems.sample()
+    zone2 = night_of(app, MV_ZONE_2)
+    assert zone2.shift_k == -1.5 and "meldet sich nicht" in zone2.text
     log = await messages(app.log, LogCategory.HEMS)
     assert any(message.startswith("Nachtabsenkung (würde): Zone 2 Nacht: \u22121,5 K") for message in log)
 

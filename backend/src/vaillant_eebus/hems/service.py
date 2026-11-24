@@ -141,6 +141,8 @@ ZONE1_OFF_AFTER = timedelta(seconds=60)
 BOTTLENECK_EVERY = timedelta(hours=1)
 # F3: after the night window F2 holds while the rooms heat up again, at most this long.
 REHEAT_HOLD = timedelta(hours=3)
+# F3: the minimum power steps down only with a power reported within this.
+POWER_STALE = timedelta(minutes=10)
 FLOW_RECENT = timedelta(hours=4)
 FLOW_ROOM_VALUES = ("temperature", "valve", "setpoint", "window", "testing")
 ZONE1_CHECK_AFTER = timedelta(minutes=2)
@@ -1432,7 +1434,11 @@ class HemsService:
             and (state.stepped_at is None or stats.since >= state.stepped_at)
         )
         busy = None
-        if any(abs(now - at) <= timedelta(minutes=15) for at in defrosts):
+        seen = self.cycles.last_seen
+        if seen is None or now - seen > POWER_STALE:
+            # Without a fresh power a stop would go unseen: no further step down.
+            busy = "Leistung der Wärmepumpe meldet sich nicht"
+        elif any(abs(now - at) <= timedelta(minutes=15) for at in defrosts):
             busy = "Abtauung"
         elif hot_water(recent["dhw"], now):
             busy = "Warmwasser"
