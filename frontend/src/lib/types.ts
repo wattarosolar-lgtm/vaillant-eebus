@@ -418,6 +418,9 @@ export interface CopModel {
   a: number;
   b: number;
   days: number;
+  /** Outdoor range of the learned days; beyond 2 K outside it the value stays flat (1.5.0, K1). */
+  low_c: number | null;
+  high_c: number | null;
 }
 
 export interface HouseModel {

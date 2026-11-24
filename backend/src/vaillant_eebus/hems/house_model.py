@@ -26,6 +26,8 @@ MIN_HEAT_KWH = 1.0
 # The inside temperature used when no room reports one.
 DEFAULT_INSIDE_C = 21.0
 COP_LIMITS = (1.5, 7.0)
+# The line holds only this far beyond the outdoor temperatures it was learned from; further out it stays flat (K1).
+COP_EXTEND_K = 2.0
 MAX_LAG_H = 8
 # Hours summed for finding the delay; shorter windows drown in the heat pump's cycling.
 LAG_WINDOW_H = 6
@@ -33,13 +35,23 @@ LAG_WINDOW_H = 6
 
 @dataclass(frozen=True, slots=True)
 class CopModel:
-    """Arbeitszahl = a + b * outside temperature, from real heat and electricity per day."""
+    """Arbeitszahl = a + b * outside temperature, from real heat and electricity per day.
+
+    Learned mostly on mild days, the line is not drawn far into the frost: beyond COP_EXTEND_K outside the learned
+    days' outdoor temperatures (low_c ... high_c) it keeps its value at that edge.
+    """
 
     a: float
     b: float
     days: int
+    low_c: float | None = None
+    high_c: float | None = None
 
     def at(self, outdoor_c: float) -> float:
+        if self.low_c is not None:
+            outdoor_c = max(self.low_c - COP_EXTEND_K, outdoor_c)
+        if self.high_c is not None:
+            outdoor_c = min(self.high_c + COP_EXTEND_K, outdoor_c)
         return max(COP_LIMITS[0], min(COP_LIMITS[1], self.a + self.b * outdoor_c))
 
 
@@ -150,13 +162,13 @@ def fit_house(
 
 
 def fit_cop(days: Sequence[DayValues]) -> CopModel | None:
-    """Arbeitszahl against the outside temperature from days with real heat and electricity."""
+    """Arbeitszahl against the outside temperature from days with real heat and electricity of the same hours."""
     pairs = []
     for day in days:
-        heat = (day.heating_kwh or 0.0) + (day.dhw_kwh or 0.0)
-        if day.electricity_kwh is None or day.electricity_kwh < 2 or day.outdoor_c is None or heat <= 0:
+        heat, electricity = day.cop_heat_kwh, day.cop_electricity_kwh
+        if heat is None or electricity is None or electricity < 2 or day.outdoor_c is None or heat <= 0:
             continue
-        ratio = heat / day.electricity_kwh
+        ratio = heat / electricity
         if COP_LIMITS[0] <= ratio <= COP_LIMITS[1] + 1:
             pairs.append((day.outdoor_c, ratio))
     if len(pairs) < MIN_DAYS:
@@ -164,7 +176,14 @@ def fit_cop(days: Sequence[DayValues]) -> CopModel | None:
     line = _line([p[0] for p in pairs], [p[1] for p in pairs])
     if line is None:
         return None
-    return CopModel(a=round(line[1], 3), b=round(line[0], 4), days=len(pairs))
+    outdoor = [p[0] for p in pairs]
+    return CopModel(
+        a=round(line[1], 3),
+        b=round(line[0], 4),
+        days=len(pairs),
+        low_c=round(min(outdoor), 1),
+        high_c=round(max(outdoor), 1),
+    )
 
 
 def find_lag(heat_kwh: Mapping[datetime, float], difference_k: Mapping[datetime, float]) -> float | None:

@@ -23,7 +23,15 @@ from vaillant_eebus.hems.cycles import CycleTracker, Run, detect_defrosts, detec
 from vaillant_eebus.hems.defrost import RiskLevel, learn_rates, risk
 from vaillant_eebus.hems.forecast import WeatherHour, calibrated, calibration, parse_open_meteo, parse_weather_entity
 from vaillant_eebus.hems.frost import frost_hours, frost_state
-from vaillant_eebus.hems.house_model import demand, find_lag, fit_cop, fit_house, start_model, zone_shares
+from vaillant_eebus.hems.house_model import (
+    CopModel,
+    demand,
+    find_lag,
+    fit_cop,
+    fit_house,
+    start_model,
+    zone_shares,
+)
 from vaillant_eebus.hems.room_model import FlowHint, Supply, flow_hint, learn, minutes_until, supply
 from vaillant_eebus.hems.statistics import DayValues, daily_values, hourly_changes
 from vaillant_eebus.hems.windows import Outside, Signal, WindowDetector, absolute_humidity, humidity_threshold
@@ -226,6 +234,9 @@ def invented_days(count: int, *, loss_w_per_k: float = 150.0, gains_w: float = 3
                 outdoor_c=outdoor,
                 indoor_c=21.0,
                 hours=24,
+                cop_heat_kwh=round(heating + 2.0, 3),
+                cop_electricity_kwh=round((heating + 2.0) / (3.0 + 0.1 * outdoor), 3),
+                cop_hours=24,
             )
         )
     return days
@@ -276,7 +287,62 @@ def test_the_performance_factor_comes_from_real_heat_and_electricity() -> None:
     assert cop is not None
     assert cop.at(0.0) == pytest.approx(3.0, abs=0.05)
     assert cop.at(10.0) == pytest.approx(4.0, abs=0.1)
-    assert cop.at(-100.0) == 1.5
+    # Far beyond the learned days the line stays flat; the lower limit still holds for steep lines.
+    assert cop.at(-100.0) == pytest.approx(cop.at(-4.0))
+    assert CopModel(a=1.0, b=0.2, days=10).at(-10.0) == 1.5
+
+
+def test_the_performance_factor_is_not_drawn_far_into_the_frost() -> None:
+    # K1 (24.11.2026): learned on mild days (8 to 12 °C), the line keeps its value 2 K below the coldest of them.
+    days = [day for day in invented_days(70) if day.outdoor_c is not None and day.outdoor_c >= 8.0]
+    cop = fit_cop(days)
+
+    assert cop is not None
+    assert (cop.low_c, cop.high_c) == (8.0, 9.0)
+    assert cop.at(-4.5) == pytest.approx(cop.at(6.0)) == pytest.approx(3.6, abs=0.05)
+    assert cop.at(25.0) == pytest.approx(cop.at(11.0))
+    assert CopModel(a=2.0, b=0.1, days=10).at(-4.0) == pytest.approx(1.6)
+
+
+def test_heat_and_electricity_count_over_the_same_hours() -> None:
+    # K1: the cloud's heat values miss half the day; electricity of those hours must not count against them.
+    hours = [T0 + timedelta(hours=hour) for hour in range(24)]
+    days = daily_values(
+        heating_kwh={hour: 1.5 for hour in hours[:21]},
+        dhw_kwh={},
+        power_w={hour: 500.0 for hour in hours},
+        outdoor_c={hour: 1.0 for hour in hours},
+        indoor_c=[],
+        zone=UTC,
+    )
+    gappy = daily_values(
+        heating_kwh={hour: 1.5 for hour in hours[:12]},
+        dhw_kwh={},
+        power_w={hour: 500.0 for hour in hours},
+        outdoor_c={hour: 1.0 for hour in hours},
+        indoor_c=[],
+        zone=UTC,
+    )
+
+    day = days[0]
+    assert (day.cop_heat_kwh, day.cop_electricity_kwh, day.cop_hours) == (31.5, 10.5, 21)
+    assert day.electricity_kwh == 12.0
+    # Only 12 hours with both values: the day says nothing about the Arbeitszahl.
+    assert gappy[0].cop_hours == 12 and gappy[0].cop_heat_kwh is None and gappy[0].cop_electricity_kwh is None
+
+
+def test_an_hour_without_its_hot_water_value_does_not_count() -> None:
+    hours = [T0 + timedelta(hours=hour) for hour in range(24)]
+    days = daily_values(
+        heating_kwh={hour: 1.0 for hour in hours},
+        dhw_kwh={hour: 0.5 for hour in hours[:22]},
+        power_w={hour: 600.0 for hour in hours},
+        outdoor_c={hour: 1.0 for hour in hours},
+        indoor_c=[],
+        zone=UTC,
+    )
+
+    assert (days[0].cop_heat_kwh, days[0].cop_electricity_kwh, days[0].cop_hours) == (33.0, 13.2, 22)
 
 
 def test_the_start_model_comes_from_the_heat_load() -> None:

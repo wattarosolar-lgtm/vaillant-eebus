@@ -40,6 +40,11 @@ class DayValues:
     indoor_c: float | None
     # Hours with an outdoor and a heat value.
     hours: int
+    # Heat (heating + hot water) and electricity over the same hours, for the Arbeitszahl (K1, 1.5.0): an hour
+    # counts only with a heat value and a power value; None below MIN_HOURS such hours.
+    cop_heat_kwh: float | None = None
+    cop_electricity_kwh: float | None = None
+    cop_hours: int = 0
 
 
 class StatisticsHistory:
@@ -133,6 +138,12 @@ def daily_values(
         inside = [
             statistics.fmean(values) for hour in hours if (values := [room[hour] for room in indoor_c if hour in room])
         ]
+        # The Arbeitszahl needs heat and electricity of the same hours: a gap in the cloud's heat values must not
+        # be set against a full day of electricity (K1). Hot water counts where its counter is known at all.
+        common = [
+            hour for hour in hours if hour in heating_kwh and hour in power_w and (not dhw_kwh or hour in dhw_kwh)
+        ]
+        enough = len(common) >= MIN_HOURS
         result.append(
             DayValues(
                 day=day,
@@ -145,6 +156,11 @@ def daily_values(
                 outdoor_c=round(statistics.fmean(outdoor_c[hour] for hour in hours), 2),
                 indoor_c=round(statistics.fmean(inside), 2) if inside else None,
                 hours=len(heated),
+                cop_heat_kwh=(
+                    round(sum(heating_kwh[hour] + dhw_kwh.get(hour, 0.0) for hour in common), 3) if enough else None
+                ),
+                cop_electricity_kwh=round(sum(power_w[hour] for hour in common) / 1000, 3) if enough else None,
+                cop_hours=len(common),
             )
         )
     return result
