@@ -447,9 +447,13 @@ class RoomControl:
         self._waits: tuple[date, set[str]] | None = None
         self._problems: list[str] = []
         self._lock = asyncio.Lock()
+        # Rooms whose window just opened or closed, decided at once (1.4.3) instead of at the next beat.
+        self._window_tasks: set[asyncio.Task[None]] = set()
         self._load()
         hems.on_sampled(self.tick)
         hems.set_flow_advisor(self.flow_advice)
+        hems.on_window(self._window_changed)
+        hems.set_window_guard(self._window_guard)
         hems.sources.on_change(self._source_changed)
         hems.sources.follow(self._followed)
         if home_assistant.exporter is not None:
@@ -951,16 +955,18 @@ class RoomControl:
             window = False
         elif not window:
             state.window_ignored = False
+        signal = self._hems.window_reason(room.entity_id)
+        why = f" ({signal})" if signal else ""
         if state.window_open and not window:
             state.window_closed_at = now
-            self._log.add(LogCategory.ROOMS, f"Fenster wieder zu: {room.name}.")
+            self._log.add(LogCategory.ROOMS, f"Fenster wieder zu: {room.name}{why}.")
         if window and not state.window_open:
             verb = (
                 "Thermostat auf den kleinsten Wert"
                 if stage is RoomControlMode.CONTROL
                 else "würde das Thermostat schließen"
             )
-            self._log.add(LogCategory.ROOMS, f"Fenster offen erkannt: {room.name}, {verb}.")
+            self._log.add(LogCategory.ROOMS, f"Fenster offen erkannt: {room.name}{why}, {verb}.")
         state.window_open = window
         plain = details.setpoint_at(local.time())
         if state.setpoint_c is not None and abs(state.setpoint_c - plain) >= 0.01:
@@ -1877,6 +1883,45 @@ class RoomControl:
         sent = self._gate.commands(trv, preview=preview).last_sent
         closed = self._movements.get(trv, _Movements()).closed_at
         return any(moment is not None and now - moment < WINDOW_QUIET for moment in (sent, closed))
+
+    def _window_guard(self, room_id: str) -> bool:
+        """The thermostat's own sensor says nothing about a window now: the app set the thermostat or its valve
+        closed within the last half hour (the sensor at the radiator falls by itself)."""
+        settings = self._settings.current
+        room = next((item for item in settings.rooms if item.entity_id == room_id), None)
+        if room is None or room.details.trv_entity is None:
+            return False
+        stage = effective_stage(settings.room_control.mode, room.details.stage)
+        return self._just_changed(room.details.trv_entity, stage, self._clock(), settings)
+
+    def _window_changed(self, room_id: str) -> None:
+        """A window opened or closed: decide about the room at once (1.4.3)."""
+        try:
+            task = asyncio.get_running_loop().create_task(self._window_now(room_id))
+        except RuntimeError:
+            return
+        self._window_tasks.add(task)
+        task.add_done_callback(self._window_tasks.discard)
+
+    async def _window_now(self, room_id: str) -> None:
+        try:
+            async with self._lock:
+                settings = self._settings.current
+                mode = settings.room_control.mode
+                room = next((item for item in settings.rooms if item.entity_id == room_id), None)
+                if mode is RoomControlMode.OFF or room is None or room.details.trv_entity is None:
+                    return
+                stage = effective_stage(mode, room.details.stage)
+                if not at_least(stage, RoomControlMode.PREVIEW) or self._testing(room):
+                    return
+                now = self._clock()
+                self._refresh_thermostats(now)
+                await self._control(room, stage, now, settings)
+                self._save()
+        except Exception:
+            _LOGGER.exception("Room control failed after a window change")
+            return
+        self._notify()
 
     def _testing(self, room: Room) -> bool:
         run = self._test

@@ -12,6 +12,7 @@ pair of flow and return sensors for the test runs, and each room's stage.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, time
 from enum import StrEnum
@@ -19,6 +20,7 @@ from typing import Any
 
 from vaillant_eebus.hems.config import in_window, is_number, on_step, parse_time
 from vaillant_eebus.ids import (
+    BINARY_SENSOR_ENTITY,
     CLIMATE_ENTITY,
     DEFAULT_MQTT_BASE_TOPIC,
     ENTITY_ID,
@@ -150,6 +152,8 @@ class RoomDetails:
     trv_entity: str | None = None
     valve_entity: str | None = None
     humidity_entity: str | None = None
+    # Optional window contact (binary_sensor, on = open); with it the contact decides about the window (1.4.3).
+    window_entity: str | None = None
     # The room's setpoint outside the schedule's windows.
     setpoint_c: float = DEFAULT_SETPOINT_C
     schedule: tuple[ScheduleWindow, ...] = ()
@@ -214,6 +218,7 @@ def details_from_json(raw: Any) -> RoomDetails:
         trv_entity=_entity(raw, "trv_entity", climate=True),
         valve_entity=_entity(raw, "valve_entity"),
         humidity_entity=_entity(raw, "humidity_entity"),
+        window_entity=_entity(raw, "window_entity", pattern=BINARY_SENSOR_ENTITY),
         setpoint_c=_value(raw, "setpoint_c", ROOM_SETPOINT_C, defaults.setpoint_c, step=0.5),
         schedule=_schedule(raw.get("schedule")),
         comfort_down_k=_value(raw, "comfort_down_k", COMFORT_K, defaults.comfort_down_k, step=0.1),
@@ -249,6 +254,7 @@ def details_to_json(details: RoomDetails) -> dict[str, Any]:
         "trv_entity": details.trv_entity,
         "valve_entity": details.valve_entity,
         "humidity_entity": details.humidity_entity,
+        "window_entity": details.window_entity,
         "setpoint_c": details.setpoint_c,
         "schedule": [
             {
@@ -409,11 +415,14 @@ def _schedule(raw: Any) -> tuple[ScheduleWindow, ...]:
     return tuple(windows)
 
 
-def _entity(raw: dict[str, Any], key: str, *, climate: bool = False) -> str | None:
+def _entity(
+    raw: dict[str, Any], key: str, *, climate: bool = False, pattern: re.Pattern[str] | None = None
+) -> str | None:
     value = raw.get(key)
     if value is None or value == "":
         return None
-    pattern = CLIMATE_ENTITY if climate else SENSOR_ENTITY
+    if pattern is None:
+        pattern = CLIMATE_ENTITY if climate else SENSOR_ENTITY
     if isinstance(value, str) and pattern.match(value):
         return value
     _LOGGER.warning("Settings: invalid entity %r for room %s ignored", value, key)

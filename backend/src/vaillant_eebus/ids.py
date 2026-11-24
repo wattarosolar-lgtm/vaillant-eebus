@@ -13,6 +13,8 @@ ZONE_ID = re.compile(r"^([0-9]{1,5}(\.[0-9]{1,5}){0,7}|climate\.[a-z0-9_]+)$")
 CLIMATE_ENTITY = re.compile(r"^climate\.[a-z0-9_]+$")
 WATER_HEATER_ENTITY = re.compile(r"^water_heater\.[a-z0-9_]+$")
 SENSOR_ENTITY = re.compile(r"^sensor\.[a-z0-9_]+$")
+# A window contact (1.4.3).
+BINARY_SENSOR_ENTITY = re.compile(r"^binary_sensor\.[a-z0-9_]+$")
 # The sensors this app reports to Home Assistant itself; never a source of its own values.
 OWN_ENTITY = re.compile(r"^(sensor|binary_sensor)\.vaillant_eebus_[a-z0-9_]+$")
 

@@ -44,8 +44,11 @@ _KIND_UNITS = {
 # Entity domains offered as they are: the weather forecast and the myVAILLANT zones and hot water.
 _KIND_DOMAINS = {"weather": "weather.", "climate": "climate.", "water_heater": "water_heater."}
 # A room's temperature: a temperature sensor or a radiator thermostat; a thermostat; the humidity.
-_KIND_SPECIAL = ("room", "thermostat", "humidity")
+_KIND_SPECIAL = ("room", "thermostat", "humidity", "window")
 ENTITY_KINDS = (*_KIND_UNITS, *_KIND_DOMAINS, *_KIND_SPECIAL)
+# Window contacts (1.4.3): device classes, and names for contacts without one.
+_WINDOW_CLASSES = frozenset({"window", "door", "opening", "garage_door"})
+_WINDOW_NAMES = ("window", "fenster", "contact", "kontakt")
 MAX_CHOICES = 200
 
 _EXPORT_NAMES = {
@@ -80,7 +83,18 @@ def _is_humidity(entity: EntityState) -> bool:
     )
 
 
+def _is_window(entity: EntityState) -> bool:
+    """A window or door contact: a binary_sensor of such a device class, or named so."""
+    if not entity.entity_id.startswith("binary_sensor.") or is_own_entity(entity.entity_id):
+        return False
+    if entity.attributes.get("device_class") in _WINDOW_CLASSES:
+        return True
+    return entity.attributes.get("device_class") is None and any(name in entity.entity_id for name in _WINDOW_NAMES)
+
+
 def _is_kind(entity: EntityState, kind: str) -> bool:
+    if kind == "window":
+        return _is_window(entity)
     if kind in _KIND_DOMAINS:
         return entity.entity_id.startswith(_KIND_DOMAINS[kind])
     if kind in ("room", "thermostat") and _is_thermostat(entity):

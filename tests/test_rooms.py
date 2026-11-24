@@ -603,6 +603,9 @@ def learned(world: World, trv: str) -> None:
     world.control._maps[trv] = known_map()
 
 
+CONTACT_OFFICE = "binary_sensor.buero_fenster"
+
+
 async def test_the_bathroom_in_control_gets_its_setpoint_plus_offset(world: World) -> None:
     learned(world, TRV_BATH)
     world.stage(TRV_BATH_TEMPERATURE, RoomStage.CONTROL, offset_k=1.0)
@@ -1031,14 +1034,89 @@ async def test_a_window_in_the_bathroom_right_after_a_command_is_not_believed(wo
     await eventually(lambda: world.home.hems_sources.number(TRV_BATH_TEMPERATURE) == 22.6)
     await beat(world)
     world.clock.now += timedelta(minutes=3)
-    world.fake.set(TRV_BATH_TEMPERATURE, "21.8", unit="°C")
-    await eventually(lambda: world.hems.window_open(TRV_BATH_TEMPERATURE))
+    # Finding 6: the sensor at the radiator falls after the app's own command (1.4.3: not even seen as a window).
+    world.fake.set(TRV_BATH_TEMPERATURE, "20.6", unit="°C")
+    await eventually(lambda: world.home.hems_sources.number(TRV_BATH_TEMPERATURE) == 20.6)
 
     await beat(world, 1)
 
-    # Finding 6: the sensor at the radiator falls after the app's own command; no 8 °C for the bathroom.
+    assert not world.hems.window_open(TRV_BATH_TEMPERATURE)
     assert world.calls(TRV_BATH) == [23.0]
-    assert any("Fenster im Raum Bad nicht beachtet" in text for text in await messages(world.log))
+
+
+async def test_the_bathroom_sees_a_window_by_a_fast_fall_at_its_thermostat(world: World) -> None:
+    world.fake.set(TRV_BATH_TEMPERATURE, "22.6", unit="°C")
+    await eventually(lambda: world.home.hems_sources.number(TRV_BATH_TEMPERATURE) == 22.6)
+    world.clock.now += timedelta(minutes=2)
+    world.fake.set(TRV_BATH_TEMPERATURE, "21.6", unit="°C")
+    await eventually(lambda: world.home.hems_sources.number(TRV_BATH_TEMPERATURE) == 21.6)
+    assert not world.hems.window_open(TRV_BATH_TEMPERATURE)
+    world.clock.now += timedelta(minutes=2)
+
+    world.fake.set(TRV_BATH_TEMPERATURE, "21.1", unit="°C")
+
+    await eventually(lambda: world.hems.window_open(TRV_BATH_TEMPERATURE))
+
+
+async def test_the_room_control_closes_the_thermostat_as_soon_as_the_window_is_seen(world: World) -> None:
+    learned(world, TRV_OFFICE)
+    world.stage(OFFICE, RoomStage.CONTROL)
+    world.fake.set(OFFICE, "21.1", unit="°C")
+    await eventually(lambda: world.home.hems_sources.number(OFFICE) == 21.1)
+    await beat(world)
+    world.clock.now += timedelta(minutes=4)
+
+    world.fake.set(OFFICE, "20.4", unit="°C")
+
+    # No beat: the window decides at once (1.4.3).
+    await eventually(lambda: world.calls(TRV_OFFICE)[-1:] == [5.0])
+    log = await messages(world.log, LogCategory.ROOMS)
+    assert any(text.startswith("Fenster offen erkannt: Büro (Raum \u22120,7 K") for text in log)
+
+
+async def test_a_window_contact_decides_at_once_and_alone(world: World) -> None:
+    learned(world, TRV_OFFICE)
+    world.stage(OFFICE, RoomStage.CONTROL, window_entity=CONTACT_OFFICE)
+    # Saving the room in the app follows the new entity too.
+    world.home.watch()
+    world.fake.set(OFFICE, "21.1", unit="°C")
+    world.fake.set(CONTACT_OFFICE, "off", attributes={"device_class": "window"})
+    await eventually(lambda: world.home.hems_sources.number(OFFICE) == 21.1)
+    await eventually(lambda: world.home.hems_sources.get(CONTACT_OFFICE) is not None)
+    await beat(world)
+    # The rules would see a window; with a contact only the contact counts.
+    world.clock.now += timedelta(minutes=4)
+    world.fake.set(OFFICE, "20.4", unit="°C")
+    await eventually(lambda: world.home.hems_sources.number(OFFICE) == 20.4)
+    assert not world.hems.window_open(OFFICE)
+
+    world.fake.set(CONTACT_OFFICE, "on", attributes={"device_class": "window"})
+
+    await eventually(lambda: world.calls(TRV_OFFICE)[-1:] == [5.0])
+    log = await messages(world.log, LogCategory.ROOMS)
+    assert any(text.startswith("Fenster offen erkannt: Büro (Fensterkontakt)") for text in log)
+    await eventually(lambda: world.home.hems_sources.attribute(TRV_OFFICE, "temperature") == 5.0)
+    world.clock.now += timedelta(minutes=3)
+    world.fake.set(CONTACT_OFFICE, "off", attributes={"device_class": "window"})
+    await eventually(lambda: not world.hems.window_open(OFFICE))
+    await eventually(lambda: world.calls(TRV_OFFICE)[-1] != 5.0)
+
+
+async def test_a_silent_window_contact_gives_way_to_the_rules_after_ten_minutes(world: World) -> None:
+    world.stage(OFFICE, RoomStage.OBSERVE, window_entity=CONTACT_OFFICE)
+    # Saving the room in the app follows the new entity too.
+    world.home.watch()
+    world.fake.set(CONTACT_OFFICE, "on", attributes={"device_class": "window"})
+    await eventually(lambda: world.hems.window_open(OFFICE))
+
+    world.fake.set(CONTACT_OFFICE, "unavailable", attributes={"device_class": "window"})
+    await eventually(lambda: world.home.hems_sources.get(CONTACT_OFFICE).state == "unavailable")  # type: ignore[union-attr]
+    assert world.hems.window_open(OFFICE)
+    world.clock.now += timedelta(minutes=11)
+
+    assert not world.hems.window_open(OFFICE)
+    room = next(item for item in world.hems.rooms_view().rooms if item.entity_id == OFFICE)
+    assert room.window_source == "rules"
 
 
 async def test_a_room_thermostat_cannot_become_a_myvaillant_zone(world: World) -> None:

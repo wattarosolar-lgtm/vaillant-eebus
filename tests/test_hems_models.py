@@ -26,7 +26,7 @@ from vaillant_eebus.hems.frost import frost_hours, frost_state
 from vaillant_eebus.hems.house_model import demand, find_lag, fit_cop, fit_house, start_model, zone_shares
 from vaillant_eebus.hems.room_model import FlowHint, Supply, flow_hint, learn, minutes_until, supply
 from vaillant_eebus.hems.statistics import DayValues, daily_values, hourly_changes
-from vaillant_eebus.hems.windows import WindowDetector, absolute_humidity
+from vaillant_eebus.hems.windows import Outside, Signal, WindowDetector, absolute_humidity, humidity_threshold
 from vaillant_eebus.room_data import RoomDetails, ScheduleWindow, details_from_json, details_to_json
 
 BERLIN = timezone(timedelta(hours=1), "CET")
@@ -487,48 +487,184 @@ def test_frost_hours_follow_the_forecast() -> None:
     assert frost_hours(hours, state) == {T0 + timedelta(hours=4), T0 + timedelta(hours=5)}
 
 
-# --- windows ----------------------------------------------------------------------------------
+# --- windows (1.4.3, plan-1.4.3.md Teil B) ------------------------------------------------------------
+
+# 23.11.2026, 0 °C outside: the live airing runs.
+WINTER = Outside(celsius=0.1, relative=90.0)
 
 
 def test_absolute_humidity() -> None:
     assert absolute_humidity(20.0, 50.0) == pytest.approx(8.6, abs=0.1)
 
 
-def test_a_window_is_seen_by_temperature_and_humidity_and_closes_again() -> None:
+def test_the_humidity_threshold_follows_the_weather() -> None:
+    # Inside 21 °C / 43 % = 8.0 g/m³, outside 0 °C / 90 % = 4.4 g/m³: 0.2 x 3.6.
+    assert humidity_threshold(8.0, WINTER) == pytest.approx(0.72, abs=0.02)
+    # Very dry and cold outside: at most 1 g/m³; mild and damp: the humidity does not count.
+    assert humidity_threshold(10.0, Outside(-10.0, 50.0)) == 1.0
+    assert humidity_threshold(8.0, Outside(10.0, 95.0)) is None
+    # Without an outdoor temperature a middle threshold.
+    assert humidity_threshold(8.0, Outside()) == 0.7
+
+
+def test_franz_is_seen_against_a_report_34_minutes_old() -> None:
     detector = WindowDetector()
-    assert detector.feed(T0, 21.0, 50.0) is None
-    opened = detector.feed(T0 + minutes(5), 20.6, 46.0)
-    assert opened is not None and opened.opened
-    assert opened.drop_k == 0.4
-    assert opened.drop_g is not None and opened.drop_g >= 0.5
-    assert detector.feed(T0 + minutes(8), 20.4, 45.0) is None
-    closed = detector.feed(T0 + minutes(15), 20.7, 46.0)
-    assert closed is not None and not closed.opened
+    detector.feed(T0, 21.41, 43.21, WINTER)
+
+    opened = detector.feed(T0 + minutes(33.8), 21.12, 37.04, WINTER)
+
+    assert opened is not None and opened.opened and opened.signal is Signal.HUMIDITY
+    assert opened.change_g == pytest.approx(1.27, abs=0.02)
+    assert opened.describe() == "Feuchte \u22121,3 g/m³ in 34 min"
+
+
+def test_franz_closes_by_the_humidity_six_minutes_later() -> None:
+    detector = WindowDetector()
+    detector.feed(T0, 21.41, 43.21, WINTER)
+    detector.feed(T0 + minutes(33.8), 21.12, 37.04, WINTER)
+
+    closed = detector.feed(T0 + minutes(41.4), 21.04, 41.84, WINTER)
+
+    assert closed is not None and not closed.opened and closed.signal is Signal.HUMIDITY
     assert not detector.open
 
 
-def test_without_humidity_the_temperature_must_fall_more() -> None:
+def test_the_office_is_seen_at_the_first_report_after_opening() -> None:
     detector = WindowDetector()
-    detector.feed(T0, 21.0, None)
-    assert detector.feed(T0 + minutes(5), 20.6, None) is None
-    assert detector.feed(T0 + minutes(9), 20.4, None) is not None
+    detector.feed(T0, 21.57, 42.61, WINTER)
+
+    opened = detector.feed(T0 + minutes(10.5), 21.07, 36.51, WINTER)
+
+    assert opened is not None and opened.signal is Signal.HUMIDITY
 
 
-def test_humidity_alone_is_no_window() -> None:
+def test_temperature_and_humidity_of_one_report_count_once() -> None:
     detector = WindowDetector()
-    detector.feed(T0, 22.0, 70.0)
+    detector.feed(T0, 21.57, 42.61, WINTER)
+    # The temperature arrives a second before the humidity: the first half alone shows nothing.
+    assert detector.feed(T0 + minutes(10), 21.27, 42.61, WINTER) is None
 
-    assert detector.feed(T0 + minutes(5), 21.9, 50.0) is None
+    opened = detector.feed(T0 + minutes(10) + timedelta(seconds=1), 21.27, 36.51, WINTER)
+
+    assert opened is not None and opened.signal is Signal.HUMIDITY
+
+
+def test_a_humidity_fall_needs_a_recent_reference_and_speed() -> None:
+    old = WindowDetector()
+    old.feed(T0, 21.4, 43.0, WINTER)
+    assert old.feed(T0 + minutes(95), 21.2, 37.0, WINTER) is None
+    # 0.8 g/m³ in an hour: someone left the room, no window.
+    slow = WindowDetector()
+    slow.feed(T0, 21.4, 43.0, WINTER)
+    assert slow.feed(T0 + minutes(80), 21.3, 39.0, WINTER) is None
+
+
+def test_a_humidity_fall_with_a_rising_temperature_is_no_window() -> None:
+    detector = WindowDetector()
+    detector.feed(T0, 21.0, 45.0, WINTER)
+
+    assert detector.feed(T0 + minutes(10), 21.3, 38.0, WINTER) is None
+
+
+def test_mild_damp_weather_leaves_the_humidity_out() -> None:
+    detector = WindowDetector()
+    detector.feed(T0, 21.4, 43.2, Outside(10.0, 95.0))
+
+    assert detector.feed(T0 + minutes(10), 21.2, 37.0, Outside(10.0, 95.0)) is None
+
+
+def test_without_humidity_the_temperature_must_fall_fast() -> None:
+    detector = WindowDetector()
+    detector.feed(T0, 21.0, None, WINTER)
+    assert detector.feed(T0 + minutes(5), 20.6, None, WINTER) is None
+
+    opened = detector.feed(T0 + minutes(9), 20.4, None, WINTER)
+
+    assert opened is not None and opened.signal is Signal.TEMPERATURE
+    # Against a report more than 30 minutes old the temperature says nothing.
+    late = WindowDetector()
+    late.feed(T0, 21.0, None, WINTER)
+    assert late.feed(T0 + minutes(31), 20.0, None, WINTER) is None
+
+
+def test_the_temperature_rule_needs_a_cold_outside() -> None:
+    detector = WindowDetector()
+    detector.feed(T0, 21.0, None, Outside(15.0, 80.0))
+
+    assert detector.feed(T0 + minutes(9), 20.4, None, Outside(15.0, 80.0)) is None
+
+
+def test_the_thermostat_sees_franz_three_minutes_after_the_room_sensor_was_silent() -> None:
+    detector = WindowDetector()
+    detector.feed(T0, 21.41, 43.21, WINTER)
+    detector.feed_trv(T0, 22.0)
+    assert detector.feed_trv(T0 + minutes(11.2), 21.5) is None
+
+    opened = detector.feed_trv(T0 + minutes(13.3), 21.0)
+
+    assert opened is not None and opened.signal is Signal.THERMOSTAT
+    assert opened.describe() == "Thermostat \u22121,0 K"
+
+
+def test_the_thermostat_is_not_believed_right_after_a_command_or_when_the_room_warms() -> None:
+    guarded = WindowDetector()
+    guarded.feed_trv(T0, 22.0)
+    assert guarded.feed_trv(T0 + minutes(2), 21.0, guarded=True) is None
+    warming = WindowDetector()
+    warming.feed(T0, 21.0, 45.0, WINTER)
+    warming.feed_trv(T0, 22.0)
+    warming.feed(T0 + minutes(1), 21.2, 45.0, WINTER)
+    assert warming.feed_trv(T0 + minutes(2), 21.0) is None
+
+
+def test_a_room_measured_at_its_thermostat_needs_one_and_a_half_kelvin() -> None:
+    detector = WindowDetector(alone=True)
+    detector.feed_trv(T0, 22.5)
+    assert detector.feed_trv(T0 + minutes(2), 21.5) is None
+
+    assert detector.feed_trv(T0 + minutes(4), 21.0) is not None
+
+
+def test_the_office_closes_by_its_thermostat() -> None:
+    detector = WindowDetector()
+    detector.feed(T0, 21.57, 42.61, WINTER)
+    detector.feed_trv(T0, 20.5)
+    detector.feed(T0 + minutes(10.5), 21.07, 36.51, WINTER)
+    for minute, value in ((11, 20.0), (14, 19.5), (16, 19.0), (18, 18.5)):
+        assert detector.feed_trv(T0 + minutes(minute), value) is None
+
+    closed = detector.feed_trv(T0 + minutes(25.5), 19.0)
+
+    assert closed is not None and closed.signal is Signal.THERMOSTAT
+    assert closed.describe() == "Thermostat +0,5 K"
+
+
+def test_a_window_does_not_close_within_three_minutes() -> None:
+    detector = WindowDetector()
+    detector.feed(T0, 21.0, None, WINTER)
+    detector.feed(T0 + minutes(5), 20.4, None, WINTER)
+
+    assert detector.feed(T0 + minutes(6), 20.8, None, WINTER) is None
+    assert detector.open
 
 
 def test_an_open_window_closes_after_half_an_hour() -> None:
     detector = WindowDetector()
-    detector.feed(T0, 21.0, None)
-    detector.feed(T0 + minutes(5), 20.4, None)
+    detector.feed(T0, 21.0, None, WINTER)
+    detector.feed(T0 + minutes(5), 20.4, None, WINTER)
 
     assert detector.tick(T0 + minutes(20)) is None
     closed = detector.tick(T0 + minutes(36))
-    assert closed is not None and not closed.opened
+    assert closed is not None and not closed.opened and closed.signal is Signal.TIMEOUT
+
+
+def test_a_room_keeps_its_window_contact() -> None:
+    details = details_from_json({"window_entity": "binary_sensor.buero_fenster"})
+
+    assert details.window_entity == "binary_sensor.buero_fenster"
+    assert details_to_json(details)["window_entity"] == "binary_sensor.buero_fenster"
+    # Only a binary_sensor is a contact.
+    assert details_from_json({"window_entity": "sensor.buero_fenster"}).window_entity is None
 
 
 # --- the room model ---------------------------------------------------------------------------

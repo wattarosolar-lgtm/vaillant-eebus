@@ -35,7 +35,9 @@ class HemsSources(HomeAssistantListener):
             rooms.add(room.entity_id)
             details = room.details
             rooms |= {
-                entity for entity in (details.trv_entity, details.valve_entity, details.humidity_entity) if entity
+                entity
+                for entity in (details.trv_entity, details.valve_entity, details.humidity_entity, details.window_entity)
+                if entity
             }
         probe = settings.room_control.probe
         pair = {entity for entity in (probe.flow_entity, probe.return_entity) if entity}

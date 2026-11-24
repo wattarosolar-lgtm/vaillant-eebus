@@ -75,7 +75,7 @@ from vaillant_eebus.hems.rules import (
 from vaillant_eebus.hems.samples import SampleStore, room_series
 from vaillant_eebus.hems.sources import HemsSources
 from vaillant_eebus.hems.statistics import StatisticsHistory, daily_values, hourly_changes
-from vaillant_eebus.hems.windows import WindowDetector, WindowEvent
+from vaillant_eebus.hems.windows import Outside, Signal, WindowDetector, WindowEvent, humidity_threshold
 from vaillant_eebus.home_assistant import POWER_SENSOR, HomeAssistant
 from vaillant_eebus.log_store import LogCategory, LogStore
 from vaillant_eebus.room_data import RoomControlMode, at_least, details_to_json, effective_stage
@@ -91,6 +91,8 @@ PLAN_SETTLE = 2.0
 STATISTICS_EVERY = timedelta(hours=6)
 ROOM_MODEL_EVERY = timedelta(hours=1)
 DETECT_EVERY = timedelta(seconds=60)
+# A window contact that reports nothing usable this long gives way to the rules (1.4.3).
+CONTACT_LOST_AFTER = timedelta(minutes=10)
 # After a start: the power and outdoor history read from Home Assistant for the counting.
 BACKFILL = timedelta(days=10)
 # Zone 1 logic ("würde"): off only after the power stayed below the threshold this long.
@@ -252,6 +254,11 @@ class RoomStatus:
     supply: Supply
     window_open: bool
     window_since: datetime | None
+    # 1.4.3: what decides about the window ("contact" or "rules"), the humidity fall that shows it now (g/m³;
+    # None: the humidity does not count) and the signal of the last opening or closing (German).
+    window_source: str = "rules"
+    window_threshold_g: float | None = None
+    window_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +275,18 @@ class ZoneRoomsStatus:
 class RoomsView:
     rooms: list[RoomStatus]
     zones: list[ZoneRoomsStatus]
+
+
+@dataclass
+class _Contact:
+    """A room's window contact (binary_sensor, on = open); it decides while it reports."""
+
+    open: bool | None = None
+    since: datetime | None = None
+    lost_since: datetime | None = None
+
+    def usable(self, now: datetime) -> bool:
+        return self.open is not None and (self.lost_since is None or now - self.lost_since < CONTACT_LOST_AFTER)
 
 
 @dataclass
@@ -335,6 +354,9 @@ class HemsService:
         self._backfilled = False
         self._frost = FrostState(active=False, below_since=None)
         self._windows: dict[str, WindowDetector] = {}
+        self._contacts: dict[str, _Contact] = {}
+        self._window_listeners: list[Callable[[str], None]] = []
+        self._window_guard: Callable[[str], bool] | None = None
         self._supply: dict[str, SupplyState] = {}
         self._zone1 = _Zone1()
         self._flows: dict[str, _Flow] = {}
@@ -372,9 +394,28 @@ class HemsService:
         """The room control's word on a radiator zone's flow hint: first redistribute, then the flow."""
         self._flow_advisor = advisor
 
+    def on_window(self, listener: Callable[[str], None]) -> None:
+        """Called with the room's ID as soon as its window opens or closes (the room control reacts at once)."""
+        self._window_listeners.append(listener)
+
+    def set_window_guard(self, guard: Callable[[str], bool]) -> None:
+        """The room control's word whether the thermostat's own sensor is to be ignored for a room now (shortly
+        after a command or the valve closing it falls by itself)."""
+        self._window_guard = guard
+
     def window_open(self, room_id: str) -> bool:
+        contact = self._contact_of(room_id)
+        if contact is not None:
+            return bool(contact.open)
         window = self._windows.get(room_id)
         return window is not None and window.open
+
+    def window_reason(self, room_id: str) -> str | None:
+        """The signal of the room's last window opening or closing, German."""
+        if self._contact_of(room_id) is not None:
+            return "Fensterkontakt"
+        window = self._windows.get(room_id)
+        return window.last_event.describe() if window is not None and window.last_event is not None else None
 
     def supply_of(self, room_id: str) -> SupplyState:
         return self._supply.get(room_id, SupplyState(Supply.UNKNOWN, None))
@@ -531,6 +572,8 @@ class HemsService:
             model = self._models.rooms.get(room.entity_id)
             lower = setpoint - details.comfort_down_k
             window = self._windows.get(room.entity_id)
+            contact = self._contact_of(room.entity_id)
+            grams = window.last_grams if window is not None else None
             rooms.append(
                 RoomStatus(
                     entity_id=room.entity_id,
@@ -564,8 +607,15 @@ class HemsService:
                         else None
                     ),
                     supply=self._supply.get(room.entity_id, SupplyState(Supply.UNKNOWN, None)).supply,
-                    window_open=window is not None and window.open,
-                    window_since=window.open_since if window is not None else None,
+                    window_open=self.window_open(room.entity_id),
+                    window_since=self._window_since(room.entity_id),
+                    window_source="contact" if contact is not None else "rules",
+                    window_threshold_g=(
+                        humidity_threshold(grams, self._outside(now))
+                        if grams is not None and contact is None and not room.measured_at_thermostat
+                        else None
+                    ),
+                    window_reason=self.window_reason(room.entity_id),
                 )
             )
         zones = []
@@ -802,7 +852,7 @@ class HemsService:
                     values[room_series(room.entity_id, name)] = value
             window = self._windows.get(room.entity_id)
             if window is not None:
-                self._window_event(room, window.tick(now))
+                self._window_event(room, window.tick(now), notify=self._contact_of(room.entity_id) is None)
         if values:
             await self.samples.add_async(now, values)
         recent = await self._update_supply(now)
@@ -892,37 +942,96 @@ class HemsService:
             self._save_state()
 
     def _source_changed(self, entity_id: str, state: EntityState | None) -> None:
-        """A room's temperature or humidity changed: look for an open window."""
-        if state is None:
-            return
+        """A room's temperature, humidity, thermostat or window contact changed: look for an open window."""
         now = self._clock()
         for room in self._settings.current.rooms:
             details = room.details
-            if entity_id not in (room.entity_id, details.humidity_entity):
+            if entity_id == details.window_entity:
+                self._contact_changed(room, state, now)
                 continue
-            temperature = room_celsius(self.sources.get(room.entity_id))
-            if temperature is None:
+            if entity_id not in (room.entity_id, details.humidity_entity, details.trv_entity) or state is None:
                 continue
-            humidity = None if room.measured_at_thermostat else self.sources.number(details.humidity_entity)
-            detector = self._windows.setdefault(room.entity_id, WindowDetector())
-            self._window_event(room, detector.feed(now, temperature, humidity))
+            detector = self._windows.get(room.entity_id)
+            if detector is None or detector.alone is not room.measured_at_thermostat:
+                detector = self._windows[room.entity_id] = WindowDetector(alone=room.measured_at_thermostat)
+            notify = self._contact_of(room.entity_id) is None
+            guarded = self._window_guard is not None and self._window_guard(room.entity_id)
+            if room.measured_at_thermostat:
+                # The room's temperature is the thermostat's sensor: only the thermostat rule.
+                if entity_id == room.entity_id:
+                    value = room_celsius(state)
+                    if value is not None:
+                        self._window_event(room, detector.feed_trv(now, value, guarded=guarded), notify=notify)
+                continue
+            if entity_id in (room.entity_id, details.humidity_entity):
+                temperature = room_celsius(self.sources.get(room.entity_id))
+                if temperature is not None:
+                    humidity = self.sources.number(details.humidity_entity)
+                    event = detector.feed(now, temperature, humidity, self._outside(now))
+                    self._window_event(room, event, notify=notify)
+            if entity_id == details.trv_entity:
+                value = self.sources.attribute(entity_id, "current_temperature")
+                if value is not None:
+                    self._window_event(room, detector.feed_trv(now, value, guarded=guarded), notify=notify)
+
+    def _contact_changed(self, room: Room, state: EntityState | None, now: datetime) -> None:
+        contact = self._contacts.setdefault(room.entity_id, _Contact())
+        before = self.window_open(room.entity_id)
+        value = state.state if state is not None else ""
+        if value in ("on", "off"):
+            opened = value == "on"
+            if contact.open is not opened:
+                contact.since = now
+            contact.open, contact.lost_since = opened, None
+        elif contact.lost_since is None:
+            contact.lost_since = now
+        after = self.window_open(room.entity_id)
+        if after is not before:
+            self._window_event(room, WindowEvent(after, now, Signal.CONTACT))
+
+    def _contact_of(self, room_id: str) -> _Contact | None:
+        """The room's window contact while it decides (configured and reporting)."""
+        room = next((item for item in self._settings.current.rooms if item.entity_id == room_id), None)
+        if room is None or room.details.window_entity is None:
+            return None
+        contact = self._contacts.get(room_id)
+        return contact if contact is not None and contact.usable(self._clock()) else None
+
+    def _window_since(self, room_id: str) -> datetime | None:
+        contact = self._contact_of(room_id)
+        if contact is not None:
+            return contact.since if contact.open else None
+        window = self._windows.get(room_id)
+        return window.open_since if window is not None else None
+
+    def _outside(self, now: datetime) -> Outside:
+        forecast = self.forecast.current
+        hour = forecast.at(now) if forecast is not None else None
+        celsius = self._outdoor_now()
+        if celsius is None and hour is not None:
+            celsius = hour.temperature_c
+        return Outside(celsius=celsius, relative=hour.humidity if hour is not None else None)
 
     def _observed(self, room: Room) -> bool:
         """The room is not in the room control's preview or control, which log on their own."""
         stage = effective_stage(self._settings.current.room_control.mode, room.details.stage)
         return not at_least(stage, RoomControlMode.PREVIEW) or room.details.trv_entity is None
 
-    def _window_event(self, room: Room, event: WindowEvent | None) -> None:
-        if event is None or self.mode is not PlannerMode.PREVIEW or not self._observed(room):
+    def _window_event(self, room: Room, event: WindowEvent | None, *, notify: bool = True) -> None:
+        """notify: the event decides about the window (no contact decides instead)."""
+        if event is None or not notify:
+            return
+        for listener in self._window_listeners:
+            try:
+                listener(room.entity_id)
+            except Exception:
+                _LOGGER.exception("A window listener failed")
+        if self.mode is not PlannerMode.PREVIEW or not self._observed(room):
             return
         if event.opened:
-            humidity = f" und {_number(event.drop_g)} g/m³ Feuchte" if event.drop_g is not None else ""
-            self._log.add(
-                LogCategory.ROOMS,
-                f"Fenster offen erkannt (würde): {room.name}, {MINUS}{_number(event.drop_k)} K{humidity}.",
-            )
+            self._log.add(LogCategory.ROOMS, f"Fenster offen erkannt (würde): {room.name}, {event.describe()}.")
         else:
-            self._log.add(LogCategory.ROOMS, f"Fenster wieder zu (würde): {room.name}.")
+            self._log.add(LogCategory.ROOMS, f"Fenster wieder zu (würde): {room.name}, {event.describe()}.")
 
     # --- planning ----------------------------------------------------------------
 

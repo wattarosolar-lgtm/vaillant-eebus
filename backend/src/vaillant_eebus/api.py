@@ -54,6 +54,7 @@ from vaillant_eebus.hems.service import HemsService, HemsStatus, ModeNotAvailabl
 from vaillant_eebus.history import PowerHistory
 from vaillant_eebus.home_assistant import EntityChoice, HomeAssistant, performance_today
 from vaillant_eebus.ids import (
+    BINARY_SENSOR_ENTITY,
     CLIMATE_ENTITY,
     DEVICE_NAME_MAX,
     ENTITY_ID,
@@ -300,6 +301,7 @@ class RoomDetailsRequest(BaseModel):
     trv_entity: str | None = Field(default=None, pattern=CLIMATE_ENTITY.pattern)
     valve_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
     humidity_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
+    window_entity: str | None = Field(default=None, pattern=BINARY_SENSOR_ENTITY.pattern)
     setpoint_c: float = _range(ROOM_SETPOINT_C, 20.0)
     schedule: list[ScheduleModel] = Field(default=[], max_length=SCHEDULE_MAX)
     comfort_down_k: float = _range(COMFORT_K, 0.5)
@@ -772,6 +774,7 @@ def create_app(
             "power",
             "percent",
             "humidity",
+            "window",
             "room",
             "thermostat",
             "weather",

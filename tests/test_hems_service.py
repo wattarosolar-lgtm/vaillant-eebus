@@ -509,6 +509,19 @@ async def test_the_entity_choice_knows_rooms_thermostats_humidity_and_valves(app
     assert [item["entity_id"] for item in valves.json()] == [ROOM_A_VALVE]
 
 
+async def test_the_entity_choice_offers_window_contacts(app: App) -> None:
+    app.fake.set("binary_sensor.buero_fenster", "off", attributes={"device_class": "window"})
+    app.fake.set("binary_sensor.flur_bewegung", "off", attributes={"device_class": "motion"})
+    app.fake.set("binary_sensor.kueche_kontakt", "off")
+
+    contacts = await app.http.get("/api/ha/entities", params={"kind": "window"})
+
+    assert {item["entity_id"] for item in contacts.json()} == {
+        "binary_sensor.buero_fenster",
+        "binary_sensor.kueche_kontakt",
+    }
+
+
 # --- sensors ----------------------------------------------------------------------------------
 
 
