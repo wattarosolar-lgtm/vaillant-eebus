@@ -54,6 +54,8 @@ BAND_NAMES = ("unter 0 °C", "0 bis 5 °C", "5 bis 10 °C", "10 bis 15 °C", "ab
 
 
 type Points = Sequence[tuple[datetime, float]]
+# A run's share of one clock hour: (outdoor °C, relative humidity %, minutes); None where unknown.
+type Piece = tuple[float | None, float | None, float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +68,15 @@ class Run:
     outdoor_c: float | None = None
     # False when a gap in the data cuts the run or the pause before it.
     measured: bool = True
+    # The run split at full hours with the weather of each hour (K2, 1.5.0); empty for runs stored before.
+    pieces: tuple[Piece, ...] = ()
 
     def minutes(self, now: datetime) -> float:
         return ((self.end or now) - self.start).total_seconds() / 60
+
+    def hours_by_weather(self, now: datetime) -> tuple[Piece, ...]:
+        """The run's minutes with the outdoor temperature and humidity they ran at (else all at the start's)."""
+        return self.pieces or ((self.outdoor_c, None, self.minutes(now)),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +189,25 @@ def band_index(outdoor_c: float) -> int:
     return bisect.bisect_right(BANDS, outdoor_c) - 1
 
 
+def split_run(
+    run: Run, outdoor: Points, humidity_at: Callable[[datetime], float | None], now: datetime
+) -> tuple[Piece, ...]:
+    """The run cut at full hours; each piece with the outdoor value in its middle and that hour's humidity.
+
+    A run that starts at +1 °C and runs into the frost counts its later hours there, not all at its start (K2).
+    """
+    end = run.end or now
+    pieces: list[Piece] = []
+    moment = run.start
+    while moment < end:
+        cut = min(end, moment.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+        middle = moment + (cut - moment) / 2
+        celsius = value_at(outdoor, middle) if outdoor else None
+        pieces.append((celsius, humidity_at(middle), round((cut - moment).total_seconds() / 60, 2)))
+        moment = cut
+    return tuple(pieces)
+
+
 def summarize(
     runs: Sequence[Run], defrosts: Sequence[Defrost], now: datetime, zone: tzinfo, *, days: int = 14
 ) -> tuple[list[DayCycles], list[BandCycles]]:
@@ -207,6 +234,13 @@ def summarize(
     for index, name in enumerate(BAND_NAMES):
         in_band = [run for run in runs if run.outdoor_c is not None and band_index(run.outdoor_c) == index]
         starts = {run.start for run in in_band}
+        # Running hours by the outdoor temperature of each hour, not of the run's start (K2).
+        band_minutes = sum(
+            piece_minutes
+            for run in runs
+            for celsius, _humidity, piece_minutes in run.hours_by_weather(now)
+            if celsius is not None and band_index(celsius) == index
+        )
         bands.append(
             BandCycles(
                 band=name,
@@ -216,7 +250,7 @@ def summarize(
                 defrosts=sum(
                     1 for item in defrosts if item.outdoor_c is not None and band_index(item.outdoor_c) == index
                 ),
-                run_hours=round(sum(run.minutes(now) for run in in_band) / 60, 1),
+                run_hours=round(band_minutes / 60, 1),
             )
         )
     return per_day, bands
@@ -281,7 +315,12 @@ class CycleTracker:
         start = power[0][0]
         outdoor = list(outdoor)
         runs = [
-            replace(run, outdoor_c=value_at(outdoor, run.start), measured=run.measured and run.start > start)
+            replace(
+                run,
+                outdoor_c=value_at(outdoor, run.start),
+                measured=run.measured and run.start > start,
+                pieces=split_run(run, outdoor, self.humidity_at, now),
+            )
             for run in detect_runs(power, now)
             if run.end is not None
         ]
@@ -311,6 +350,7 @@ class CycleTracker:
                 outdoor_c=value_at(self.outdoor, run.start),
                 # The first run in the window may have started before it.
                 measured=run.measured and run.start > window,
+                pieces=split_run(run, self.outdoor, self.humidity_at, now),
             )
             for run in detect_runs(self.power, now)
         ]
@@ -378,6 +418,7 @@ class CycleTracker:
                     run.energy_wh,
                     run.outdoor_c,
                     run.measured,
+                    [list(piece) for piece in run.pieces],
                 ]
                 for run in self.runs
                 if run.end is not None
@@ -409,6 +450,7 @@ class CycleTracker:
                     energy_wh=float(item[2]),
                     outdoor_c=_optional(item[3]),
                     measured=bool(item[4]),
+                    pieces=_pieces(item[5]) if len(item) > 5 else (),
                 )
                 for item in raw.get("runs", [])
             ]
@@ -447,6 +489,16 @@ def _merge(kept: Points, read: Points) -> list[tuple[datetime, float]]:
 
 def _optional(value: Any) -> float | None:
     return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _pieces(raw: Any) -> tuple[Piece, ...]:
+    if not isinstance(raw, list):
+        return ()
+    pieces: list[Piece] = []
+    for item in raw:
+        if isinstance(item, list) and len(item) == 3 and (minutes := _optional(item[2])) is not None:
+            pieces.append((_optional(item[0]), _optional(item[1]), minutes))
+    return tuple(pieces)
 
 
 def _write_json(path: Path, payload: Any) -> None:

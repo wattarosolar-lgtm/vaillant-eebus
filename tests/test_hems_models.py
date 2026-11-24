@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
 
@@ -19,7 +20,16 @@ from vaillant_eebus.hems.config import (
     hems_to_json,
     in_window,
 )
-from vaillant_eebus.hems.cycles import CycleTracker, Run, detect_defrosts, detect_runs, summarize, value_at
+from vaillant_eebus.hems.cycles import (
+    CycleTracker,
+    Defrost,
+    Run,
+    detect_defrosts,
+    detect_runs,
+    split_run,
+    summarize,
+    value_at,
+)
 from vaillant_eebus.hems.defrost import RiskLevel, learn_rates, risk
 from vaillant_eebus.hems.forecast import WeatherHour, calibrated, calibration, parse_open_meteo, parse_weather_entity
 from vaillant_eebus.hems.frost import frost_hours, frost_state
@@ -517,6 +527,58 @@ def test_the_defrost_rates_start_from_the_field_data_and_learn() -> None:
     # 40 running hours at 4-7 °C without a defrost pull the start value 0.02 down.
     assert rates[3].rate == pytest.approx(0.2 / 50)
     assert rates[3].learned
+
+
+def test_a_run_into_the_frost_counts_its_hours_where_they_ran() -> None:
+    # K2 (24.11.2026): a run starting at +1 °C counted all its hours at +1 °C, its defrosts at their own
+    # temperature below 0 °C - "unter 0 °C" showed 13 defrosts on 1.2 running hours (1.88 per hour).
+    outdoor = [(T0, 1.0), (T0 + timedelta(hours=1), -0.5), (T0 + timedelta(hours=2), -2.0)]
+    run = Run(start=T0 + minutes(30), end=T0 + timedelta(hours=5), energy_wh=4000.0, outdoor_c=1.0)
+    pieces = split_run(run, outdoor, lambda _moment: 80.0, T0 + timedelta(hours=6))
+    defrosts = [Defrost(at=T0 + timedelta(hours=hour), minutes=5.0, peak_w=1800.0, outdoor_c=-2.0) for hour in (3, 4)]
+
+    assert [piece[2] for piece in pieces] == [30.0, 60.0, 60.0, 60.0, 60.0]
+    assert [piece[0] for piece in pieces] == [1.0, -0.5, -2.0, -2.0, -2.0]
+    rates = learn_rates([replace(run, pieces=pieces)], defrosts, T0 + timedelta(hours=6))
+    # 4 of the 4.5 hours below 0 °C: (2 + 10 * 0.8) / (4 + 10), no longer 2 defrosts on no hour there.
+    assert (rates[0].run_hours, rates[0].defrosts) == (4.0, 2)
+    assert rates[0].rate == pytest.approx(10 / 14, abs=0.001)
+    assert rates[1].run_hours == 0.5
+    # The same run stored before 1.5.0 (without pieces) still counts at its start.
+    assert learn_rates([run], defrosts, T0 + timedelta(hours=6))[1].run_hours == 4.5
+
+
+def test_humidity_counts_once() -> None:
+    # 20 hours at 0-2 °C in fog (95 %) with 9 defrosts: the rate is learned per hour of normal humidity
+    # (20 h weigh 30), so the forecast's factor 1.5 brings it back to what was seen - not 1.5 times more.
+    run = Run(start=T0, end=T0 + timedelta(hours=20), energy_wh=1.0, outdoor_c=1.0)
+    foggy = replace(run, pieces=split_run(run, [(T0, 1.0)], lambda _moment: 95.0, T0 + timedelta(hours=21)))
+    defrosts = [Defrost(at=T0 + timedelta(hours=hour), minutes=5.0, peak_w=1800.0, outdoor_c=1.0) for hour in range(9)]
+
+    rates = learn_rates([foggy], defrosts, T0 + timedelta(hours=21))
+
+    assert (rates[1].run_hours, rates[1].weighted_hours) == (20.0, 30.0)
+    assert rates[1].rate == pytest.approx((9 + 10 * 0.3) / (30 + 10))
+    expected = risk([WeatherHour(start=T0, temperature_c=1.0, humidity=95.0)], rates)[0].per_run_hour
+    assert expected == pytest.approx(1.5 * 12 / 40, abs=0.001)
+
+
+def test_the_band_statistics_count_hours_where_they_ran(tmp_path: Path) -> None:
+    now = T0 + timedelta(hours=8)
+    tracker = CycleTracker(tmp_path, clock=lambda: now)
+    tracker.feed_outdoor(T0, 6.0)
+    tracker.feed_outdoor(T0 + timedelta(hours=2), -1.0)
+    for moment, watts in [(T0, 800.0), (T0 + timedelta(hours=4), 0.0)]:
+        tracker.feed_power(moment, watts)
+
+    tracker.update()
+    tracker.save()
+    again = CycleTracker(tmp_path, clock=lambda: now)
+    bands = again.stats().bands
+
+    assert [band.run_hours for band in bands[:3]] == [2.0, 0.0, 2.0]
+    assert bands[2].starts == 1
+    assert again.runs[0].pieces == tracker.runs[0].pieces
 
 
 def test_humid_air_raises_the_risk() -> None:

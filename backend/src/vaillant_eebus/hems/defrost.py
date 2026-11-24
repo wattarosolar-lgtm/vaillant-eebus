@@ -5,6 +5,12 @@ air. The start values per outdoor band come from the field data of November
 2026 (defrosts per running hour); every counted defrost and running hour moves
 them towards what the user's heat pump really does. Humidity scales the rate:
 dry air carries little water, fog and drizzle a lot.
+
+Since 1.5.0 (K2) a run's hours count in the band of the outdoor temperature of
+each hour, and each hour counts with the humidity factor of its weather: an hour
+in fog weighs 1.5, a dry one 0.5. The learned rate is so per hour of normal
+humidity, and the forecast's factor is applied once - not on top of a rate
+that was learned in humid weather already.
 """
 
 from __future__ import annotations
@@ -44,10 +50,12 @@ LEVEL_NAMES = {RiskLevel.NONE: "keins", RiskLevel.LOW: "gering", RiskLevel.MEDIU
 @dataclass(frozen=True, slots=True)
 class BandRate:
     band: str
-    # Defrosts per running hour: what the app uses (start value moved by what it saw).
+    # Defrosts per running hour at normal humidity: what the app uses (start value moved by what it saw).
     rate: float
     defrosts: int
+    # Running hours in the band as they ran, and weighted by their humidity (what the rate is learned on).
     run_hours: float
+    weighted_hours: float
     learned: bool
 
 
@@ -65,19 +73,25 @@ def band_index(outdoor_c: float) -> int:
 
 def learn_rates(runs: Sequence[Run], defrosts: Sequence[Defrost], now: datetime) -> list[BandRate]:
     hours = [0.0] * len(BANDS)
+    weighted = [0.0] * len(BANDS)
     counts = [0] * len(BANDS)
     for run in runs:
-        if run.outdoor_c is not None:
-            hours[band_index(run.outdoor_c)] += run.minutes(now) / 60
+        for celsius, humidity, minutes in run.hours_by_weather(now):
+            if celsius is None:
+                continue
+            index = band_index(celsius)
+            hours[index] += minutes / 60
+            weighted[index] += minutes / 60 * humidity_factor(humidity)
     for item in defrosts:
         if item.outdoor_c is not None:
             counts[band_index(item.outdoor_c)] += 1
     return [
         BandRate(
             band=name,
-            rate=round((counts[index] + PRIOR_HOURS * START_RATES[index]) / (hours[index] + PRIOR_HOURS), 3),
+            rate=round((counts[index] + PRIOR_HOURS * START_RATES[index]) / (weighted[index] + PRIOR_HOURS), 3),
             defrosts=counts[index],
             run_hours=round(hours[index], 1),
+            weighted_hours=round(weighted[index], 1),
             learned=hours[index] >= PRIOR_HOURS,
         )
         for index, name in enumerate(BAND_NAMES)

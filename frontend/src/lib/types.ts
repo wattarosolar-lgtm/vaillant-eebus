@@ -480,9 +480,12 @@ export interface CycleStats {
 
 export interface BandRate {
   band: string;
+  /** Defrosts per running hour at normal humidity (1.5.0, K2). */
   rate: number;
   defrosts: number;
+  /** Running hours by the outdoor temperature of each hour; weighted by their humidity. */
   run_hours: number;
+  weighted_hours: number;
   learned: boolean;
 }
 
