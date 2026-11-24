@@ -87,7 +87,7 @@ RELEASE_TIMEOUT_S = 15.0
 ACTIONS_KEPT = 30
 
 # Which function's stage decides about a part of the shift. Defrost and store
-# (block operation, 1.6.0) and the night (F3, after 1.4.2) are not carried out yet.
+# (block operation, 1.6.0) and the night (F3) are not carried out by this map.
 PART_FUNCTION = {Part.FLOW: Function.FLOW, Part.AHEAD: Function.FLOW, Part.WARM: Function.FLOW}
 
 MODE_NAMES = {"off": "Aus", "auto": "Auto", "on": "Ein"}
@@ -410,7 +410,8 @@ class ZoneExecutor:
                     record.override_until = now + timedelta(hours=hours)
             return
         interval = timedelta(minutes=hems.min_interval_min)
-        if record.changed_at is not None and now - record.changed_at < interval:
+        # Up goes out at once (F2: a room lacks heat); down waits for the interval.
+        if target < record.shift_k and record.changed_at is not None and now - record.changed_at < interval:
             record.waiting = (
                 f"Abstand: nächste Änderung ab {(record.changed_at + interval).astimezone(self._zone):%H:%M} Uhr"
             )
@@ -459,7 +460,11 @@ class ZoneExecutor:
                 if await self._would(zone.id, SetZoneOverride(zone_id=zone.id, celsius=celsius, hours=hours)):
                     sim.override_until = now + timedelta(hours=hours)
             return
-        if sim.changed_at is not None and now - sim.changed_at < timedelta(minutes=hems.min_interval_min):
+        if (
+            target < sim.shift_k
+            and sim.changed_at is not None
+            and now - sim.changed_at < timedelta(minutes=hems.min_interval_min)
+        ):
             return
         hours = self._hours(zone.id, parts, now)
         if await self._would(zone.id, SetZoneOverride(zone_id=zone.id, celsius=celsius, hours=hours)):

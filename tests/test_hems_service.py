@@ -24,6 +24,7 @@ from vaillant_eebus.bridge_client import Backoff, BridgeClient
 from vaillant_eebus.energy import EnergyMeter
 from vaillant_eebus.ha_client import HomeAssistantClient
 from vaillant_eebus.hems.config import HemsSettings, PlannerMode, WeatherSource, ZoneConfig, ZoneKind
+from vaillant_eebus.hems.rules import Part
 from vaillant_eebus.hems.service import HemsService
 from vaillant_eebus.home_assistant import HomeAssistant
 from vaillant_eebus.log_store import LogCategory, LogStore
@@ -377,6 +378,81 @@ async def test_samples_feed_the_room_status(app: App) -> None:
     assert app.hems.samples.series(["outdoor"], app.clock.now - timedelta(minutes=1))["outdoor"]
 
 
+FLOW_SP_1 = "sensor.circuit_0_flow_setpoint"
+FLOW_SP_2 = "sensor.circuit_1_flow_setpoint"
+
+
+def history(app: App, hours: float, *, valve: float, room_c: float = 21.0, until: datetime | None = None) -> None:
+    """Five-minute samples as the app writes them, the heat pump delivering heat all along."""
+    end = until or app.clock.now
+    moment = end - timedelta(hours=hours)
+    while moment < end:
+        app.hems.samples.add(
+            moment,
+            {
+                "power": 900.0,
+                f"flow:{MV_ZONE_2}": 33.0,
+                "room:" + ROOM_A + ":temperature": room_c,
+                "room:" + ROOM_A + ":valve": valve,
+                "room:" + ROOM_A + ":setpoint": 21.0,
+                "room:" + ROOM_A + ":window": 0.0,
+                "room:" + ROOM_A + ":testing": 0.0,
+            },
+        )
+        moment += timedelta(minutes=5)
+
+
+async def test_the_flow_goes_down_slowly_after_the_bottleneck_and_back_at_once(app: App) -> None:
+    # F2 (1.5.0): 26 hours of Raum A drawing heat at 50 % make it the bottleneck; zone 2's flow setpoint is 5 K
+    # above zone 1's. One step down, then back to 0 at once when the room lacks heat.
+    app.fake.set(FLOW_SP_1, "31.2", unit="°C")
+    app.fake.set(FLOW_SP_2, "36.4", unit="°C")
+    configure(
+        app.settings,
+        zones=(
+            ZoneConfig(MV_ZONE_1, kind=ZoneKind.FLOOR, flow_setpoint_entity=FLOW_SP_1),
+            ZoneConfig(MV_ZONE_2, kind=ZoneKind.RADIATOR, flow_entity=FLOW_2, flow_setpoint_entity=FLOW_SP_2),
+        ),
+    )
+    app.home.watch()
+    app.fake.change(MV_POWER, "900")
+    app.fake.change(ROOM_A_VALVE, "50")
+    await eventually(lambda: app.home.hems_sources.number(FLOW_SP_2) == 36.4 and power(app) == 900)
+    history(app, 26, valve=50.0)
+
+    await app.hems.sample()
+
+    flow = app.hems.status().flow[0]
+    assert (flow.offset_k, flow.bottleneck, flow.bottleneck_long_term, flow.bottleneck_mean) == (
+        -0.5,
+        "Raum A",
+        True,
+        50.0,
+    )
+    log = await messages(app.log, LogCategory.HEMS)
+    assert "Zone 2 würde den Vorlauf ändern: \u22120,5 K (Vorlauf tiefer: Engpass Raum A bei 50 %)." in log
+    # The shift is a part of the plan; the executor sends it on "Steuern".
+    await app.hems.plan_now()
+    assert app.hems.plan is not None and app.hems.plan.hours[0].zones[1].parts.get(Part.FLOW) == -0.5
+
+    # 20 min later: nothing more (down at most every 2 h).
+    app.clock.now += timedelta(minutes=20)
+    await app.hems.sample()
+    assert app.hems.status().flow[0].holding == "tiefer höchstens alle 2 h"
+
+    # Raum A lacks heat: valve wide open for 40 min and 0.5 K below its setpoint.
+    app.clock.now += timedelta(minutes=40)
+    history(app, 0.75, valve=95.0, room_c=20.5)
+    app.fake.change(ROOM_A_VALVE, "95")
+    app.fake.change(ROOM_A, "20.5")
+    await eventually(lambda: app.home.hems_sources.number(ROOM_A) == 20.5)
+    await app.hems.sample()
+
+    assert app.hems.status().flow[0].offset_k == 0.0
+    log = await messages(app.log, LogCategory.HEMS)
+    assert any("Vorlauf wieder höher: Raum A unterversorgt (von \u22120,5 K)" in message for message in log)
+
+
 # --- API ------------------------------------------------------------------------------------
 
 
@@ -412,14 +488,16 @@ async def test_the_settings_are_checked_and_saved_over_the_api(app: App) -> None
     assert "Einstellungen des Energiemanagements geändert." in await messages(app.log)
 
 
-async def test_control_of_the_flow_comes_after_1_4_2(app: App) -> None:
+async def test_the_flow_can_be_controlled_since_1_5_0(app: App) -> None:
     control = await app.http.post("/api/hems/mode", json={"mode": "control"})
-    refused = await app.http.post("/api/hems/function", json={"function": "flow", "mode": "control"})
+    flow = await app.http.post("/api/hems/function", json={"function": "flow", "mode": "control"})
     off = await app.http.post("/api/hems/mode", json={"mode": "off"})
 
     assert control.status_code == 200
-    assert refused.status_code == 409
-    assert "1.4.2" in refused.json()["detail"]
+    assert flow.status_code == 200
+    functions = {item["function"]: item for item in flow.json()["functions"]}
+    assert (functions["flow"]["mode"], functions["flow"]["effective"]) == ("control", "control")
+    assert functions["flow"]["available_modes"] == ["off", "preview", "control"]
     assert off.json()["mode"] == "off"
     assert off.json()["available_modes"] == ["off", "preview", "control"]
     assert "Energiemanagement ausgeschaltet." in await messages(app.log)

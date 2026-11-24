@@ -131,6 +131,8 @@ class HeatingSurface:
     flow_lph: float | None = None
     # The valve's presetting as written in the report, e.g. "2" or "voll offen".
     presetting: str = ""
+    # The presetting stands at its maximum (fully open; 1.5.0): a larger one is no remedy any more.
+    presetting_max: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +250,7 @@ def details_to_json(details: RoomDetails) -> dict[str, Any]:
                 "rated_basis": surface.rated_basis.value,
                 "flow_lph": surface.flow_lph,
                 "presetting": surface.presetting,
+                "presetting_max": surface.presetting_max,
             }
             for surface in details.surfaces
         ],
@@ -389,6 +392,7 @@ def _surfaces(raw: Any) -> tuple[HeatingSurface, ...]:
                 ),
                 flow_lph=_number(item, "flow_lph", FLOW_LPH),
                 presetting=presetting.strip()[:PRESETTING_MAX] if isinstance(presetting, str) else "",
+                presetting_max=item.get("presetting_max") is True,
             )
         )
     return tuple(surfaces)

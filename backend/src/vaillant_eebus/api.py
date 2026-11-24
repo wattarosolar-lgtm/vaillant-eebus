@@ -868,9 +868,7 @@ def create_app(
         try:
             await service.set_function_mode(request.function, request.mode)
         except ModeNotAvailable:
-            raise WriteRejected(
-                409, "„Steuern“ von Vorlauf und Vorausschau kommt nach Version 1.4.2 (Thermostat lernt)."
-            ) from None
+            raise WriteRejected(409, "Diese Stufe gibt es für diese Funktion in dieser Version nicht.") from None
         if request.function is Function.ZONE1 and executor is not None:
             executor.resume_zone1()
         if executor is not None:

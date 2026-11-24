@@ -56,14 +56,14 @@ class Function(StrEnum):
 
     # F1: floor heating zone off while the heat pump stands still, auto when it runs.
     ZONE1 = "zone1"
-    # F2: the zone setpoint after the valves and the forecast (quick veto); "Steuern" after 1.4.2.
+    # F2: the zone setpoint after the valves and the forecast (quick veto).
     FLOW = "flow"
 
 
 # Stages each function offers in this version.
 FUNCTION_MODES: dict[Function, frozenset[PlannerMode]] = {
     Function.ZONE1: AVAILABLE_MODES,
-    Function.FLOW: frozenset({PlannerMode.OFF, PlannerMode.PREVIEW}),
+    Function.FLOW: AVAILABLE_MODES,
 }
 
 
@@ -92,6 +92,8 @@ class ZoneConfig:
     # The circuit's flow temperature and the controller's flow setpoint (myVAILLANT circuit sensors).
     flow_entity: str | None = None
     flow_setpoint_entity: str | None = None
+    # The controller's heating curve (read only, F2's advice; 1.5.0), e.g. sensor.zuhause_circuit_1_heating_curve.
+    heating_curve_entity: str | None = None
     # Design values of the static balancing.
     design_flow_c: float | None = None
     design_return_c: float | None = None
@@ -164,7 +166,7 @@ class HemsSettings:
         """The Home Assistant entities the energy management reads besides the rooms."""
         chosen = [self.heat_heating_entity, self.heat_dhw_entity, self.buffer_entity]
         for zone in self.zones:
-            chosen += [zone.flow_entity, zone.flow_setpoint_entity]
+            chosen += [zone.flow_entity, zone.flow_setpoint_entity, zone.heating_curve_entity]
         return frozenset(entity for entity in chosen if entity)
 
     def function_mode(self, function: Function) -> PlannerMode:
@@ -260,6 +262,7 @@ def zone_to_json(zone: ZoneConfig) -> dict[str, Any]:
         "kind": zone.kind.value if zone.kind is not None else None,
         "flow_entity": zone.flow_entity,
         "flow_setpoint_entity": zone.flow_setpoint_entity,
+        "heating_curve_entity": zone.heating_curve_entity,
         "design_flow_c": zone.design_flow_c,
         "design_return_c": zone.design_return_c,
         "band_down_k": zone.band_down_k,
@@ -302,6 +305,7 @@ def _zones(raw: Any) -> tuple[ZoneConfig, ...]:
                 kind=ZoneKind(kind) if kind in {member.value for member in ZoneKind} else None,
                 flow_entity=_sensor(item, "flow_entity"),
                 flow_setpoint_entity=_sensor(item, "flow_setpoint_entity"),
+                heating_curve_entity=_sensor(item, "heating_curve_entity"),
                 design_flow_c=_number(item, "design_flow_c", FLOW_C),
                 design_return_c=_number(item, "design_return_c", FLOW_C),
                 band_down_k=_number(item, "band_down_k", BAND_K, step=0.5),

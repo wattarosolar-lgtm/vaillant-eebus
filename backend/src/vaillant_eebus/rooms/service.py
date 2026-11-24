@@ -643,6 +643,7 @@ class RoomControl:
         hems.set_flow_advisor(self.flow_advice)
         hems.on_window(self._window_changed)
         hems.set_window_guard(self._window_guard)
+        hems.set_testing_guard(self._testing_room)
         hems.sources.on_change(self._source_changed)
         hems.sources.follow(self._followed)
         if home_assistant.exporter is not None:
@@ -2481,6 +2482,7 @@ class RoomControl:
                 series[room_series(room.entity_id, "valve")],
                 series[room_series(room.entity_id, "setpoint")],
                 no_help=_no_help(state),
+                at_max=bool(room.details.surfaces) and all(item.presetting_max for item in room.details.surfaces),
             )
 
     def _probe_status(self, settings: Settings, now: datetime) -> ProbeStatus:
@@ -2822,6 +2824,11 @@ class RoomControl:
             return
         self._notify()
 
+    def _testing_room(self, room_id: str) -> bool:
+        """A test run or sweep has the room's thermostat now (the flow of zone 2 leaves the room out; F2)."""
+        room = next((item for item in self._settings.current.rooms if item.entity_id == room_id), None)
+        return room is not None and self._testing(room)
+
     def _testing(self, room: Room) -> bool:
         """A test run or a sweep has the room's thermostat now."""
         run = self._test
@@ -2954,10 +2961,20 @@ def _recommendation(
     setpoint: Sequence[tuple[datetime, float]],
     *,
     no_help: bool,
+    at_max: bool = False,
 ) -> str | None:
-    """A hint about the valve's presetting from the last days (only a hint; the user sets it by hand)."""
+    """A hint about the valve's presetting from the last days (only a hint; the user sets it by hand).
+
+    at_max: the presettings of all the room's radiators stand at their maximum (1.5.0) - then the hint names what
+    is left: the shut-offs at the radiator (at the user's room "Franz" half-closed H-block shut-offs were the cause
+    on 22.11.2026), the flow or a radiator too small.
+    """
+    at_max_text = (
+        "Ventil und Voreinstellung ganz offen und trotzdem oft zu kalt: Absperrungen am Heizkörper prüfen "
+        "(H-Block, Rücklaufverschraubung); sonst Vorlauf höher oder Heizfläche zu klein."
+    )
     if no_help:
-        return "Umverteilen hilft hier nicht: die Voreinstellung des Ventils größer prüfen."
+        return at_max_text if at_max else "Umverteilen hilft hier nicht: die Voreinstellung des Ventils größer prüfen."
     valves = dict(valve)
     setpoints = dict(setpoint)
     pairs = [
@@ -2967,6 +2984,15 @@ def _recommendation(
     ]
     if len(pairs) < RECOMMEND_MIN_SAMPLES:
         return None
+    under = sum(1 for room, opening, target in pairs if opening >= 90 and room <= target - 0.3) / len(pairs)
+    over = sum(1 for room, opening, target in pairs if opening <= 30 and room >= target) / len(pairs)
+    if under >= 0.2:
+        if at_max:
+            return at_max_text
+        return "Oft unterversorgt bei offenem Ventil: die Voreinstellung größer prüfen (oder den Vorlauf höher)."
+    if over >= 0.7:
+        return "Meist überversorgt (Ventil fast zu): die Voreinstellung kann kleiner werden."
+    return None
     under = sum(1 for room, opening, target in pairs if opening >= 90 and room <= target - 0.3) / len(pairs)
     over = sum(1 for room, opening, target in pairs if opening <= 30 and room >= target) / len(pairs)
     if under >= 0.2:

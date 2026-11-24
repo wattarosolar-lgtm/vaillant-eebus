@@ -37,11 +37,26 @@ from vaillant_eebus.hems.config import (
     HemsSettings,
     PlannerMode,
     WeatherSource,
+    ZoneConfig,
     ZoneKind,
     hems_to_json,
 )
 from vaillant_eebus.hems.cycles import CycleStats, CycleTracker
 from vaillant_eebus.hems.defrost import LEVEL_NAMES, BandRate, RiskLevel, learn_rates, risk
+from vaillant_eebus.hems.flow import (
+    BOTTLENECK_DAYS,
+    Bottleneck,
+    CurveAdvice,
+    FlowInputs,
+    RoomSamples,
+    curve_advice,
+    decide,
+    flow_per_k,
+    heat_from_pump,
+    hour_valve,
+    snapshot,
+)
+from vaillant_eebus.hems.flow import bottleneck as find_bottleneck
 from vaillant_eebus.hems.forecast import OPEN_METEO_URL, ForecastCheck, ForecastService, WeatherHour, hour_start
 from vaillant_eebus.hems.frost import FrostState, frost_hours, frost_state
 from vaillant_eebus.hems.house_model import (
@@ -60,7 +75,6 @@ from vaillant_eebus.hems.room_model import (
     Supply,
     SupplyState,
     cooling_table,
-    flow_hint,
     learn,
     minutes_until,
     supply,
@@ -100,6 +114,10 @@ CONTACT_LOST_AFTER = timedelta(minutes=10)
 BACKFILL = timedelta(days=10)
 # Zone 1 logic ("würde"): off only after the power stayed below the threshold this long.
 ZONE1_OFF_AFTER = timedelta(seconds=60)
+# F2 (1.5.0): the bottleneck over 7 days is computed hourly; the decision looks at the last 4 hours of samples.
+BOTTLENECK_EVERY = timedelta(hours=1)
+FLOW_RECENT = timedelta(hours=4)
+FLOW_ROOM_VALUES = ("temperature", "valve", "setpoint", "window", "testing")
 ZONE1_CHECK_AFTER = timedelta(minutes=2)
 HISTORY_FILE = "plan_history.json"
 STATE_FILE = "hems_state.json"
@@ -167,6 +185,13 @@ class FlowStatus:
     bottleneck: str | None
     max_valve: float | None
     under: int
+    # F2 (1.5.0): the bottleneck's mean valve and share undersupplied over 7 days (long_term False: the snapshot
+    # of the last half hour), why the flow holds now, the heating curve advice.
+    bottleneck_mean: float | None = None
+    bottleneck_under_share: float | None = None
+    bottleneck_long_term: bool = False
+    holding: str | None = None
+    curve_advice: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +344,22 @@ class _Zone1:
     check_at: datetime | None = None
 
 
+def _room_samples(room: Room, series: Mapping[str, list[tuple[datetime, float]]]) -> RoomSamples:
+    def named(value: str) -> list[tuple[datetime, float]]:
+        return series.get(room_series(room.entity_id, value), [])
+
+    return RoomSamples(
+        room_id=room.entity_id,
+        name=room.name,
+        temperature=named("temperature"),
+        valve=named("valve"),
+        setpoint=named("setpoint"),
+        window=named("window"),
+        testing=named("testing"),
+        at_thermostat=room.measured_at_thermostat,
+    )
+
+
 @dataclass
 class _Flow:
     offset_k: float = 0.0
@@ -327,6 +368,15 @@ class _Flow:
     # The last hint from the valves (not saved), and the room control's word on it.
     hint: FlowHint = FlowHint.UNKNOWN
     advice: str | None = None
+    # F2 (1.5.0): when a shift below 0 jumped back, the bottleneck (computed hourly), why it holds now, the
+    # heating curve advice of the day.
+    jumped_at: datetime | None = None
+    bottleneck: Bottleneck | None = None
+    bottleneck_at: datetime | None = None
+    holding: str | None = None
+    curve: CurveAdvice | None = None
+    curve_day: date | None = None
+    curve_text: str | None = None
 
 
 @dataclass
@@ -376,6 +426,7 @@ class HemsService:
         self._contacts: dict[str, _Contact] = {}
         self._window_listeners: list[Callable[[str], None]] = []
         self._window_guard: Callable[[str], bool] | None = None
+        self._testing_guard: Callable[[str], bool] | None = None
         self._supply: dict[str, SupplyState] = {}
         self._zone1 = _Zone1()
         self._flows: dict[str, _Flow] = {}
@@ -442,6 +493,10 @@ class HemsService:
         """The room control's word whether the thermostat's own sensor is to be ignored for a room now (shortly
         after a command or the valve closing it falls by itself)."""
         self._window_guard = guard
+
+    def set_testing_guard(self, guard: Callable[[str], bool]) -> None:
+        """The room control's word whether a test run or sweep has a room's thermostat now (F2 leaves it out)."""
+        self._testing_guard = guard
 
     def window_open(self, room_id: str) -> bool:
         contact = self._contact_of(room_id)
@@ -927,15 +982,29 @@ class HemsService:
             window = self._windows.get(room.entity_id)
             if window is not None:
                 self._window_event(room, window.tick(now), notify=self._contact_of(room.entity_id) is None)
+            # Phases that say nothing about the flow (F2's bottleneck leaves them out).
+            values[room_series(room.entity_id, "window")] = 1.0 if self.window_open(room.entity_id) else 0.0
+            testing = self._testing_guard is not None and self._testing_guard(room.entity_id)
+            values[room_series(room.entity_id, "testing")] = 1.0 if testing else 0.0
+        for zone_config in settings.hems.zones:
+            if zone_config.kind is ZoneKind.RADIATOR:
+                flow = self._flows.get(zone_config.zone_id)
+                values[f"flow_offset:{zone_config.zone_id}"] = flow.offset_k if flow is not None else 0.0
+            curve = self.sources.number(zone_config.heating_curve_entity)
+            if curve is not None:
+                values[f"curve:{zone_config.zone_id}"] = curve
         if values:
             await self.samples.add_async(now, values)
-        recent = await self._update_supply(now)
+        await self._update_supply(now)
         for listener in self._sampled:
             try:
                 await listener(now)
             except Exception:
                 _LOGGER.exception("The room control failed after the samples")
-        self._update_flow(now, recent)
+        try:
+            await self._update_flow(now)
+        except Exception:
+            _LOGGER.exception("The flow of the radiator zone failed")
 
     async def _update_supply(self, now: datetime) -> dict[str, list[tuple[datetime, float]]]:
         settings = self._settings.current
@@ -969,50 +1038,169 @@ class HemsService:
         self._supply = supplies
         return series
 
-    def _update_flow(self, now: datetime, series: Mapping[str, list[tuple[datetime, float]]]) -> None:
-        """Zone 2's flow hint from the valves ("würde" until the zones are controlled)."""
+    async def _update_flow(self, now: datetime) -> None:
+        """F2: zone 2's flow after the valves - bottleneck, up fast, down slowly (hems/flow.py); the executor sends
+        the shift when "Vorlauf und Vorausschau" is on "Steuern"."""
         settings = self._settings.current
-        rooms = [room for room in settings.rooms if room.details.valve_entity]
-        if not rooms or not series:
-            return
-        supplies = self._supply
         hems = settings.hems
+        floor = next((zone for zone in hems.zones if zone.kind is ZoneKind.FLOOR), None)
         for zone_config in hems.zones:
             if zone_config.kind is not ZoneKind.RADIATOR:
                 continue
-            members = [room for room in rooms if room.zone_id == zone_config.zone_id]
+            members = [
+                room for room in settings.rooms if room.zone_id == zone_config.zone_id and room.details.valve_entity
+            ]
             if not members:
                 continue
-            hint = flow_hint(
-                [supplies[room.entity_id] for room in members],
-                [series[room_series(room.entity_id, "valve")] for room in members],
-                now,
+            zone_id = zone_config.zone_id
+            flow = self._flows.setdefault(zone_id, _Flow())
+            supply_name = f"flow:{zone_id}" if zone_config.flow_entity else "buffer"
+            names = [
+                "power",
+                supply_name,
+                *[room_series(room.entity_id, value) for room in members for value in FLOW_ROOM_VALUES],
+            ]
+            if flow.bottleneck_at is None or now - flow.bottleneck_at >= BOTTLENECK_EVERY:
+                week = await self.samples.series_async(names, now - timedelta(days=BOTTLENECK_DAYS))
+                flow.bottleneck = find_bottleneck(
+                    [_room_samples(room, week) for room in members], week["power"], week[supply_name], now
+                )
+                flow.bottleneck_at = now
+            recent = await self.samples.series_async(names, now - FLOW_RECENT)
+            rooms = {room.entity_id: _room_samples(room, recent) for room in members}
+            current = flow.bottleneck or snapshot(list(rooms.values()), now)
+            temperatures = [value for room in members if (value := room_celsius(self.sources.get(room.entity_id)))]
+            heat_pump = heat_from_pump(
+                self._power_now(),
+                self.sources.number(zone_config.flow_entity or hems.buffer_entity),
+                statistics.fmean(temperatures) if temperatures else None,
             )
-            flow = self._flows.setdefault(zone_config.zone_id, _Flow())
+            under = [
+                room.name
+                for room in members
+                if not room.measured_at_thermostat and self.supply_of(room.entity_id).supply is Supply.UNDER
+            ]
+            may_raise: tuple[bool, str | None] | None = None
             flow.advice = None
-            if self._flow_advisor is not None:
-                advice = self._flow_advisor(zone_config.zone_id, hint)
+            if under and self._flow_advisor is not None:
+                advice = self._flow_advisor(zone_id, FlowHint.HIGHER)
                 if advice is not None:
-                    hint, flow.advice = advice
-            flow.hint = hint
-            if hint not in (FlowHint.HIGHER, FlowHint.LOWER):
-                continue
-            if flow.changed_at is not None and now - flow.changed_at < timedelta(minutes=hems.min_interval_min):
-                continue
-            step = hems.step_k if hint is FlowHint.HIGHER else -hems.step_k
-            offset = max(-zone_config.down_k, min(zone_config.up_k, flow.offset_k + step))
-            if offset == flow.offset_k:
-                continue
-            under = [room.name for room in members if supplies[room.entity_id].supply is Supply.UNDER]
-            reason = flow.advice or (
-                f"Vorlauf höher: {', '.join(under)} unterversorgt"
-                if hint is FlowHint.HIGHER
-                else "Vorlauf tiefer: alle Räume versorgt, kein Ventil weit offen"
+                    hint, text = advice
+                    may_raise = (hint is FlowHint.HIGHER, text or "erst umverteilen, dann Vorlauf")
+                    flow.advice = text
+            wide = [
+                room.name
+                for room in members
+                if (valve := hour_valve(rooms[room.entity_id], now)) is not None and valve >= 90
+            ]
+            gap, unknown = self._zone1_gap(zone_config, floor, hems.step_k)
+            decision = decide(
+                FlowInputs(
+                    now=now,
+                    offset_k=flow.offset_k,
+                    changed_at=flow.changed_at,
+                    jumped_at=flow.jumped_at,
+                    step_k=hems.step_k,
+                    down_k=zone_config.down_k,
+                    up_k=zone_config.up_k,
+                    min_interval=timedelta(minutes=hems.min_interval_min),
+                    heat_pump=heat_pump,
+                    under=under,
+                    may_raise=may_raise,
+                    wide_open=wide,
+                    bottleneck=current.name if current is not None else None,
+                    bottleneck_valve=hour_valve(rooms[current.room_id], now) if current is not None else None,
+                    zone1_gap_k=gap,
+                    zone1_unknown=unknown,
+                    floor_room_cold=floor is not None and self._floor_room_cold(floor.zone_id),
+                    hold=self._flow_hold(zone_id, now),
+                )
             )
-            flow.offset_k, flow.changed_at, flow.reason = offset, now, reason
-            if self.mode is not PlannerMode.OFF:
-                label = self._labels().get(zone_config.zone_id, zone_config.zone_id)
-                self._log.add(LogCategory.HEMS, f"{label} würde den Vorlauf ändern: {_signed(offset)} K ({reason}).")
+            flow.hint = decision.hint
+            flow.holding = None if decision.changed else decision.reason
+            if decision.changed and decision.offset_k != flow.offset_k:
+                flow.offset_k, flow.changed_at, flow.reason = decision.offset_k, now, decision.reason
+                if decision.jumped:
+                    flow.jumped_at = now
+                if self.mode is not PlannerMode.OFF:
+                    label = self._labels().get(zone_id, zone_id)
+                    would = " würde" if hems.effective(Function.FLOW) is not PlannerMode.CONTROL else ""
+                    self._log.add(
+                        LogCategory.HEMS,
+                        f"{label}{would} den Vorlauf ändern: {_signed(flow.offset_k)} K ({decision.reason}).",
+                    )
+                self._save_state()
+            await self._update_curve_advice(zone_config, members, flow, now)
+
+    def _flow_hold(self, zone_id: str, now: datetime) -> str | None:
+        """Something else holds the radiator zone's flow now (F3 heating up after the night, 1.5.0)."""
+        return None
+
+    def _power_now(self) -> float | None:
+        heat_pump = self._state.current
+        reading = heat_pump.measurements.get("power_consumption") if heat_pump is not None else None
+        return reading.value if reading is not None else None
+
+    def _zone1_gap(self, zone: ZoneConfig, floor: ZoneConfig | None, step_k: float) -> tuple[float | None, bool]:
+        """Zone 2's flow setpoint minus zone 1's after one step down, and whether zone 1's is unknown."""
+        if floor is None:
+            return None, False
+        radiators = self.sources.number(zone.flow_setpoint_entity)
+        floor_c = self.sources.number(floor.flow_setpoint_entity)
+        if radiators is None or floor_c is None:
+            return None, True
+        per_k = flow_per_k(self._models.flow_lines.get(zone.zone_id))
+        return round(radiators - step_k * per_k - floor_c, 2), False
+
+    async def _update_curve_advice(self, zone: ZoneConfig, members: list[Room], flow: _Flow, now: datetime) -> None:
+        """Once a day (and after a start): what 7 days of the flow part say about the heating curve."""
+        today = now.astimezone(self._zone).date()
+        if flow.curve_day == today:
+            return
+        flow.curve_day = today
+        zone_id = zone.zone_id
+        supply_name = f"flow:{zone_id}" if zone.flow_entity else "buffer"
+        temperature_names = [room_series(room.entity_id, "temperature") for room in members]
+        names = [
+            f"flow_offset:{zone_id}",
+            "power",
+            supply_name,
+            "outdoor",
+            f"flow_setpoint:{zone_id}",
+            f"zone_setpoint:{zone_id}",
+            f"curve:{zone_id}",
+            *temperature_names,
+        ]
+        series = await self.samples.series_async(names, now - timedelta(days=BOTTLENECK_DAYS))
+        by_time: dict[datetime, list[float]] = {}
+        for name in temperature_names:
+            for moment, value in series[name]:
+                by_time.setdefault(moment, []).append(value)
+        label = self._labels().get(zone_id, "Zone 2")
+        flow.curve = curve_advice(
+            offsets=series[f"flow_offset:{zone_id}"],
+            power=series["power"],
+            supply=series[supply_name],
+            rooms_c=sorted((moment, statistics.fmean(values)) for moment, values in by_time.items()),
+            outdoor=series["outdoor"],
+            flow_setpoint=series[f"flow_setpoint:{zone_id}"],
+            zone_setpoint=series[f"zone_setpoint:{zone_id}"],
+            curve=series[f"curve:{zone_id}"],
+            flow_per_k=flow_per_k(self._models.flow_lines.get(zone_id)),
+            label=label,
+            now=now,
+            zone=self._zone,
+        )
+        text = flow.curve.text if flow.curve is not None else None
+        if text is not None and text != flow.curve_text and self.mode is not PlannerMode.OFF:
+            assert flow.curve is not None
+            self._log.add(
+                LogCategory.HEMS,
+                f"Empfehlung: {text} (Vorlauf-Verschiebung der letzten {flow.curve.days} Tage im Mittel "
+                f"{_signed(flow.curve.mean_k)} K). Die App ändert die Heizkurve nicht.",
+            )
+        if text != flow.curve_text:
+            flow.curve_text = text
             self._save_state()
 
     def _source_changed(self, entity_id: str, state: EntityState | None) -> None:
@@ -1442,8 +1630,14 @@ class HemsService:
             members = [room for room in settings.rooms if room.zone_id == zone.zone_id and room.details.valve_entity]
             states = {room.name: self._supply.get(room.entity_id) for room in members}
             known = {name: state for name, state in states.items() if state is not None and state.valve is not None}
-            bottleneck = max(known, key=lambda name: known[name].valve or 0.0, default=None)
             flow = self._flows.get(zone.zone_id, _Flow())
+            long_term = flow.bottleneck
+            bottleneck = (
+                long_term.name
+                if long_term is not None
+                else max(known, key=lambda name: known[name].valve or 0.0, default=None)
+            )
+            now_valve = known[bottleneck].valve if bottleneck in known else None
             result.append(
                 FlowStatus(
                     zone_id=zone.zone_id,
@@ -1451,8 +1645,13 @@ class HemsService:
                     hint=flow.hint,
                     reason=flow.reason,
                     bottleneck=bottleneck,
-                    max_valve=known[bottleneck].valve if bottleneck else None,
+                    max_valve=now_valve,
                     under=sum(1 for state in states.values() if state is not None and state.supply is Supply.UNDER),
+                    bottleneck_mean=long_term.mean_valve if long_term is not None else None,
+                    bottleneck_under_share=long_term.under_share if long_term is not None else None,
+                    bottleneck_long_term=long_term is not None,
+                    holding=flow.holding,
+                    curve_advice=flow.curve_text,
                 )
             )
         return result
@@ -1500,6 +1699,8 @@ class HemsService:
                     offset_k=float(entry["offset_k"]),
                     changed_at=datetime.fromisoformat(entry["changed_at"]) if entry.get("changed_at") else None,
                     reason=entry.get("reason"),
+                    jumped_at=datetime.fromisoformat(entry["jumped_at"]) if entry.get("jumped_at") else None,
+                    curve_text=entry.get("curve_text") if isinstance(entry.get("curve_text"), str) else None,
                 )
         except FileNotFoundError:
             return
@@ -1513,6 +1714,8 @@ class HemsService:
                     "offset_k": flow.offset_k,
                     "changed_at": flow.changed_at.isoformat() if flow.changed_at else None,
                     "reason": flow.reason,
+                    "jumped_at": flow.jumped_at.isoformat() if flow.jumped_at else None,
+                    "curve_text": flow.curve_text,
                 }
                 for zone_id, flow in self._flows.items()
             }

@@ -164,7 +164,7 @@ async def rig(
             hems=HemsSettings(
                 mode=PlannerMode.CONTROL,
                 zones=(ZoneConfig(MV_ZONE_1, kind=ZoneKind.FLOOR), ZoneConfig(MV_ZONE_2, kind=ZoneKind.RADIATOR)),
-                # F2 is offered up to "Vorschau" in this version; the tests drive the quick veto through it.
+                # F2 drives the quick veto in these tests.
                 flow_mode=PlannerMode.CONTROL,
                 zone1_mode=PlannerMode.CONTROL,
             ),
@@ -267,6 +267,20 @@ async def test_changes_wait_for_the_interval_and_a_quick_veto_is_renewed_before_
         "mypyllant.set_quick_veto",
         {"entity_id": MV_ZONE_2, "temperature": 19.5, "duration_hours": 4},
     )
+
+
+async def test_up_goes_out_without_the_interval(rig: Rig) -> None:
+    # F2 (1.5.0): a room lacking heat brings the shift back at once, not after the 30 min interval.
+    rig.plan(lambda _index: -1.5)
+    await rig.executor.step()
+    await eventually(lambda: rig.zone(MV_ZONE_2).override)
+    await rig.settle()
+
+    rig.plan(lambda _index: -0.5)
+    rig.later(5)
+    await rig.executor.step()
+
+    assert rig.calls()[-1][1]["temperature"] == 20.5
 
 
 async def test_an_outside_quick_veto_gets_the_zone_a_rest(rig: Rig) -> None:
