@@ -72,7 +72,13 @@ def test_the_settings_survive_a_round_trip() -> None:
         heat_load_w=7000.0,
         zones=(
             ZoneConfig(zone_id="climate.zone_a", kind=ZoneKind.FLOOR, flow_entity="sensor.flow_a", band_up_k=1.5),
-            ZoneConfig(zone_id="climate.zone_b", kind=ZoneKind.RADIATOR, design_flow_c=50.0, design_return_c=35.0),
+            ZoneConfig(
+                zone_id="climate.zone_b",
+                kind=ZoneKind.RADIATOR,
+                design_flow_c=50.0,
+                design_return_c=35.0,
+                heating_curve_entity="sensor.circuit_1_heating_curve",
+            ),
         ),
         night_start=time(22, 0),
         night_end=time(6, 0),

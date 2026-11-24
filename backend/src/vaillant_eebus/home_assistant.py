@@ -44,7 +44,7 @@ _KIND_UNITS = {
 # Entity domains offered as they are: the weather forecast and the myVAILLANT zones and hot water.
 _KIND_DOMAINS = {"weather": "weather.", "climate": "climate.", "water_heater": "water_heater."}
 # A room's temperature: a temperature sensor or a radiator thermostat; a thermostat; the humidity.
-_KIND_SPECIAL = ("room", "thermostat", "humidity", "window")
+_KIND_SPECIAL = ("room", "thermostat", "humidity", "window", "curve")
 ENTITY_KINDS = (*_KIND_UNITS, *_KIND_DOMAINS, *_KIND_SPECIAL)
 # Window contacts (1.4.3): device classes, and names for contacts without one.
 _WINDOW_CLASSES = frozenset({"window", "door", "opening", "garage_door"})
@@ -107,9 +107,24 @@ def _is_kind(entity: EntityState, kind: str) -> bool:
         return _is_humidity(entity)
     if kind == "percent":
         return entity.attributes.get("unit_of_measurement") == "%" and not _is_humidity(entity)
+    if kind == "curve":
+        return _is_curve(entity)
     if kind == "thermostat":
         return False
     return entity.attributes.get("unit_of_measurement") in _KIND_UNITS[kind]
+
+
+def _is_curve(entity: EntityState) -> bool:
+    """A heating curve (1.5.0, F2's advice): named so, or a number without a unit between 0.05 and 4."""
+    if "heating_curve" in entity.entity_id or "heizkurve" in entity.entity_id:
+        return True
+    if entity.attributes.get("unit_of_measurement"):
+        return False
+    try:
+        value = float(entity.state)
+    except ValueError:
+        return False
+    return 0.05 <= value <= 4.0
 
 
 def _unless_own(entity_id: str | None) -> str | None:

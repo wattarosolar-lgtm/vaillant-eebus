@@ -280,6 +280,7 @@ export type EntityKind =
   | 'percent'
   | 'humidity'
   | 'window'
+  | 'curve'
   | 'room'
   | 'thermostat'
   | 'weather'
@@ -301,6 +302,8 @@ export interface ZoneConfig {
   kind: ZoneKind | null;
   flow_entity: string | null;
   flow_setpoint_entity: string | null;
+  /** The controller's heating curve, read only (1.5.0). */
+  heating_curve_entity: string | null;
   design_flow_c: number | null;
   design_return_c: number | null;
   band_down_k: number | null;
@@ -510,8 +513,19 @@ export interface FlowStatus {
   hint: FlowHint;
   reason: string | null;
   bottleneck: string | null;
+  /** The bottleneck's valve over the last half hour. */
   max_valve: number | null;
   under: number;
+  /** F2 (1.5.0): the bottleneck over 7 days (long_term false: only the snapshot). */
+  bottleneck_mean: number | null;
+  bottleneck_under_share: number | null;
+  bottleneck_long_term: boolean;
+  /** Why the flow holds now. */
+  holding: string | null;
+  /** The heating curve advice of the last 7 days. */
+  curve_advice: string | null;
+  /** "Vorlauf und Vorausschau" on Steuern. */
+  controlled: boolean;
 }
 
 export interface Change {
@@ -600,6 +614,8 @@ export interface HeatingSurface {
   rated_basis: RatedBasis;
   flow_lph: number | null;
   presetting: string;
+  /** The presetting stands at its maximum (1.5.0). */
+  presetting_max: boolean;
 }
 
 export interface ScheduleWindow {

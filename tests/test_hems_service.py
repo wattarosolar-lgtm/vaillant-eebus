@@ -602,6 +602,20 @@ async def test_the_entity_choice_offers_window_contacts(app: App) -> None:
     }
 
 
+async def test_the_entity_choice_offers_heating_curves(app: App) -> None:
+    # F2 (1.5.0): the controller's heating curve, read for the advice; myVAILLANT names it "... heating_curve".
+    app.fake.set("sensor.zuhause_circuit_1_heating_curve", "0.35")
+    app.fake.set("sensor.steilheit", "0.25")
+    app.fake.set("sensor.leistung_faktor", "12")
+    app.fake.set("sensor.vorlauf", "33.0", unit="°C")
+
+    curves = await app.http.get("/api/ha/entities", params={"kind": "curve"})
+
+    found = {item["entity_id"] for item in curves.json()}
+    assert {"sensor.zuhause_circuit_1_heating_curve", "sensor.steilheit"} <= found
+    assert not found & {"sensor.leistung_faktor", "sensor.vorlauf"}
+
+
 # --- sensors ----------------------------------------------------------------------------------
 
 

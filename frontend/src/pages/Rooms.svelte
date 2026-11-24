@@ -155,8 +155,19 @@
           {/if}
           {#if group.zone?.flow}
             <span class="hint">
-              Vorlauf (würde): {FLOW_HINT_LABELS[group.zone.flow.hint]}, Verschiebung {signed(group.zone.flow.offset_k)} K
-              {#if group.zone.flow.bottleneck}· Engpass {group.zone.flow.bottleneck} ({maybe(group.zone.flow.max_valve, 0, '%')}){/if}
+              Vorlauf{group.zone.flow.controlled ? '' : ' (würde)'}: {FLOW_HINT_LABELS[group.zone.flow.hint]}, Verschiebung
+              {signed(group.zone.flow.offset_k)} K
+              {#if group.zone.flow.bottleneck}
+                · Engpass {group.zone.flow.bottleneck}
+                {#if group.zone.flow.bottleneck_long_term}
+                  (7 Tage: Ventil im Mittel {maybe(group.zone.flow.bottleneck_mean, 0, '%')},
+                  {maybe((group.zone.flow.bottleneck_under_share ?? 0) * 100, 0, '%')} unterversorgt; jetzt
+                  {maybe(group.zone.flow.max_valve, 0, '%')})
+                {:else}
+                  ({maybe(group.zone.flow.max_valve, 0, '%')}, Momentaufnahme)
+                {/if}
+              {/if}
+              {#if group.zone.flow.holding}· hält: {group.zone.flow.holding}{/if}
             </span>
           {/if}
           {#if zoneState && view.control && view.control.mode !== 'off'}
@@ -167,8 +178,11 @@
             </span>
             {#if zoneState.flow_hint === 'higher'}
               <p class="banner warn">
-                {zoneState.flow_text ?? 'Vorlauf höher nötig'}. Die App hebt den Vorlauf erst, wenn „Vorlauf und
-                Vorausschau“ auf Steuern steht (nach Version 1.4.2); bis dahin geht es von Hand in myVAILLANT.
+                {zoneState.flow_text ?? 'Vorlauf höher nötig'}.
+                {#if !group.zone?.flow?.controlled}
+                  Die App hebt den Vorlauf, sobald „Vorlauf und Vorausschau“ auf Steuern steht (Einstellungen →
+                  Energiemanagement → Zonensteuerung); bis dahin geht es von Hand in myVAILLANT.
+                {/if}
               </p>
             {:else if zoneState.flow_text}
               <span class="hint">Vorlauf: {zoneState.flow_text}</span>

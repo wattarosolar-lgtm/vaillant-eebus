@@ -134,6 +134,7 @@
         kind: null,
         flow_entity: null,
         flow_setpoint_entity: null,
+        heating_curve_entity: null,
         design_flow_c: null,
         design_return_c: null,
         band_down_k: null,
@@ -412,6 +413,9 @@
           {@render entity('Vorlauf-Soll', 'temperature', config.flow_setpoint_entity, (value) =>
             setZone(zone.id, 'flow_setpoint_entity', value),
           )}
+          {@render entity('Heizkurve (optional, nur lesen)', 'curve', config.heating_curve_entity, (value) =>
+            setZone(zone.id, 'heating_curve_entity', value),
+          )}
         </fieldset>
       {:else}
         <p class="hint">Die Zonen lassen sich einstellen, sobald die Wärmepumpe verbunden ist.</p>
@@ -419,7 +423,8 @@
       <p class="hint">
         Die Fußbodenheizung dient als Speicher (Blockbetrieb, Zone-1-Logik), die Heizkörper-Zone bekommt den Vorlauf nach
         den Ventilstellungen. Vorgabe für das Band: Fußbodenheizung −1 … +2 K, Heizkörper −2 … +2 K. Bei myVAILLANT heißen
-        die Vorlauf-Sensoren meist „… circuit_0/1 … flow temperature“.
+        die Vorlauf-Sensoren meist „… circuit_0/1 … flow temperature“, die Heizkurve „… circuit_0/1 heating curve“ (für
+        die Empfehlung der Heizkurve; die App ändert sie nie).
       </p>
     </section>
 

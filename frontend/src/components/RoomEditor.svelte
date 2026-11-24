@@ -73,7 +73,7 @@
   }
 
   function addSurface(): void {
-    const surface: HeatingSurface = { kind: 'radiator', rated_w: null, rated_basis: '75/65', flow_lph: null, presetting: '' };
+    const surface: HeatingSurface = { kind: 'radiator', rated_w: null, rated_basis: '75/65', flow_lph: null, presetting: '', presetting_max: false };
     draft.surfaces = [...draft.surfaces, surface];
   }
 
@@ -349,6 +349,10 @@
           <label class="field">
             <span class="field-label">Voreinstellung</span>
             <input type="text" maxlength="20" bind:value={surface.presetting} />
+          </label>
+          <label class="check">
+            <input type="checkbox" bind:checked={surface.presetting_max} />
+            <span>Voreinstellung am Maximum (ganz offen)</span>
           </label>
         </div>
         <div>

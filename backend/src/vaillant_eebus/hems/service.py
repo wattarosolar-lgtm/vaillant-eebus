@@ -192,6 +192,8 @@ class FlowStatus:
     bottleneck_long_term: bool = False
     holding: str | None = None
     curve_advice: str | None = None
+    # "Vorlauf und Vorausschau" works on "Steuern" (else the shift is "würde").
+    controlled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1652,6 +1654,7 @@ class HemsService:
                     bottleneck_long_term=long_term is not None,
                     holding=flow.holding,
                     curve_advice=flow.curve_text,
+                    controlled=settings.hems.effective(Function.FLOW) is PlannerMode.CONTROL,
                 )
             )
         return result

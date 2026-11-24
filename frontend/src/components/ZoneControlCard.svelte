@@ -22,7 +22,9 @@
       'mit einem zu kalten Raum, Aus frühestens 5 min nach dem letzten Auto.',
     flow:
       'Quick-Veto der Zonen nach Ventilen und Wetterprognose: Programmwert ± Verschiebung bis zur nächsten geplanten ' +
-      'Änderung (1–4 h). „Steuern“ kommt nach Version 1.4.2 (Thermostat lernt).',
+      'Änderung (1–4 h). Vorlauf der Heizkörper-Zone nach dem Engpassraum: höher sofort, wenn ein Raum zu kalt ' +
+      'bleibt (erst umverteilen), tiefer höchstens alle 2 h um 0,5 K, solange das Ventil des Engpassraums zwischen ' +
+      '10 und 70 % steht.',
   };
   const ACTIONS_SHOWN = 10;
 
@@ -169,6 +171,17 @@
         {/each}
       </dl>
     {/if}
+    {#each status.flow as flow (flow.zone_id)}
+      <p class="hint">
+        Vorlauf {status.labels[flow.zone_id] ?? flow.zone_id}{flow.controlled ? '' : ' (würde)'}: Verschiebung
+        {signed(flow.offset_k)} K{flow.reason && flow.offset_k !== 0 ? ` (${flow.reason})` : ''}{flow.holding
+          ? ` · hält: ${flow.holding}`
+          : ''}
+      </p>
+      {#if flow.curve_advice}
+        <p class="hint advice">Empfehlung: {flow.curve_advice}. Die App ändert die Heizkurve nicht.</p>
+      {/if}
+    {/each}
     {#if control.actions.length > 0}
       <details>
         <summary>Letzte Befehle ({control.actions.length})</summary>

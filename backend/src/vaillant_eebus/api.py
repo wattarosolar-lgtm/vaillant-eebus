@@ -811,6 +811,7 @@ def create_app(
             "percent",
             "humidity",
             "window",
+            "curve",
             "room",
             "thermostat",
             "weather",
