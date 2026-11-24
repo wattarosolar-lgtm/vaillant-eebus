@@ -1369,6 +1369,7 @@ class HemsService:
         if zone.kind is ZoneKind.FLOOR:
             # Zone 1 lower only while the frost protection keeps it on (then F1 does not switch it).
             state.shift_k = -min(ZONE1_K, zone.down_k) if self._frost.active else 0.0
+            state.note = None if self._frost.active else "Fußbodenheizung nur mit Frostschutz tiefer"
             return
         await self._night_reduce(zone, floor, state, label, now)
 

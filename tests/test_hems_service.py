@@ -520,7 +520,8 @@ async def test_a_cold_morning_goes_down_to_the_minimum_power_step_by_step(app: A
     flow = app.hems.status().flow[0]
     assert (flow.offset_k, flow.holding) == (0.0, "Nachtabsenkung läuft")
     # Zone 1 only with the frost protection.
-    assert night_of(app, MV_ZONE_1).shift_k == 0.0
+    zone1 = night_of(app, MV_ZONE_1)
+    assert zone1.shift_k == 0.0 and zone1.text == "Minimalleistung · Fußbodenheizung nur mit Frostschutz tiefer"
     await app.hems.plan_now()
     assert app.hems.plan is not None
     assert app.hems.plan.hours[0].zones[1].parts.get(Part.NIGHT) == -1.0
