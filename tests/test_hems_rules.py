@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from vaillant_eebus.hems.config import HemsSettings, ZoneConfig, ZoneKind
 from vaillant_eebus.hems.defrost import RiskHour, RiskLevel
 from vaillant_eebus.hems.forecast import WeatherHour
-from vaillant_eebus.hems.rules import Plan, PlanHour, PlanInputs, RoomInput, ZoneInput, make_plan
+from vaillant_eebus.hems.rules import Part, Plan, PlanHour, PlanInputs, RoomInput, ZoneInput, make_plan
 from vaillant_eebus.room_data import RoomDetails
 
 LOCAL = timezone(timedelta(hours=1), "CET")
@@ -84,54 +84,106 @@ def test_the_plan_covers_48_hours_from_the_current_one() -> None:
     assert result.hours[0].start == NOW
 
 
-def test_the_night_setback_lowers_zones_and_rooms_by_their_allowed_loss() -> None:
+def off(hour: PlanHour, zone: ZoneInput) -> bool:
+    return next(entry.off for entry in hour.zones if entry.zone_id == zone.zone_id)
+
+
+def night_part(hour: PlanHour, zone: ZoneInput) -> float:
+    return next(entry.parts.get(Part.NIGHT, 0.0) for entry in hour.zones if entry.zone_id == zone.zone_id)
+
+
+def _hours_from(start: datetime, moment: datetime) -> timedelta:
+    return timedelta(hours=int((moment - start).total_seconds() // 3600))
+
+
+def test_a_mild_morning_switches_the_zones_off_from_5_30_to_10() -> None:
+    # F3 (user, 24.11.2026): mean of the forecast over 5:30-10:00 above 3 °C: off; the rooms keep their setpoints.
     result = plan(weather(5.0))
-    night = at(result, 3)
 
-    assert shift(night, RADIATORS) == -0.5
-    assert room(night, ROOM_A) == 19.5
-    # Room B may lose 1 K; its zone the smallest loss of its rooms.
-    assert room(night, ROOM_B) == 19.0
-    assert "Nachtabsenkung" in night.reasons
-    assert shift(at(result, 12), RADIATORS) == 0.0
-    assert room(at(result, 12), ROOM_A) == 20.0
+    assert [off(at(result, hour), RADIATORS) for hour in (4, 5, 9, 10)] == [False, True, True, False]
+    assert off(at(result, 7), FLOOR)
+    assert "Nachtabsenkung: Abschalten (Prognose im Mittel 5 °C)" in at(result, 6).reasons
+    assert room(at(result, 7), ROOM_A) == 20.0
+    assert night_part(at(result, 3), RADIATORS) == 0.0
 
 
-def test_the_zones_heat_up_again_early_enough() -> None:
-    result = plan(weather(5.0))
+def test_a_cold_morning_goes_down_to_the_minimum_power() -> None:
+    result = plan(weather(-2.0))
 
-    # Radiators: 0.5 K at 1 K/h -> up again one hour before 10:00.
-    assert shift(at(result, 8), RADIATORS) == -0.5
-    assert shift(at(result, 9), RADIATORS) == 0.0
-    assert room(at(result, 9), ROOM_A) == 20.0
-    # Floor heating: 0.5 K at 0.25 K/h -> two hours before.
-    assert shift(at(result, 7), FLOOR) == -0.5
-    assert shift(at(result, 8), FLOOR) == 0.0
-
-
-def test_no_setback_when_reheating_would_meet_a_defrost_risk() -> None:
-    hours = weather(1.0, humidity=95.0)
-    risks = {
-        hour.start: RiskHour(hour.start, 0.45, RiskLevel.MEDIUM)
-        for hour in hours
-        if 7 <= hour.start.astimezone(LOCAL).hour < 10
-    }
-
-    night = at(plan(hours, risks=risks), 3)
-
-    assert shift(night, RADIATORS) == 0.0
-    assert room(night, ROOM_A) == 20.0
-    assert "Nachtabsenkung ausgesetzt: Abtaurisiko beim Wiederaufheizen" in night.reasons
+    morning = at(result, 6)
+    assert not off(morning, RADIATORS)
+    # Zone 2 starts at -1 K (learned later); zone 1 only with the frost protection.
+    assert night_part(morning, RADIATORS) == -1.0
+    assert night_part(morning, FLOOR) == 0.0
+    assert any(reason.startswith("Nachtabsenkung auf Minimalleistung") for reason in morning.reasons)
 
 
-def test_a_humid_room_keeps_its_temperature_at_night() -> None:
-    humid = replace(ROOM_A, humidity=70.0)
+def test_the_frost_protection_rules_out_switching_off() -> None:
+    hours = weather(3.5)
+    frost = frozenset(hour.start for hour in hours)
 
-    night = at(plan(weather(5.0), rooms=(humid, ROOM_B)), 3)
+    morning = at(plan(hours, frost=frost), 7)
 
-    assert room(night, humid) == 20.0
-    assert room(night, ROOM_B) == 19.0
-    assert any("Feuchteschutz: Raum A" in reason for reason in night.reasons)
+    assert not off(morning, RADIATORS)
+    assert night_part(morning, RADIATORS) == -1.0
+    assert night_part(morning, FLOOR) == -1.0
+    assert any("Frostschutz" in reason for reason in morning.reasons)
+
+
+def test_in_the_window_the_live_state_counts() -> None:
+    # 5:45 local: the night control holds zone 2 at -1.5 K, zone 1 is not lowered.
+    now = datetime(2026, 11, 21, 5, 45, tzinfo=LOCAL).astimezone(UTC)
+    live = replace(RADIATORS, night_active=True, night_shift_k=-1.5)
+    result = make_plan(
+        PlanInputs(
+            now=now,
+            zone=LOCAL,
+            settings=HemsSettings(),
+            weather=[replace(hour, start=hour.start + _hours_from(NOW, now)) for hour in weather(-2.0)],
+            risks={},
+            frost=frozenset(),
+            demand={},
+            zones=(FLOOR, live),
+            rooms=(ROOM_A,),
+        )
+    )
+
+    assert result.hours[0].start == datetime(2026, 11, 21, 5, 0, tzinfo=LOCAL)
+    assert night_part(result.hours[0], live) == -1.5
+    assert night_part(result.hours[3], live) == -1.5
+    assert shift(result.hours[0], live) == -1.5
+    assert night_part(result.hours[5], live) == 0.0
+
+
+def test_the_hour_before_the_window_starts_has_nothing_yet() -> None:
+    # 5:10 local, the window opens at 5:30: the executor must not send from the hour's plan.
+    now = datetime(2026, 11, 21, 5, 10, tzinfo=LOCAL).astimezone(UTC)
+    result = make_plan(
+        PlanInputs(
+            now=now,
+            zone=LOCAL,
+            settings=HemsSettings(),
+            weather=[replace(hour, start=hour.start + _hours_from(NOW, now)) for hour in weather(-2.0)],
+            risks={},
+            frost=frozenset(),
+            demand={},
+            zones=(FLOOR, RADIATORS),
+            rooms=(ROOM_A,),
+        )
+    )
+
+    assert night_part(result.hours[0], RADIATORS) == 0.0
+    assert not off(result.hours[0], RADIATORS)
+
+
+def test_a_blocked_zone_gets_no_night() -> None:
+    blocked = replace(RADIATORS, night_block="Feuchteschutz: Raum A")
+
+    morning = at(plan(weather(5.0), zones=(FLOOR, blocked)), 7)
+
+    assert not off(morning, blocked)
+    assert off(morning, FLOOR)
+    assert "Zone 2 ohne Nachtabsenkung: Feuchteschutz: Raum A" in morning.reasons
 
 
 def test_risky_hours_get_less_load_and_the_floor_stores_before() -> None:
@@ -203,8 +255,8 @@ def test_the_expected_flow_follows_the_learned_line_and_the_shift() -> None:
     assert result.hours[3].zones[1].flow_c is None
 
 
-def test_without_zones_the_rooms_follow_the_night_window() -> None:
+def test_without_zones_the_rooms_keep_their_setpoints_at_night() -> None:
     result = plan(weather(5.0), zones=())
 
-    assert room(at(result, 3), ROOM_B) == 19.0
-    assert at(result, 3).zones == []
+    assert room(at(result, 7), ROOM_B) == 20.0
+    assert at(result, 7).zones == []

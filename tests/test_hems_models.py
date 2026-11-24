@@ -107,10 +107,21 @@ def test_invalid_values_fall_back_one_by_one() -> None:
     assert settings.mode is PlannerMode.PREVIEW
     assert settings.weather_source is WeatherSource.OPEN_METEO
     assert settings.heat_heating_entity is None
-    assert settings.night_start == time(0, 0)
+    # The window of 1.3/1.4 (0-10 Uhr) becomes F3's 5:30-10:00 (user, 24.11.2026); an invalid time the default.
+    assert settings.night_start == time(5, 30)
     assert settings.night_loss_k == 0.5
     assert settings.step_k == 0.5
     assert settings.zones == (ZoneConfig(zone_id="climate.zone_a", kind=ZoneKind.FLOOR),)
+
+
+def test_the_old_night_window_becomes_the_morning_window_once() -> None:
+    old = hems_from_json({"night_start": "00:00", "night_end": "10:00"})
+    chosen = hems_from_json({"night_start": "00:00", "night_end": "10:00", "night_mode": "preview"})
+    own = hems_from_json({"night_start": "04:00", "night_end": "09:00"})
+
+    assert (old.night_start, old.night_end) == (time(5, 30), time(10, 0))
+    assert chosen.night_start == time(0, 0)
+    assert (own.night_start, own.night_end) == (time(4, 0), time(9, 0))
 
 
 def test_zone_bands_and_delays_follow_the_kind() -> None:

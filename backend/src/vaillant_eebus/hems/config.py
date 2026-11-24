@@ -58,13 +58,18 @@ class Function(StrEnum):
     ZONE1 = "zone1"
     # F2: the zone setpoint after the valves and the forecast (quick veto).
     FLOW = "flow"
+    # F3: the night setback (zones off, or down to the minimum power; hems/night.py).
+    NIGHT = "night"
 
 
 # Stages each function offers in this version.
 FUNCTION_MODES: dict[Function, frozenset[PlannerMode]] = {
     Function.ZONE1: AVAILABLE_MODES,
     Function.FLOW: AVAILABLE_MODES,
+    Function.NIGHT: AVAILABLE_MODES,
 }
+# The night window before 1.5.0 (a setback over the whole night); F3 works 5:30-10:00 (user, 24.11.2026).
+OLD_NIGHT = (time(0, 0), time(10, 0))
 
 
 def lower(first: PlannerMode, second: PlannerMode) -> PlannerMode:
@@ -139,8 +144,8 @@ class HemsSettings:
     # Quick veto limits, used from 1.4.0: step and the least time between two changes.
     step_k: float = 0.5
     min_interval_min: int = 30
-    # Night setback: local window and the default allowed temperature loss of a room.
-    night_start: time = time(0, 0)
+    # Night setback (F3): local window and the default allowed temperature loss of a room (when switched off).
+    night_start: time = time(5, 30)
     night_end: time = time(10, 0)
     night_loss_k: float = 0.5
     # Loss allowed when it avoids defrosts (pausing in risk hours).
@@ -158,6 +163,7 @@ class HemsSettings:
     # Stages of the functions; what counts is the smaller of these and mode.
     zone1_mode: PlannerMode = PlannerMode.PREVIEW
     flow_mode: PlannerMode = PlannerMode.PREVIEW
+    night_mode: PlannerMode = PlannerMode.PREVIEW
 
     def zone(self, zone_id: str) -> ZoneConfig:
         return next((zone for zone in self.zones if zone.zone_id == zone_id), ZoneConfig(zone_id=zone_id))
@@ -170,7 +176,9 @@ class HemsSettings:
         return frozenset(entity for entity in chosen if entity)
 
     def function_mode(self, function: Function) -> PlannerMode:
-        return self.zone1_mode if function is Function.ZONE1 else self.flow_mode
+        if function is Function.ZONE1:
+            return self.zone1_mode
+        return self.flow_mode if function is Function.FLOW else self.night_mode
 
     def effective(self, function: Function) -> PlannerMode:
         """The stage a function works in: the smaller of its own and the energy management's."""
@@ -179,7 +187,9 @@ class HemsSettings:
     def with_function(self, function: Function, mode: PlannerMode) -> HemsSettings:
         if function is Function.ZONE1:
             return replace(self, zone1_mode=mode)
-        return replace(self, flow_mode=mode)
+        if function is Function.FLOW:
+            return replace(self, flow_mode=mode)
+        return replace(self, night_mode=mode)
 
 
 def hems_from_json(raw: Any) -> HemsSettings:
@@ -195,6 +205,11 @@ def hems_from_json(raw: Any) -> HemsSettings:
         _LOGGER.warning("Settings: planner stage control from an older version, using preview")
         mode = PlannerMode.PREVIEW
     weather_source = raw.get("weather_source")
+    night_start = _time(raw, "night_start", defaults.night_start)
+    night_end = _time(raw, "night_end", defaults.night_end)
+    if "night_mode" not in raw and (night_start, night_end) == OLD_NIGHT:
+        # The default window of 1.3/1.4 (0-10 Uhr): F3 works only 5:30-10:00 (user, 24.11.2026).
+        night_start, night_end = defaults.night_start, defaults.night_end
     return HemsSettings(
         mode=mode,
         weather_source=(
@@ -213,8 +228,8 @@ def hems_from_json(raw: Any) -> HemsSettings:
         zones=_zones(raw.get("zones")),
         step_k=_value(raw, "step_k", STEP_K, defaults.step_k, step=0.5),
         min_interval_min=int(_value(raw, "min_interval_min", INTERVAL_MIN, defaults.min_interval_min, step=1)),
-        night_start=_time(raw, "night_start", defaults.night_start),
-        night_end=_time(raw, "night_end", defaults.night_end),
+        night_start=night_start,
+        night_end=night_end,
         night_loss_k=_value(raw, "night_loss_k", LOSS_K, defaults.night_loss_k, step=0.1),
         defrost_loss_k=_value(raw, "defrost_loss_k", LOSS_K, defaults.defrost_loss_k, step=0.1),
         target_starts=int(_value(raw, "target_starts", TARGET_STARTS, defaults.target_starts, step=1)),
@@ -224,6 +239,7 @@ def hems_from_json(raw: Any) -> HemsSettings:
         zone1_threshold_w=_value(raw, "zone1_threshold_w", ZONE1_THRESHOLD_W, defaults.zone1_threshold_w),
         zone1_mode=_function_mode(raw, Function.ZONE1, defaults.zone1_mode),
         flow_mode=_function_mode(raw, Function.FLOW, defaults.flow_mode),
+        night_mode=_function_mode(raw, Function.NIGHT, defaults.night_mode),
     )
 
 
@@ -253,6 +269,7 @@ def hems_to_json(settings: HemsSettings) -> dict[str, Any]:
         "zone1_threshold_w": settings.zone1_threshold_w,
         "zone1_mode": settings.zone1_mode.value,
         "flow_mode": settings.flow_mode.value,
+        "night_mode": settings.night_mode.value,
     }
 
 

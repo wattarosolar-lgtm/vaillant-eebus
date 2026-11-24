@@ -69,6 +69,29 @@ from vaillant_eebus.hems.house_model import (
     start_model,
     zone_shares,
 )
+from vaillant_eebus.hems.night import (
+    MODE_NAMES as NIGHT_MODE_NAMES,
+)
+from vaillant_eebus.hems.night import (
+    START_K,
+    STEP_K,
+    ZONE1_K,
+    BandMinimum,
+    NightMode,
+    ReduceInputs,
+    RoomNow,
+    at_minimum,
+    hot_water,
+    humid,
+    minimum_by_band,
+    minimum_phases,
+    next_start,
+    off_end,
+    off_start,
+    plan_window,
+    reduce_step,
+    window_at,
+)
 from vaillant_eebus.hems.room_model import (
     FlowHint,
     RoomModel,
@@ -116,6 +139,8 @@ BACKFILL = timedelta(days=10)
 ZONE1_OFF_AFTER = timedelta(seconds=60)
 # F2 (1.5.0): the bottleneck over 7 days is computed hourly; the decision looks at the last 4 hours of samples.
 BOTTLENECK_EVERY = timedelta(hours=1)
+# F3: after the night window F2 holds while the rooms heat up again, at most this long.
+REHEAT_HOLD = timedelta(hours=3)
 FLOW_RECENT = timedelta(hours=4)
 FLOW_ROOM_VALUES = ("temperature", "valve", "setpoint", "window", "testing")
 ZONE1_CHECK_AFTER = timedelta(minutes=2)
@@ -146,7 +171,11 @@ class ModeNotAvailable(Exception):
     """The stage comes with a later version."""
 
 
-FUNCTION_NAMES = {Function.ZONE1: "Zone 1 Aus/Auto", Function.FLOW: "Vorlauf und Vorausschau"}
+FUNCTION_NAMES = {
+    Function.ZONE1: "Zone 1 Aus/Auto",
+    Function.FLOW: "Vorlauf und Vorausschau",
+    Function.NIGHT: "Nachtabsenkung",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +226,25 @@ class FlowStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class NightStatus:
+    zone_id: str
+    label: str
+    # In the night window now (and not blocked).
+    active: bool
+    mode: NightMode | None
+    mean_c: float | None
+    shift_k: float
+    off: bool
+    off_since: datetime | None
+    # What it does or waits for, German.
+    text: str
+    # The shift a radiator zone starts with next time, K.
+    start_k: float
+    # "Nachtabsenkung" works on "Steuern" (else "würde").
+    controlled: bool
+
+
+@dataclass(frozen=True, slots=True)
 class Zone1Status:
     zone_id: str
     # What the app would do now: "off" or "auto"; None without power.
@@ -238,6 +286,9 @@ class HemsStatus:
     functions: list[FunctionStatus]
     # The zone executor's state (1.5.0); None without one.
     control: Any = None
+    # F3 (1.5.0): the night setback per zone and the heat pump's minimum power per outdoor band.
+    night: list[NightStatus] = field(default_factory=list)
+    minimum: list[BandMinimum] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +397,27 @@ class _Zone1:
     check_at: datetime | None = None
 
 
+def _night_text(state: _NightZone) -> str:
+    if not state.active:
+        return "außerhalb des Nachtfensters"
+    if state.blocked is not None:
+        return f"keine Nachtabsenkung: {state.blocked}"
+    if state.off:
+        return f"aus seit {state.off_since:%H:%M} Uhr" if state.off_since else "aus"
+    parts = [NIGHT_MODE_NAMES[state.mode] if state.mode else "Nacht"]
+    if state.waiting:
+        parts.append(state.waiting)
+    if state.off_done:
+        parts.append(f"kein Abschalten: {state.off_done}")
+    if state.shift_k:
+        parts.append(f"{_signed(state.shift_k)} K")
+    if state.held:
+        parts.append(state.held)
+    elif state.note:
+        parts.append(state.note)
+    return " · ".join(parts)
+
+
 def _room_samples(room: Room, series: Mapping[str, list[tuple[datetime, float]]]) -> RoomSamples:
     def named(value: str) -> list[tuple[datetime, float]]:
         return series.get(room_series(room.entity_id, value), [])
@@ -379,6 +451,33 @@ class _Flow:
     curve: CurveAdvice | None = None
     curve_day: date | None = None
     curve_text: str | None = None
+
+
+@dataclass
+class _NightZone:
+    """F3's live state of one zone (hems/night.py)."""
+
+    # The window's local date and what it does (from the forecast at its start).
+    day: date | None = None
+    mode: NightMode | None = None
+    mean_c: float | None = None
+    active: bool = False
+    shift_k: float = 0.0
+    stepped_at: datetime | None = None
+    # Holding for the rest of the window (minimum reached, band used up ...) and at which shift.
+    held: str | None = None
+    held_shift_k: float | None = None
+    stopped_at_k: float | None = None
+    note: str | None = None
+    off: bool = False
+    off_since: datetime | None = None
+    # Switching off given up or ended early: minimum power for the rest of the window.
+    off_done: str | None = None
+    waiting: str | None = None
+    blocked: str | None = None
+    ended_at: datetime | None = None
+    # The shift a radiator zone starts with (K > 0), learned from the last windows.
+    start_k: float = START_K
 
 
 @dataclass
@@ -429,6 +528,9 @@ class HemsService:
         self._window_listeners: list[Callable[[str], None]] = []
         self._window_guard: Callable[[str], bool] | None = None
         self._testing_guard: Callable[[str], bool] | None = None
+        self._night_guard: Callable[[str], str | None] | None = None
+        self._nights: dict[str, _NightZone] = {}
+        self._minimum: list[BandMinimum] = []
         self._supply: dict[str, SupplyState] = {}
         self._zone1 = _Zone1()
         self._flows: dict[str, _Flow] = {}
@@ -496,6 +598,10 @@ class HemsService:
         after a command or the valve closing it falls by itself)."""
         self._window_guard = guard
 
+    def set_night_guard(self, guard: Callable[[str], str | None]) -> None:
+        """The room control's word why a zone gets no night setback now (a test run armed or running in it)."""
+        self._night_guard = guard
+
     def set_testing_guard(self, guard: Callable[[str], bool]) -> None:
         """The room control's word whether a test run or sweep has a room's thermostat now (F2 leaves it out)."""
         self._testing_guard = guard
@@ -561,7 +667,13 @@ class HemsService:
     def change_settings(self, hems: HemsSettings) -> HemsSettings:
         """Save the user's settings (the stage stays) and plan again at once."""
         before = self._settings.current.hems
-        hems = replace(hems, mode=before.mode, zone1_mode=before.zone1_mode, flow_mode=before.flow_mode)
+        hems = replace(
+            hems,
+            mode=before.mode,
+            zone1_mode=before.zone1_mode,
+            flow_mode=before.flow_mode,
+            night_mode=before.night_mode,
+        )
         if hems == before:
             return hems
         self._settings.update(lambda settings: replace(settings, hems=hems))
@@ -629,6 +741,8 @@ class HemsService:
                 for function in Function
             ],
             control=self._control_status() if self._control_status is not None else None,
+            night=self._night_status(),
+            minimum=list(self._minimum),
         )
 
     def plan_view(self) -> PlanView:
@@ -886,7 +1000,8 @@ class HemsService:
         self._zone1_logic(heat_pump if reachable else None, power.value if power is not None else None, now)
         if self._detected_at is None or now - self._detected_at >= DETECT_EVERY:
             self._detected_at = now
-            for item in self.cycles.update():
+            found = self.cycles.update()
+            for item in found:
                 if self.mode is not PlannerMode.OFF:
                     local = item.at.astimezone(self._zone)
                     outside = f", außen {_number(item.outdoor_c)} °C" if item.outdoor_c is not None else ""
@@ -894,6 +1009,9 @@ class HemsService:
                         LogCategory.HEMS,
                         f"Abtauung erkannt: {local:%H:%M} Uhr, {_number(item.minutes)} min{outside}.",
                     )
+            if found and any(state.waiting for state in self._nights.values()):
+                # Right after a defrost the zones may go off (F3).
+                self._night_after_defrost(now)
 
     def _zone1_logic(self, heat_pump: HeatPumpState | None, watts: float | None, now: datetime) -> None:
         """The user's automation as "würde": floor heating off while the heat pump stands still."""
@@ -945,7 +1063,12 @@ class HemsService:
         heat_pump = self._state.current
         values: dict[str, float] = {}
         if heat_pump is not None and heat_pump.available and heat_pump.connected:
-            for key, series in (("outdoor_temperature", "outdoor"), ("power_consumption", "power")):
+            for key, series in (
+                ("outdoor_temperature", "outdoor"),
+                ("power_consumption", "power"),
+                # The cylinder: a charge says nothing about the minimum power (F3).
+                ("dhw_temperature", "dhw"),
+            ):
                 reading = heat_pump.measurements.get(key)
                 if reading is not None:
                     values[series] = reading.value
@@ -1007,6 +1130,10 @@ class HemsService:
             await self._update_flow(now)
         except Exception:
             _LOGGER.exception("The flow of the radiator zone failed")
+        try:
+            await self._update_night(now)
+        except Exception:
+            _LOGGER.exception("The night setback failed")
 
     async def _update_supply(self, now: datetime) -> dict[str, list[tuple[datetime, float]]]:
         settings = self._settings.current
@@ -1132,11 +1259,266 @@ class HemsService:
                         f"{label}{would} den Vorlauf ändern: {_signed(flow.offset_k)} K ({decision.reason}).",
                     )
                 self._save_state()
+                # The executor sends what the plan says: plan again at once (up goes out without waiting).
+                self.wake()
             await self._update_curve_advice(zone_config, members, flow, now)
 
     def _flow_hold(self, zone_id: str, now: datetime) -> str | None:
-        """Something else holds the radiator zone's flow now (F3 heating up after the night, 1.5.0)."""
+        """Something else holds the radiator zone's flow now: the night setback, and heating up after it until the
+        rooms are back (0.2 K) or 3 h are over (F3)."""
+        state = self._nights.get(zone_id)
+        if state is None:
+            return None
+        if state.active and state.blocked is None:
+            return "Nachtabsenkung läuft"
+        if state.ended_at is not None and now - state.ended_at < REHEAT_HOLD:
+            local = now.astimezone(self._zone).time()
+            for room in self._settings.current.rooms:
+                temperature = room_celsius(self.sources.get(room.entity_id))
+                if (
+                    room.zone_id == zone_id
+                    and temperature is not None
+                    and temperature < room.details.setpoint_at(local) - 0.2
+                ):
+                    return "Aufwärmen nach der Nacht"
         return None
+
+    async def _update_night(self, now: datetime) -> None:
+        """F3 (hems/night.py): in the night window switch the zones off or go down to the minimum power."""
+        settings = self._settings.current
+        hems = settings.hems
+        stage = hems.effective(Function.NIGHT)
+        bounds = window_at(now, hems.night_start, hems.night_end, self._zone)
+        floor = next((zone for zone in hems.zones if zone.kind is ZoneKind.FLOOR), None)
+        changed = False
+        for zone_config in hems.zones:
+            if zone_config.kind is None:
+                continue
+            state = self._nights.setdefault(zone_config.zone_id, _NightZone())
+            before = (state.active, state.shift_k, state.off, state.blocked)
+            if stage is PlannerMode.OFF or bounds is None:
+                if state.active or state.off:
+                    self._end_night(zone_config, state, now)
+            else:
+                await self._night_zone(zone_config, floor, state, bounds, now)
+            # A new window replaces the zone's state object.
+            state = self._nights[zone_config.zone_id]
+            changed = changed or before != (state.active, state.shift_k, state.off, state.blocked)
+        if changed:
+            self._save_state()
+            # The executor sends what the plan says for the hour now: plan again at once.
+            self.wake()
+
+    async def _night_zone(
+        self,
+        zone: ZoneConfig,
+        floor: ZoneConfig | None,
+        state: _NightZone,
+        bounds: tuple[datetime, datetime],
+        now: datetime,
+    ) -> None:
+        settings = self._settings.current
+        label = self._labels().get(zone.zone_id, zone.zone_id)
+        day = bounds[0].date()
+        if state.day != day:
+            forecast = self.forecast.current
+            weather = {hour.start: hour for hour in forecast.hours} if forecast is not None else {}
+            frost = frozenset(frost_hours(list(weather.values()), self._frost))
+            window = plan_window(bounds, weather, frost)
+            start_k = state.start_k
+            self._nights[zone.zone_id] = state = _NightZone(
+                day=day, mode=window.mode, mean_c=window.mean_c, active=True, start_k=start_k
+            )
+            if zone.kind is ZoneKind.RADIATOR:
+                state.shift_k, state.stepped_at = -min(start_k, zone.down_k), now
+            self._night_log(
+                f"{label}: {window.reason()}, {bounds[0]:%H:%M} bis {bounds[1]:%H:%M} Uhr"
+                + (f", Start {_signed(state.shift_k)} K" if state.shift_k else "")
+                + "."
+            )
+        local = now.astimezone(self._zone).time()
+        rooms = [
+            RoomNow(
+                name=room.name,
+                temperature_c=room_celsius(self.sources.get(room.entity_id)),
+                setpoint_c=room.details.setpoint_at(local),
+                loss_k=room.details.night_loss_k
+                if room.details.night_loss_k is not None
+                else settings.hems.night_loss_k,
+                humidity=self.sources.number(room.details.humidity_entity),
+            )
+            for room in settings.rooms
+            if room.zone_id == zone.zone_id
+        ]
+        guard = self._night_guard(zone.zone_id) if self._night_guard is not None else None
+        blocked = humid(rooms) or guard
+        if blocked != state.blocked and blocked is not None:
+            self._night_log(f"{label} ohne Nachtabsenkung: {blocked}.")
+        state.blocked = blocked
+        if blocked is not None:
+            state.off, state.shift_k = False, 0.0
+            return
+        if state.mode is NightMode.OFF and state.off_done is None:
+            self._night_off(label, state, rooms, now)
+        if state.off:
+            state.shift_k = 0.0
+            return
+        if zone.kind is ZoneKind.FLOOR:
+            # Zone 1 lower only while the frost protection keeps it on (then F1 does not switch it).
+            state.shift_k = -min(ZONE1_K, zone.down_k) if self._frost.active else 0.0
+            return
+        await self._night_reduce(zone, floor, state, label, now)
+
+    def _night_off(self, label: str, state: _NightZone, rooms: list[RoomNow], now: datetime) -> None:
+        if state.off:
+            why = off_end(rooms, self._frost.active)
+            if why is not None:
+                state.off, state.off_done = False, why
+                self._night_log(f"{label} wieder auf Auto ({why}); bis zum Ende Minimalleistung.")
+            return
+        if self._frost.active:
+            state.off_done, state.waiting = "Frostschutz der Anlage aktiv", None
+            self._night_log(f"{label}: kein Abschalten, der Frostschutz ist aktiv; Minimalleistung.")
+            return
+        start = off_start(now, icing=self._icing(now), last_defrost_end=self._last_defrost_end(), zone=self._zone)
+        if start.off:
+            state.off, state.off_since, state.waiting = True, now, None
+            after = " direkt nach der Abtauung" if self._icing(now) else ""
+            self._night_log(f"{label} aus{after}.")
+        elif start.give_up:
+            state.off_done, state.waiting = "keine Abtauung bis 7:00 Uhr", None
+            self._night_log(f"{label}: keine Abtauung bis 7:00 Uhr, kein Abschalten; Minimalleistung.")
+        else:
+            state.waiting = start.waiting
+
+    def _night_after_defrost(self, now: datetime) -> None:
+        """A defrost just ended: zones waiting for it go off now."""
+        for zone_id, state in self._nights.items():
+            if state.waiting is None or state.off or state.off_done is not None:
+                continue
+            start = off_start(now, icing=True, last_defrost_end=self._last_defrost_end(), zone=self._zone)
+            if start.off:
+                state.off, state.off_since, state.waiting, state.shift_k = True, now, None, 0.0
+                self._night_log(f"{self._labels().get(zone_id, zone_id)} aus direkt nach der Abtauung.")
+                self._save_state()
+                self.wake()
+
+    async def _night_reduce(
+        self, zone: ZoneConfig, floor: ZoneConfig | None, state: _NightZone, label: str, now: datetime
+    ) -> None:
+        """Zone 2 down to the minimum power: step by step until the buffer rises above the flow setpoint."""
+        hems = self._settings.current.hems
+        targets = [entity for item in hems.zones if (entity := item.flow_setpoint_entity)]
+        names = ["power", "buffer", "dhw", *[f"flow_setpoint:{item.zone_id}" for item in hems.zones]]
+        recent = await self.samples.series_async(names, now - timedelta(minutes=45))
+        target: dict[datetime, float] = {}
+        for item in hems.zones:
+            for moment, value in recent.get(f"flow_setpoint:{item.zone_id}", []):
+                target[moment] = max(value, target.get(moment, value))
+        defrosts = [item.at for item in self.cycles.defrosts]
+        newest = max((moment for moment, _ in recent["power"]), default=None)
+        minimum = (
+            newest is not None
+            and bool(targets)
+            and hems.buffer_entity is not None
+            and at_minimum(dict(recent["power"]), dict(recent["buffer"]), target, recent["dhw"], defrosts, newest)
+        )
+        stats = self.cycles.stats()
+        # Only a stop after the last step counts (a pause that ran already says nothing about the step).
+        stopped = (
+            stats.running is False
+            and stats.since is not None
+            and now - stats.since >= timedelta(minutes=2)
+            and (state.stepped_at is None or stats.since >= state.stepped_at)
+        )
+        busy = None
+        if any(abs(now - at) <= timedelta(minutes=15) for at in defrosts):
+            busy = "Abtauung"
+        elif hot_water(recent["dhw"], now):
+            busy = "Warmwasser"
+        gap, unknown = self._zone1_gap(zone, floor, STEP_K) if floor is not None else (None, False)
+        shift = state.shift_k
+        step = reduce_step(
+            ReduceInputs(
+                now=now,
+                shift_k=shift,
+                stepped_at=state.stepped_at,
+                band_k=zone.down_k,
+                stopped=stopped,
+                at_minimum=minimum,
+                busy=busy,
+                zone1_gap_k=gap,
+                zone1_unknown=unknown,
+                held=state.held,
+            )
+        )
+        state.note = step.note
+        if stopped:
+            state.stopped_at_k = shift
+        if step.changed:
+            state.shift_k, state.stepped_at = step.shift_k, now
+            self._night_log(f"{label} Nacht: {_signed(step.shift_k)} K" + (f" ({step.note})." if step.note else "."))
+        if step.held is not None and state.held is None:
+            state.held, state.held_shift_k = step.held, state.shift_k
+            self._night_log(f"{label} Nacht hält: {step.held}.")
+
+    def _end_night(self, zone: ZoneConfig, state: _NightZone, now: datetime) -> None:
+        """The window ended: learn where to start next time; the zone goes back to its program."""
+        label = self._labels().get(zone.zone_id, zone.zone_id)
+        if zone.kind is ZoneKind.RADIATOR and state.mode is not None:
+            state.start_k = next_start(state.held_shift_k, state.stopped_at_k, zone.down_k, state.start_k)
+        if state.active and state.blocked is None:
+            self._night_log(f"{label}: Nachtabsenkung zu Ende, zurück auf das Zeitprogramm.")
+        state.active, state.shift_k, state.off, state.waiting, state.ended_at = False, 0.0, False, None, now
+        state.held = state.held_shift_k = state.stopped_at_k = None
+
+    def _night_log(self, text: str) -> None:
+        if self.mode is PlannerMode.OFF:
+            return
+        stage = self._settings.current.hems.effective(Function.NIGHT)
+        prefix = "Nachtabsenkung" if stage is PlannerMode.CONTROL else "Nachtabsenkung (würde)"
+        self._log.add(LogCategory.HEMS, f"{prefix}: {text}")
+
+    def _icing(self, now: datetime) -> bool:
+        """The evaporator may ice now: the defrost risk of this hour at least "gering" (unknown counts as yes)."""
+        forecast = self.forecast.current
+        hour = forecast.at(now) if forecast is not None else None
+        if hour is None or hour.temperature_c is None:
+            return True
+        rates = learn_rates(self.cycles.runs, self.cycles.defrosts, now)
+        return risk([hour], rates)[0].level is not RiskLevel.NONE
+
+    def _last_defrost_end(self) -> datetime | None:
+        if not self.cycles.defrosts:
+            return None
+        last = self.cycles.defrosts[-1]
+        return last.at + timedelta(minutes=last.minutes)
+
+    def _night_status(self) -> list[NightStatus]:
+        settings = self._settings.current
+        labels = self._labels()
+        controlled = settings.hems.effective(Function.NIGHT) is PlannerMode.CONTROL
+        result = []
+        for zone in settings.hems.zones:
+            state = self._nights.get(zone.zone_id)
+            if zone.kind is None or state is None:
+                continue
+            result.append(
+                NightStatus(
+                    zone_id=zone.zone_id,
+                    label=labels.get(zone.zone_id, zone.zone_id),
+                    active=state.active and state.blocked is None,
+                    mode=state.mode if state.active else None,
+                    mean_c=state.mean_c if state.active else None,
+                    shift_k=state.shift_k,
+                    off=state.off,
+                    off_since=state.off_since if state.off else None,
+                    text=_night_text(state),
+                    start_k=state.start_k,
+                    controlled=controlled,
+                )
+            )
+        return result
 
     def _power_now(self) -> float | None:
         heat_pump = self._state.current
@@ -1376,6 +1758,7 @@ class HemsService:
         for zone in heat_pump.zones if heat_pump is not None else []:
             config = hems.zone(zone.id)
             flow = self._flows.get(zone.id)
+            night = self._nights.get(zone.id)
             result.append(
                 ZoneInput(
                     zone_id=zone.id,
@@ -1385,6 +1768,11 @@ class HemsService:
                     flow_offset_k=flow.offset_k if flow is not None else 0.0,
                     flow_reason=flow.reason if flow is not None and flow.offset_k else None,
                     flow_line=self._models.flow_lines.get(zone.id),
+                    night_active=night is not None and night.active,
+                    night_shift_k=night.shift_k if night is not None else 0.0,
+                    night_off=night is not None and night.off,
+                    night_block=night.blocked if night is not None else None,
+                    night_start_k=night.start_k if night is not None else START_K,
                 )
             )
         return result
@@ -1505,7 +1893,9 @@ class HemsService:
             ]
         names += [f"flow:{zone.zone_id}" for zone in settings.hems.zones]
         names += [f"zone_off:{zone_id}" for zone_id in {room.zone_id for room in settings.rooms if room.zone_id}]
+        names += ["buffer", "dhw", *[f"flow_setpoint:{zone.zone_id}" for zone in settings.hems.zones]]
         series = await self.samples.series_async(names, now - timedelta(days=21))
+        self._minimum = self._learn_minimum(series)
         models = {}
         for room in settings.rooms:
             kind = settings.hems.zone(room.zone_id).kind if room.zone_id else None
@@ -1521,6 +1911,22 @@ class HemsService:
                 kind=kind.value if kind is not None else "radiator",
             )
         self._models.rooms = models
+
+    def _learn_minimum(self, series: Mapping[str, list[tuple[datetime, float]]]) -> list[BandMinimum]:
+        """The heat pump's minimum power per outdoor band: the buffer above a steady flow setpoint (F3)."""
+        target: dict[datetime, float] = {}
+        for zone in self._settings.current.hems.zones:
+            for moment, value in series.get(f"flow_setpoint:{zone.zone_id}", []):
+                target[moment] = max(value, target.get(moment, value))
+        phases = minimum_phases(
+            power=series.get("power", []),
+            buffer=series.get("buffer", []),
+            target=sorted(target.items()),
+            outdoor=series.get("outdoor", []),
+            dhw=series.get("dhw", []),
+            defrosts=[item.at for item in self.cycles.defrosts],
+        )
+        return minimum_by_band(phases)
 
     # --- helpers -----------------------------------------------------------------
 
@@ -1705,6 +2111,21 @@ class HemsService:
                     jumped_at=datetime.fromisoformat(entry["jumped_at"]) if entry.get("jumped_at") else None,
                     curve_text=entry.get("curve_text") if isinstance(entry.get("curve_text"), str) else None,
                 )
+            for zone_id, entry in raw.get("nights", {}).items():
+                self._nights[zone_id] = _NightZone(
+                    day=date.fromisoformat(entry["day"]) if entry.get("day") else None,
+                    mode=NightMode(entry["mode"]) if entry.get("mode") else None,
+                    mean_c=entry.get("mean_c"),
+                    active=bool(entry.get("active")),
+                    shift_k=float(entry.get("shift_k") or 0.0),
+                    held=entry.get("held"),
+                    held_shift_k=entry.get("held_shift_k"),
+                    off=bool(entry.get("off")),
+                    off_since=datetime.fromisoformat(entry["off_since"]) if entry.get("off_since") else None,
+                    off_done=entry.get("off_done"),
+                    ended_at=datetime.fromisoformat(entry["ended_at"]) if entry.get("ended_at") else None,
+                    start_k=float(entry.get("start_k") or START_K),
+                )
         except FileNotFoundError:
             return
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
@@ -1721,7 +2142,24 @@ class HemsService:
                     "curve_text": flow.curve_text,
                 }
                 for zone_id, flow in self._flows.items()
-            }
+            },
+            "nights": {
+                zone_id: {
+                    "day": state.day.isoformat() if state.day else None,
+                    "mode": state.mode.value if state.mode else None,
+                    "mean_c": state.mean_c,
+                    "active": state.active,
+                    "shift_k": state.shift_k,
+                    "held": state.held,
+                    "held_shift_k": state.held_shift_k,
+                    "off": state.off,
+                    "off_since": state.off_since.isoformat() if state.off_since else None,
+                    "off_done": state.off_done,
+                    "ended_at": state.ended_at.isoformat() if state.ended_at else None,
+                    "start_k": state.start_k,
+                }
+                for zone_id, state in self._nights.items()
+            },
         }
         path = self._data_dir / STATE_FILE
         try:

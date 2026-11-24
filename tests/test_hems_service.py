@@ -453,6 +453,106 @@ async def test_the_flow_goes_down_slowly_after_the_bottleneck_and_back_at_once(a
     assert any("Vorlauf wieder höher: Raum A unterversorgt (von \u22120,5 K)" in message for message in log)
 
 
+def morning(app: App, hour: int = 5, minute: int = 35) -> None:
+    """The next morning in the night window (the app's zone is UTC in these tests)."""
+    tomorrow = (app.clock.now + timedelta(days=1)).replace(hour=hour, minute=minute, second=0)
+    app.clock.now = tomorrow
+
+
+def night_of(app: App, zone_id: str) -> Any:
+    return next(item for item in app.hems.status().night if item.zone_id == zone_id)
+
+
+async def test_a_mild_morning_switches_the_zones_off_and_a_cold_room_brings_them_back(app: App) -> None:
+    # F3: 4 °C over 5:30-10:00 (above 3 °C), no icing at 4 °C (defrost risk none): off at once.
+    morning(app)
+    app.fake.open_meteo = open_meteo_hours(app.clock.now, celsius=4.0)
+    await app.hems.plan_now()
+
+    await app.hems.sample()
+
+    zone2 = night_of(app, MV_ZONE_2)
+    assert (zone2.active, zone2.mode, zone2.off) == (True, "off", True)
+    assert night_of(app, MV_ZONE_1).off
+    # The night control asks for a new plan at once (the loop plans again after 2 s); here directly.
+    await app.hems.plan_now()
+    assert app.hems.plan is not None and app.hems.plan.hours[0].zones[1].off
+    log = await messages(app.log, LogCategory.HEMS)
+    assert "Nachtabsenkung (würde): Zone 2 aus." in log
+
+    # Raum A may lose 1 K (21 °C): at 20.1 °C zone 2 goes back to auto, minimum power for the rest of the window.
+    app.fake.change(ROOM_A, "20.1")
+    await eventually(lambda: app.home.hems_sources.number(ROOM_A) == 20.1)
+    app.clock.now += timedelta(minutes=5)
+    await app.hems.sample()
+
+    zone2 = night_of(app, MV_ZONE_2)
+    assert not zone2.off and zone2.active
+    assert "Raum A hat den erlaubten Verlust erreicht" in zone2.text
+    assert night_of(app, MV_ZONE_1).off
+    log = await messages(app.log, LogCategory.HEMS)
+    assert any(message.startswith("Nachtabsenkung (würde): Zone 2 wieder auf Auto (Raum A") for message in log)
+
+
+async def test_a_cold_morning_goes_down_to_the_minimum_power_step_by_step(app: App) -> None:
+    app.fake.set(FLOW_SP_1, "31.2", unit="°C")
+    app.fake.set(FLOW_SP_2, "36.4", unit="°C")
+    configure(
+        app.settings,
+        zones=(
+            ZoneConfig(MV_ZONE_1, kind=ZoneKind.FLOOR, flow_setpoint_entity=FLOW_SP_1),
+            ZoneConfig(MV_ZONE_2, kind=ZoneKind.RADIATOR, flow_entity=FLOW_2, flow_setpoint_entity=FLOW_SP_2),
+        ),
+    )
+    app.home.watch()
+    await eventually(lambda: app.home.hems_sources.number(FLOW_SP_2) == 36.4)
+    morning(app, minute=31)
+    app.fake.open_meteo = open_meteo_hours(app.clock.now, celsius=-2.0)
+    await app.hems.plan_now()
+
+    app.hems._wake.clear()
+    await app.hems.sample()
+    zone2 = night_of(app, MV_ZONE_2)
+    assert (zone2.mode, zone2.shift_k, zone2.off) == ("reduce", -1.0, False)
+    # The executor sends from the plan: the window's start asks for a new plan at once.
+    assert app.hems._wake.is_set()
+    # Zone 1 only with the frost protection.
+    assert night_of(app, MV_ZONE_1).shift_k == 0.0
+    await app.hems.plan_now()
+    assert app.hems.plan is not None
+    assert app.hems.plan.hours[0].zones[1].parts.get(Part.NIGHT) == -1.0
+
+    # 20 min later the buffer has not risen above the flow setpoint: one step down. A pause that ran already
+    # before the last step is no "stopped".
+    app.hems.cycles.feed_power(app.clock.now - timedelta(minutes=30), 0.0)
+    app.clock.now += timedelta(minutes=20)
+    app.hems.cycles.feed_power(app.clock.now - timedelta(minutes=1), 0.0)
+    await app.hems.sample()
+    assert night_of(app, MV_ZONE_2).shift_k == -1.5
+    log = await messages(app.log, LogCategory.HEMS)
+    assert any(message.startswith("Nachtabsenkung (würde): Zone 2 Nacht: \u22121,5 K") for message in log)
+
+    # The window ends at 10:00: back to the program; the start stays -1 K (nothing held).
+    app.clock.now = app.clock.now.replace(hour=10, minute=0)
+    await app.hems.sample()
+    assert not night_of(app, MV_ZONE_2).active and night_of(app, MV_ZONE_2).shift_k == 0.0
+
+
+async def test_a_humid_room_keeps_its_zone_out_of_the_night(app: App) -> None:
+    morning(app)
+    app.fake.open_meteo = open_meteo_hours(app.clock.now, celsius=4.0)
+    app.fake.change(ROOM_A_HUMIDITY, "70")
+    await eventually(lambda: app.home.hems_sources.number(ROOM_A_HUMIDITY) == 70)
+    await app.hems.plan_now()
+
+    await app.hems.sample()
+
+    zone2 = night_of(app, MV_ZONE_2)
+    assert not zone2.active and not zone2.off
+    assert zone2.text == "keine Nachtabsenkung: Feuchteschutz: Raum A"
+    assert night_of(app, MV_ZONE_1).off
+
+
 # --- API ------------------------------------------------------------------------------------
 
 

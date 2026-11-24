@@ -11,6 +11,9 @@ zone in steps within the zone's band, and a setpoint per room:
   (no frost, no defrost risk while reheating), up early enough, not in humid rooms;
 - block operation (point 9): marked in mild hours, carried out minute by minute;
 - flow (point 2): the offset from the valves, carried on to every hour;
+- night (F3, 1.5.0, hems/night.py): in the night window the zones are switched
+  off (mean of the forecast above 3 °C) or go down to the heat pump's minimum
+  power; for the hour now the live state of the night control counts;
 - the Vaillant frost protection comes first: no block operation in its hours.
 
 The plan itself sends nothing: the executor (1.5.0) carries out the parts of the
@@ -19,17 +22,17 @@ shift whose function is on "Steuern" (Part).
 
 from __future__ import annotations
 
-import math
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from enum import StrEnum
 
-from vaillant_eebus.hems.config import HemsSettings, ZoneConfig, ZoneKind, in_window
+from vaillant_eebus.hems.config import HemsSettings, ZoneConfig, ZoneKind
 from vaillant_eebus.hems.defrost import LEVEL_NAMES, RiskHour, RiskLevel
 from vaillant_eebus.hems.forecast import WeatherHour
 from vaillant_eebus.hems.house_model import DemandHour
+from vaillant_eebus.hems.night import START_K, ZONE1_K, NightMode, Window, plan_window, window_at
 from vaillant_eebus.room_data import RoomDetails
 
 HOURS = 48
@@ -40,12 +43,6 @@ SUN_W = 400.0
 # Defrost: at most this many hours in a row with less load; storing before.
 DEFROST_HOURS = 3
 STORE_HOURS = 2
-# Night setback: not when it is colder than this in the window.
-NIGHT_MIN_C = -5.0
-REHEAT_HOURS = 3
-HUMID_FROM = 65.0
-# Start values of how fast a zone heats up again, K/h.
-REHEAT_RATE = {ZoneKind.FLOOR: 0.25, ZoneKind.RADIATOR: 1.0}
 WARM_DAY_MIN_HOURS = 12
 
 
@@ -71,6 +68,13 @@ class ZoneInput:
     flow_reason: str | None = None
     # Expected flow = a + b * outdoor (learned from the circuit's flow setpoint).
     flow_line: tuple[float, float] | None = None
+    # The night control now (F3): active in the window, the zone's shift (K, <= 0) and whether it is switched off;
+    # why the zone has no setback (humid room, test run); the shift a radiator zone starts with (learned, K > 0).
+    night_active: bool = False
+    night_shift_k: float = 0.0
+    night_off: bool = False
+    night_block: str | None = None
+    night_start_k: float = START_K
 
 
 class Part(StrEnum):
@@ -99,6 +103,8 @@ class ZoneHour:
     night: bool
     # The shift's parts before the band and step, K.
     parts: dict[Part, float] = field(default_factory=dict)
+    # F3: the zone is switched off in this hour (for the hour now: right now).
+    off: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +172,7 @@ def make_plan(inputs: PlanInputs) -> Plan:
         night = _night(hour, inputs, weather)
         if night.reason is not None:
             reasons.append(night.reason)
+        reasons.extend(night.blocked)
         zone_hours = []
         for item in inputs.zones:
             config = item.config
@@ -184,7 +191,7 @@ def make_plan(inputs: PlanInputs) -> Plan:
                     _add(reasons, "Vorher Wärme speichern (Abtaurisiko danach)")
                 active_night = night.zones.get(item.zone_id, 0.0)
                 if active_night:
-                    parts[Part.NIGHT] = -active_night
+                    parts[Part.NIGHT] = active_night
                 if item.flow_offset_k:
                     parts[Part.FLOW] = item.flow_offset_k
                     if item.flow_reason:
@@ -202,15 +209,14 @@ def make_plan(inputs: PlanInputs) -> Plan:
                     target_c=target,
                     flow_c=flow,
                     block=block,
-                    night=bool(night.zones.get(item.zone_id)),
+                    night=bool(night.zones.get(item.zone_id)) or item.zone_id in night.off,
                     parts=parts,
+                    off=item.zone_id in night.off,
                 )
             )
+        # The rooms keep their own setpoints at night (F3 lowers the zones; open valves keep the pump running).
         rooms = [
-            RoomHour(
-                entity_id=room.entity_id,
-                setpoint_c=round(room.details.setpoint_at(local.time()) - night.rooms.get(room.entity_id, 0.0), 1),
-            )
+            RoomHour(entity_id=room.entity_id, setpoint_c=round(room.details.setpoint_at(local.time()), 1))
             for room in inputs.rooms
         ]
         demand = inputs.demand.get(hour.start)
@@ -233,89 +239,52 @@ def make_plan(inputs: PlanInputs) -> Plan:
 
 @dataclass(frozen=True, slots=True)
 class _Night:
-    # Zone ID / room entity -> K lowered in this hour.
+    # Zone ID -> shift (K, < 0) in this hour; zones switched off.
     zones: Mapping[str, float]
-    rooms: Mapping[str, float]
+    off: frozenset[str]
     reason: str | None
+    blocked: list[str] = field(default_factory=list)
 
 
 def _night(hour: WeatherHour, inputs: PlanInputs, weather: Mapping[datetime, WeatherHour]) -> _Night:
+    """F3 in this hour: while the window runs the night control's live state (it waits for a defrost, holds at the
+    minimum, came back early ...), for later windows what they will do (shown). The hour now outside the window
+    (5:00-5:30 for a start at 5:30) has nothing yet: the executor sends from the live state only."""
     settings = inputs.settings
-    local = hour.start.astimezone(inputs.zone)
-    if not in_window(local.time(), settings.night_start, settings.night_end):
-        return _Night({}, {}, None)
-    window = _window_hours(hour.start, inputs, weather)
-    temps = [item.temperature_c for item in window if item.temperature_c is not None]
-    end = window[-1].start + timedelta(hours=1) if window else hour.start + timedelta(hours=1)
-    reheat = [item.start for item in window if end - item.start <= timedelta(hours=REHEAT_HOURS)]
-    if any(start in inputs.frost for start in (item.start for item in window)):
-        return _Night({}, {}, "Nachtabsenkung ausgesetzt: Frostschutz der Anlage")
-    if temps and min(temps) < NIGHT_MIN_C:
-        return _Night({}, {}, "Nachtabsenkung ausgesetzt: zu kalt, das Wiederaufheizen kostet mehr")
-    risky = [
-        start
-        for start in reheat
-        if (risk := inputs.risks.get(start)) is not None and risk.level in (RiskLevel.MEDIUM, RiskLevel.HIGH)
-    ]
-    if risky:
-        return _Night({}, {}, "Nachtabsenkung ausgesetzt: Abtaurisiko beim Wiederaufheizen")
+    bounds = window_at(hour.start, settings.night_start, settings.night_end, inputs.zone) or window_at(
+        hour.start + timedelta(minutes=59), settings.night_start, settings.night_end, inputs.zone
+    )
+    if bounds is None:
+        return _Night({}, frozenset(), None)
+    window = plan_window(bounds, weather, inputs.frost)
+    live = bounds[0] <= inputs.now < bounds[1]
+    this_hour = hour.start <= inputs.now < hour.start + timedelta(hours=1)
     zones: dict[str, float] = {}
-    rooms: dict[str, float] = {}
-    humid = []
+    off: set[str] = set()
+    blocked = []
     for item in inputs.zones:
-        members = [room for room in inputs.rooms if room.zone_id == item.zone_id]
-        allowed = []
-        for room in members:
-            loss = room.details.night_loss_k if room.details.night_loss_k is not None else settings.night_loss_k
-            if room.humidity is not None and room.humidity >= HUMID_FROM:
-                humid.append(room.name)
-                continue
-            allowed.append(loss)
-            # Up again early enough: rooms follow their zone's reheating.
-            rooms[room.entity_id] = loss
-        if members and not allowed:
+        if item.config.kind is None:
             continue
-        loss = min(allowed) if allowed else settings.night_loss_k
-        steps = math.floor(loss / settings.step_k + 1e-9)
-        lowered = steps * settings.step_k
-        rate = REHEAT_RATE.get(item.config.kind, 1.0) if item.config.kind else 1.0
-        reheat_h = math.ceil(lowered / rate - 1e-9) if lowered > 0 else 0
-        if lowered > 0 and hour.start + timedelta(hours=reheat_h) < end:
-            zones[item.zone_id] = lowered
-        else:
-            # Reheating: the zone's rooms go back to their setpoint, too.
-            for room in members:
-                rooms.pop(room.entity_id, None)
-    if not inputs.zones:
-        rooms = {
-            room.entity_id: room.details.night_loss_k
-            if room.details.night_loss_k is not None
-            else settings.night_loss_k
-            for room in inputs.rooms
-            if room.humidity is None or room.humidity < HUMID_FROM
-        }
-    reason = "Nachtabsenkung" if zones or rooms else "Sanft wieder aufheizen"
-    if humid:
-        reason += f"; Feuchteschutz: {', '.join(sorted(set(humid)))} ohne Absenkung"
-    return _Night(zones, rooms, reason)
+        if item.night_block is not None:
+            blocked.append(f"{item.label} ohne Nachtabsenkung: {item.night_block}")
+        elif live:
+            if item.night_active and item.night_off:
+                off.add(item.zone_id)
+            elif item.night_active and item.night_shift_k:
+                zones[item.zone_id] = item.night_shift_k
+        elif not this_hour:
+            _planned(item, window, zones, off)
+    return _Night(zones, frozenset(off), window.reason() if zones or off else None, blocked)
 
 
-def _window_hours(start: datetime, inputs: PlanInputs, weather: Mapping[datetime, WeatherHour]) -> list[WeatherHour]:
-    """The hours of the night window that contains start."""
-    settings = inputs.settings
-    zone = inputs.zone
-    moment = start
-    while in_window((moment - timedelta(hours=1)).astimezone(zone).time(), settings.night_start, settings.night_end):
-        moment -= timedelta(hours=1)
-        if start - moment > timedelta(hours=24):
-            break
-    result = []
-    while in_window(moment.astimezone(zone).time(), settings.night_start, settings.night_end):
-        result.append(weather.get(moment, WeatherHour(start=moment)))
-        moment += timedelta(hours=1)
-        if moment - start > timedelta(hours=24):
-            break
-    return result
+def _planned(item: ZoneInput, window: Window, zones: dict[str, float], off: set[str]) -> None:
+    """What a later window will do with the zone (shown; the live control decides when it comes)."""
+    if window.mode is NightMode.OFF:
+        off.add(item.zone_id)
+    elif item.config.kind is ZoneKind.RADIATOR:
+        zones[item.zone_id] = -min(item.night_start_k, item.config.down_k)
+    elif item.config.kind is ZoneKind.FLOOR and window.frost:
+        zones[item.zone_id] = -min(ZONE1_K, item.config.down_k)
 
 
 def _ahead(

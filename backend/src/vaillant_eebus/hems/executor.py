@@ -15,6 +15,9 @@ into commands through the write gate, the only way to the heat pump:
   next planned change, at most 3 h. Two outside off/auto switches of the floor
   zone in step with the heat pump on one day stop F1: the user's automation
   probably still runs.
+- night (F3): in the night window the zones go off ("Aus") when the plan's hour
+  says so, back to auto when it no longer does; F1 leaves a zone switched off
+  for the night alone. The minimum power is a quick veto like F0 (part NIGHT).
 - fallback: stage off/preview, demo, stopping the app -> only its own quick
   vetos are ended and only the zones it switched off go back to auto. A quick
   veto ends by itself (at most 4 h); a zone left off is caught by the Home
@@ -86,9 +89,14 @@ RETRY_AFTER = timedelta(minutes=5)
 RELEASE_TIMEOUT_S = 15.0
 ACTIONS_KEPT = 30
 
-# Which function's stage decides about a part of the shift. Defrost and store
-# (block operation, 1.6.0) and the night (F3) are not carried out by this map.
-PART_FUNCTION = {Part.FLOW: Function.FLOW, Part.AHEAD: Function.FLOW, Part.WARM: Function.FLOW}
+# Which function's stage decides about a part of the shift. Defrost and store (block operation, 1.6.0) are not
+# carried out yet.
+PART_FUNCTION = {
+    Part.FLOW: Function.FLOW,
+    Part.AHEAD: Function.FLOW,
+    Part.WARM: Function.FLOW,
+    Part.NIGHT: Function.NIGHT,
+}
 
 MODE_NAMES = {"off": "Aus", "auto": "Auto", "on": "Ein"}
 NBSP = "\u00a0"
@@ -111,8 +119,9 @@ class ZoneState:
     override_c: float | None
     override_until: datetime | None
     shift_k: float
-    # The executor switched the zone off (F1).
+    # The executor switched the zone off (F1, or F3 for the night).
     off: bool
+    night_off: bool
     rest_until: datetime | None
     rest_reason: str | None
     # Why nothing is sent right now, if anything keeps it from it.
@@ -166,6 +175,9 @@ class _Zone:
     preview: _Simulated = field(default_factory=_Simulated)
     # F1 in preview: what it would have set last.
     preview_mode: str | None = None
+    # F3 switched the zone off for the night (F1 leaves it alone); in preview: would have.
+    night_off: bool = False
+    preview_night_off: bool = False
 
 
 class ZoneExecutor:
@@ -247,6 +259,7 @@ class ZoneExecutor:
             for zone in heat_pump.zones:
                 record = self._zones[zone.id]
                 record.waiting = None
+                await self._night_mode(zone, record, hems, plan, now)
                 await self._quick_veto(zone, record, hems, plan, now)
                 await self._preview_quick_veto(zone, record, hems, plan, now)
             await self._zone1(heat_pump, hems, now)
@@ -267,6 +280,7 @@ class ZoneExecutor:
                         )
                     if record.off:
                         await self._send(zone_id, record, SetZoneMode(zone_id=zone_id, mode="auto"), f"{why}: Auto")
+                        record.night_off = record.off
         except TimeoutError:
             _LOGGER.warning("Giving the zones back took too long")
         self._save()
@@ -292,7 +306,7 @@ class ZoneExecutor:
             if record.override_c is not None and not zone.override:
                 record.override_c, record.override_until, record.shift_k = None, None, 0.0
             if record.off and zone.mode != "off":
-                record.off = False
+                record.off = record.night_off = False
             return
         # A mode the executor (or the UI) sent and the zone now shows is its own, also after the settling.
         own_mode = zone.mode == record.mode_sent
@@ -316,7 +330,7 @@ class ZoneExecutor:
                 outside = "Quick-Veto von außen beendet"
         if zone.mode != mode and not own_mode:
             if record.off and zone.mode != "off":
-                record.off = False
+                record.off = record.night_off = False
             outside = self._outside_mode(zone, mode, heat_pump, now) or outside
         if outside is not None:
             self._rest(zone, record, outside, now)
@@ -521,6 +535,50 @@ class ZoneExecutor:
                 return hour.start
         return None
 
+    # --- night off/auto (F3) ----------------------------------------------------------------------
+
+    async def _night_mode(
+        self, zone: Zone, record: _Zone, hems: HemsSettings, plan: Plan | None, now: datetime
+    ) -> None:
+        """The zone off while the plan's hour now says so, back to auto when it no longer does."""
+        hour = _zone_hour(plan, zone.id, now)
+        wanted = hour is not None and hour.off
+        stage = hems.effective(Function.NIGHT)
+        control = stage is PlannerMode.CONTROL and self._can_send()
+        if not control:
+            back = SetZoneMode(zone_id=zone.id, mode="auto")
+            if (
+                record.night_off
+                and record.off
+                and self._can_send()
+                and not self._retrying(record, now)
+                and await self._send(zone.id, record, back, "Nacht steuert nicht")
+            ):
+                record.night_off = False
+            if stage is not PlannerMode.OFF and wanted != record.preview_night_off:
+                mode = "off" if wanted else "auto"
+                await self._would(zone.id, SetZoneMode(zone_id=zone.id, mode=mode))
+                record.preview_night_off = wanted
+            return
+        record.preview_night_off = False
+        if wanted and not record.night_off:
+            if self._resting(record, now) or self._retrying(record, now) or zone.mode != "auto":
+                if zone.mode not in ("auto", "off"):
+                    record.waiting = f"Nacht: {zone.label} steht auf {MODE_NAMES.get(str(zone.mode), zone.mode)}"
+                return
+            budget = self._gate.budget
+            if budget is not None and not budget.allows(fallback=False):
+                record.waiting = "Tagesgrenze der Befehle an myVAILLANT erreicht"
+                return
+            if await self._send(zone.id, record, SetZoneMode(zone_id=zone.id, mode="off"), "Nachtabsenkung"):
+                record.night_off = True
+        elif not wanted and record.night_off:
+            if zone.mode == "off" and not self._retrying(record, now):
+                if await self._send(zone.id, record, SetZoneMode(zone_id=zone.id, mode="auto"), "Nacht zu Ende"):
+                    record.night_off = False
+            elif zone.mode != "off":
+                record.night_off = False
+
     # --- floor heating off/auto (F1) ------------------------------------------------------------
 
     async def _zone1(self, heat_pump: HeatPumpState, hems: HemsSettings, now: datetime) -> None:
@@ -529,6 +587,9 @@ class ZoneExecutor:
         if zone is None:
             return
         record = self._zones.setdefault(zone.id, _Zone())
+        if record.night_off:
+            # Off for the night (F3): F1 does not switch it back on.
+            return
         stage = hems.effective(Function.ZONE1)
         control = stage is PlannerMode.CONTROL and self._can_send() and not self._zone1_halted
         would = self._hems.zone1_would()
@@ -631,6 +692,7 @@ class ZoneExecutor:
                 override_until=record.override_until,
                 shift_k=record.shift_k,
                 off=record.off,
+                night_off=record.night_off,
                 rest_until=record.rest_until,
                 rest_reason=record.rest_reason,
                 waiting=record.waiting,
@@ -757,6 +819,7 @@ class ZoneExecutor:
                     "shift_k": record.shift_k,
                     "changed_at": _iso(record.changed_at),
                     "off": record.off,
+                    "night_off": record.night_off,
                     "rest_until": _iso(record.rest_until),
                     "rest_reason": record.rest_reason,
                     "program_c": record.program_c,
@@ -797,6 +860,7 @@ class ZoneExecutor:
                     shift_k=float(item.get("shift_k") or 0.0),
                     changed_at=_time(item.get("changed_at")),
                     off=bool(item.get("off")),
+                    night_off=bool(item.get("night_off")),
                     rest_until=_time(item.get("rest_until")),
                     rest_reason=item.get("rest_reason") if isinstance(item.get("rest_reason"), str) else None,
                     program_c=_float(item.get("program_c")),

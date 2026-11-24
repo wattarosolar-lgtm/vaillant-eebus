@@ -644,6 +644,7 @@ class RoomControl:
         hems.on_window(self._window_changed)
         hems.set_window_guard(self._window_guard)
         hems.set_testing_guard(self._testing_room)
+        hems.set_night_guard(self._night_block)
         hems.sources.on_change(self._source_changed)
         hems.sources.follow(self._followed)
         if home_assistant.exporter is not None:
@@ -2823,6 +2824,18 @@ class RoomControl:
             _LOGGER.exception("Room control failed after a window change")
             return
         self._notify()
+
+    def _night_block(self, zone_id: str) -> str | None:
+        """A test run armed or running, or a sweep, in a room of the zone: no night setback there (F3); the test run
+        needs warm water at the radiator."""
+        rooms = {room.entity_id for room in self._settings.current.rooms if room.zone_id == zone_id}
+        run = self._test
+        if run is not None and run.room_id in rooms and run.state in (TestState.ARMED, TestState.RUNNING):
+            return "Testlauf läuft" if run.state is TestState.RUNNING else "Testlauf vorgemerkt"
+        sweep = self._sweep
+        if sweep is not None and sweep.active and sweep.room_id in rooms:
+            return "Durchlauf läuft"
+        return None
 
     def _testing_room(self, room_id: str) -> bool:
         """A test run or sweep has the room's thermostat now (the flow of zone 2 leaves the room out; F2)."""

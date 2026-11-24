@@ -77,6 +77,39 @@ class Rig:
     clock: Clock
     monotonic: list[float]
 
+    def plan_night(self, off: Callable[[int], bool], zone_id: str = MV_ZONE_2, shift: float = 0.0) -> None:
+        """F3: the zone switched off (or lowered) in the night window, hour by hour."""
+        start = hour_start(self.clock.now)
+        self.hems.plan = Plan(
+            created_at=self.clock.now,
+            hours=[
+                PlanHour(
+                    start=start + timedelta(hours=index),
+                    outdoor_c=None,
+                    humidity=None,
+                    defrost=None,
+                    heat_w=None,
+                    electricity_w=None,
+                    frost=False,
+                    zones=[
+                        ZoneHour(
+                            zone_id=zone_id,
+                            shift_k=shift if not off(index) else 0.0,
+                            target_c=None,
+                            flow_c=None,
+                            block=False,
+                            night=True,
+                            parts={Part.NIGHT: shift} if shift and not off(index) else {},
+                            off=off(index),
+                        )
+                    ],
+                    rooms=[],
+                    reasons=["Nachtabsenkung"],
+                )
+                for index in range(12)
+            ],
+        )
+
     def plan(self, shift: Callable[[int], float], zone_id: str = MV_ZONE_2) -> None:
         start = hour_start(self.clock.now)
         self.hems.plan = Plan(
@@ -281,6 +314,54 @@ async def test_up_goes_out_without_the_interval(rig: Rig) -> None:
     await rig.executor.step()
 
     assert rig.calls()[-1][1]["temperature"] == 20.5
+
+
+async def test_the_night_switches_a_zone_off_and_back_to_auto(rig: Rig) -> None:
+    # F3 on "Steuern": the plan's hour says off -> "Aus"; then no longer -> back to auto.
+    rig.settings_hems(night_mode=PlannerMode.CONTROL)
+    rig.plan_night(lambda _index: True)
+
+    await rig.executor.step()
+
+    assert rig.calls() == [("climate.set_hvac_mode", {"entity_id": MV_ZONE_2, "hvac_mode": "off"})]
+    await eventually(lambda: rig.zone(MV_ZONE_2).mode == "off")
+    await rig.settle()
+    state = next(zone for zone in rig.executor.status().zones if zone.zone_id == MV_ZONE_2)
+    assert state.off and state.night_off
+    assert MV_ZONE_2 in rig.executor.sensors()[0].attributes["ausgeschaltet"]
+
+    rig.plan_night(lambda _index: False)
+    rig.later(5)
+    await rig.executor.step()
+
+    assert rig.calls()[-1] == ("climate.set_hvac_mode", {"entity_id": MV_ZONE_2, "hvac_mode": "auto"})
+
+
+async def test_f1_leaves_a_zone_off_for_the_night_alone(rig: Rig) -> None:
+    rig.settings_hems(night_mode=PlannerMode.CONTROL)
+    rig.fake.change(MV_ZONE_1, "auto", temperature=21.0)
+    await eventually(lambda: rig.zone(MV_ZONE_1).mode == "auto")
+    rig.plan_night(lambda _index: True, zone_id=MV_ZONE_1)
+    await rig.executor.step()
+    await eventually(lambda: rig.zone(MV_ZONE_1).mode == "off")
+    await rig.settle()
+
+    # The heat pump runs: F1 would set zone 1 to auto - not while F3 has it off for the night.
+    rig.hems.would = "auto"
+    rig.later(10)
+    await rig.executor.step()
+
+    assert [body.get("hvac_mode") for _service, body in rig.calls()] == ["off"]
+
+
+async def test_the_minimum_power_is_a_quick_veto_of_the_night(rig: Rig) -> None:
+    rig.settings_hems(night_mode=PlannerMode.CONTROL, flow_mode=PlannerMode.PREVIEW)
+    rig.plan_night(lambda _index: False, shift=-1.5)
+
+    await rig.executor.step()
+
+    assert rig.calls()[0][0] == "mypyllant.set_quick_veto"
+    assert rig.calls()[0][1]["temperature"] == 19.5
 
 
 async def test_an_outside_quick_veto_gets_the_zone_a_rest(rig: Rig) -> None:
