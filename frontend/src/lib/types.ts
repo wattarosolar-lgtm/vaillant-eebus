@@ -788,6 +788,14 @@ export interface SweepStatus {
   part_of_test: boolean;
   points: SweepPoint[];
 }
+/** How old the reported valve position is, and what the probe pair's spread says (1.4.3). */
+export interface ValveCheck {
+  reported_at: string | null;
+  age_min: number | null;
+  spread_k: number | null;
+  spread_valve: number | null;
+  doubt: string | null;
+}
 /** The reads of a W600's valve position. */
 export interface ReadInfo {
   topic: string | null;
@@ -848,6 +856,7 @@ export interface RoomControlRoom {
   sweep_blocked: string | null;
   sweep_queued: boolean;
   regulation: RegulationStatus;
+  valve_check: ValveCheck;
 }
 
 export interface ZoneControl {

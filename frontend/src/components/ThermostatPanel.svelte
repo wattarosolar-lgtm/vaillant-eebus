@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ApiError, roomTest, setRoomStage } from '../lib/api';
-  import { formatNumber, maybe, moment, signed } from '../lib/format';
+  import { duration, formatNumber, maybe, moment, signed } from '../lib/format';
   import { ROOM_CONTROL_LABELS, ROOM_STAGES } from '../lib/texts';
   import type { OperatingMode, RoomControlRoom, RoomsPage, RoomStage } from '../lib/types';
   import RegulationPanel from './RegulationPanel.svelte';
@@ -145,9 +145,29 @@
       <dt>Ventil</dt>
       <dd>
         {maybe(room.valve, 0, '%')}
-        {#if room.valve_at}<span class="hint">bestätigt {moment(room.valve_at)} Uhr</span>{/if}
+        {#if room.read}
+          {#if room.valve_at}<span class="hint">bestätigt {moment(room.valve_at)} Uhr</span>{/if}
+        {:else if room.valve_check.reported_at}
+          <span class="hint"
+            >gemeldet {moment(room.valve_check.reported_at)} Uhr{room.valve_check.age_min !== null &&
+            room.valve_check.age_min >= 15
+              ? ` (vor ${duration(room.valve_check.age_min)})`
+              : ''}</span
+          >
+        {/if}
       </dd>
     </div>
+    {#if room.valve_check.spread_k !== null}
+      <div>
+        <dt>Spreizung Vor-/Rücklauf</dt>
+        <dd>
+          {formatNumber(room.valve_check.spread_k, 1)} K
+          {#if room.valve_check.spread_valve !== null}<span class="hint"
+              >im Testlauf bei etwa {formatNumber(room.valve_check.spread_valve, 0)} % Ventil</span
+            >{/if}
+        </dd>
+      </div>
+    {/if}
     <div>
       <dt>{room.last_seen ? 'Zuletzt gesehen' : 'Zuletzt gemeldet'}</dt>
       <dd>{room.life_sign_at ? `${moment(room.life_sign_at)} Uhr` : '–'}</dd>
@@ -164,6 +184,15 @@
       </div>
     {/if}
   </dl>
+  {#if room.valve_check.doubt}
+    <p class="warn">{room.valve_check.doubt}</p>
+  {/if}
+  {#if !room.read && room.model === 'comet' && room.valve_check.age_min !== null && room.valve_check.age_min >= 60}
+    <p class="hint">
+      Der Comet meldet seine Ventilstellung meist nur kurz nach einem neuen Sollwert, und Zigbee2MQTT kann sie bei ihm
+      nicht abfragen – der Wert kann deshalb alt sein.
+    </p>
+  {/if}
   {#if room.read?.problem}
     <p class="warn">Die Abfrage der Ventilstellung geht gerade nicht ({room.read.problem}).</p>
   {/if}
