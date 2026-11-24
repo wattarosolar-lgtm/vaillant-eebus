@@ -493,7 +493,12 @@ Zahl heute und das Topic.
   und in Home Assistant die Entitäten „… Last seen“ der Thermostate aktivieren. Dann erkennt die App, ob ein
   Thermostat auf die Abfrage antwortet; eine unveränderte Stellung gilt dann als bestätigt. Ohne „zuletzt gesehen“
   gilt eine Abfrage, die Home Assistant angenommen hat, als Bestätigung. Der Eurotronic Comet meldet seine Stellung
-  mit seinen Nachrichten selbst (Zigbee2MQTT kann sie dort nicht abfragen).
+  selbst, meist aber nur kurz nach einem neuen Sollwert; Zigbee2MQTT kann sie bei ihm nicht abfragen
+  (`pi_heating_demand` hat dort kein „get“). Die Seite zeigt deshalb beim Comet (und jedem Thermostat ohne
+  Abfrage), wann die Stellung gemeldet wurde, ab 15 Minuten mit ihrem Alter. Hängt das Fühlerpaar am Heizkörper und
+  kommt warmes Wasser an, steht dort die **Spreizung** (Vorlauf minus Rücklauf) und die Öffnung, die ein Testlauf bei
+  dieser Spreizung gemessen hat; weicht die gemeldete Stellung um 30 Prozentpunkte oder mehr ab und ist sie älter
+  als 30 Minuten, nennt die Seite sie „vermutlich alt“.
 
 **Schneller Durchlauf** (seit 1.4.3; je Thermostat mit Ventilstellung, der schnellste Weg zu „zu“ und „ganz offen“):
 Ohne Fühlerpaar und ohne warmes Wasser, zu jeder Tageszeit, etwa 25–35 Minuten.
@@ -551,9 +556,14 @@ Ende und eine Zusammenfassung, und sobald „zu“ und „ganz offen“ bekannt 
 5. Abbruch (zurück auf den Wert von vorher): Raum über Soll + 1 K, Fenster offen, 30 Minuten keine Ventilstellung
    oder kein warmes Wasser, Abbruch durch Sie. Der Raum kann während des Laufs bis zu 1 K wärmer werden, und der Motor
    des Thermostats ist zu hören.
-6. Der **Rückweg** auf den Wert von vorher geht immer hinaus, auch nach einem Neustart der App mitten im Lauf. Geht
-   er nicht hinaus, setzt die App den Notfallwert. Danach gibt sie das Thermostat wieder frei, außer der Raum steht auf
-   „Steuern“.
+6. Der **Rückweg** auf den Wert von vorher geht immer hinaus, auch nach einem Neustart der App mitten im Lauf. Steht
+   der Raum auf **„Steuern“**, übernimmt stattdessen sofort die Regelung (Raum-Soll mit Ausgleich bzw. Korrektur,
+   ohne Totzone und Abstand; seit 1.4.3). Wird der Rückweg abgelehnt oder nicht ausgeführt, setzt die App das
+   **Raum-Soll** (seit 1.4.3; bisher den Notfallwert); ist sein Ergebnis unbekannt (Thermostat kurz nicht
+   erreichbar), versucht sie es wieder, sobald klar ist, dass er nicht angekommen ist (höchstens 2 Stunden). Hat ein
+   Lauf nicht sauber zurückgegeben, nimmt der nächste Lauf (oder Durchlauf) den gemerkten Wert von vorher als seinen
+   Rückweg, nicht den stehengebliebenen Testschritt. Danach gibt die App das Thermostat wieder frei, außer der Raum
+   steht auf „Steuern“.
 
 Jede eingeschwungene Stufe geht sofort ins Regelverhalten. Unter „Testläufe“ stehen die Stufen des letzten Laufs
 mit Sollwert, Abweichung, Ventil, Vor- und Rücklauf und der geschätzten Wärmeabgabe. Vollständig ist ein Lauf, wenn

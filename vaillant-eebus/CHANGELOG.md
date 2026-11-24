@@ -38,6 +38,20 @@ offenes Fenster mit den Aqara-Raumsensoren oft gar nicht oder erst nach Minuten.
   daneben liegt (10–60 %/K). Jede Änderung mit Grund im Protokoll.
 - **Seite „Räume“:** je Raum „Regelung lernt mit“ mit Bedarfskurve, Verstärkung, Regelgüte und dem Knopf „Gelerntes
   der Regelung zurücksetzen“ (am Handy zugeklappt).
+- **Sauber zurück nach Testlauf und Durchlauf** (Befund 4 der Abnahme 1.4.0: Bad nach dem Testlauf vom 23./24.11.
+  1 K zu kalt, Ventil 50 Minuten zu):
+  - Ein Lauf nimmt als „Sollwert vorher“ den Rückweg-Wert, den sich die App von einem früheren, nicht sauber
+    beendeten Lauf gemerkt hat – nicht den stehengebliebenen Testschritt. Lauf und Schreibschutz kennen so denselben
+    Wert, der Rückweg wird nicht mehr abgelehnt.
+  - Steht der Raum auf „Steuern“, übernimmt nach dem Lauf sofort die Regelung (Raum-Soll mit Ausgleich bzw.
+    Korrektur), ohne Totzone und ohne 15 Minuten Abstand.
+  - Geht der Rückweg nicht hinaus, setzt die App das Raum-Soll statt des Notfallwerts (den gibt es nur, wenn sie das
+    Thermostat ganz loslässt). Ist das Ergebnis unbekannt (Thermostat kurz nicht erreichbar), versucht sie es wieder,
+    sobald klar ist, dass er nicht angekommen ist – höchstens 2 Stunden.
+  - **Ventilstellung des Comet:** Zigbee2MQTT kann sie beim Eurotronic Comet nicht abfragen (`pi_heating_demand` nur
+    gemeldet, kein „get“); er meldet sie meist nur kurz nach einem neuen Sollwert. Die Seite zeigt deshalb, wann die
+    Stellung gemeldet wurde, und – hängt das Fühlerpaar am Heizkörper – die Spreizung mit der Öffnung, die der
+    Testlauf dabei gemessen hat; passt die gemeldete Stellung nicht dazu, steht ein Hinweis da.
 
 ## 1.4.2
 
