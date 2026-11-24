@@ -1116,6 +1116,9 @@ _FREE_OF_SPARING = frozenset(
 _OVER_THE_LIMIT = frozenset({RoomReason.WINDOW, RoomReason.SAFETY, RoomReason.FALLBACK, RoomReason.RESTORE})
 # Handing a thermostat back always goes out: no pause, no technical limit, no budget.
 _HANDING_BACK = frozenset({RoomReason.FALLBACK, RoomReason.RESTORE})
+# After a test run or a sweep of a room in "Steuern" the control takes over at once (1.4.3, finding 4 of the
+# acceptance of 1.4.0): its next command needs no dead band and no interval, and it ends the run's way back.
+_TAKING_OVER = frozenset({RoomReason.CONTROL, RoomReason.PREHEAT, RoomReason.REDISTRIBUTE, RoomReason.MANUAL})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,6 +1249,8 @@ class _Trv:
     limit_logged: date | None = None
     # The setpoint before the first command of a test run: the way back may go there.
     restore_c: float | None = None
+    # The control takes over after a run (take_over): its next command is free of dead band and interval.
+    taking_over: bool = False
     # The room the thermostat belonged to when the app last set it, for a fallback without the room.
     room_id: str | None = None
     name: str | None = None
@@ -1335,6 +1340,20 @@ class RoomGate:
         """The setpoint the app set last on this thermostat (live)."""
         state = self._live.get(trv)
         return state.expected if state is not None else None
+
+    def restore_value(self, trv: str) -> float | None:
+        """The setpoint from before a test run or sweep that was not handed back cleanly; None when there is none.
+
+        A new run takes it as its own "setpoint before", so run and gate agree on the way back (1.4.3)."""
+        state = self._live.get(trv)
+        return state.restore_c if state is not None else None
+
+    def take_over(self, trv: str, *, active: bool = True) -> None:
+        """A run of a room in "Steuern" ended: the control's next command is free of dead band and interval and
+        ends the way back (the run's setpoint before is forgotten once it went out)."""
+        state = self._live.get(trv)
+        if state is not None:
+            state.taking_over = active
 
     def sending(self, trv: str) -> bool:
         """A command to this thermostat is not confirmed yet."""
@@ -1491,6 +1510,10 @@ class RoomGate:
                 if live and held.held is Held.SAME and command.reason in _HANDING_BACK:
                     self._handed_back(state, command, room, settings)
                     self._save()
+                if live and held.held is Held.SAME and state.taking_over and command.reason in _TAKING_OVER:
+                    # The thermostat has the control's value already: taken over.
+                    self._taken_over(state)
+                    self._save()
                 return held
             if not live:
                 text = "Vorschau, würde senden" if preview else "Würde senden"
@@ -1632,8 +1655,10 @@ class RoomGate:
             return RoomWriteResult(sent=False, message="Wird schon gesendet", held=Held.SAME)
         if current is not None and abs(current - command.celsius) < 0.01:
             return RoomWriteResult(sent=False, message="Bereits eingestellt", held=Held.SAME)
+        taking_over = state.taking_over and reason in _TAKING_OVER
         if (
             reason not in _FREE_OF_SPARING
+            and not taking_over
             and current is not None
             and abs(current - command.celsius) < details.deadband_k - 1e-6
         ):
@@ -1641,7 +1666,7 @@ class RoomGate:
         if state.last_sent is not None and reason not in _HANDING_BACK:
             # Handing back goes out even right after another command: the app may be stopping.
             wait = self._rate_limit
-            if reason not in _FREE_OF_SPARING:
+            if reason not in _FREE_OF_SPARING and not taking_over:
                 wait = max(wait, timedelta(minutes=details.min_interval_min))
             if now - state.last_sent < wait:
                 return RoomWriteResult(
@@ -1730,13 +1755,21 @@ class RoomGate:
             self._handed_back(state, command, room, settings)
         else:
             state.touched = True
+            if state.taking_over and command.reason in _TAKING_OVER:
+                self._taken_over(state)
         self._save()
         self._log.add(LogCategory.WRITE, f"Gesendet: {description}")
         return RoomWriteResult(sent=True, message=f"Gesendet: {description}")
 
+    def _taken_over(self, state: _Trv) -> None:
+        """The control has the thermostat after a run: no way back to the setpoint from before any more."""
+        state.taking_over = False
+        state.restore_c = None
+
     def _handed_back(self, state: _Trv, command: SetThermostatSetpoint, room: Room | None, settings: Settings) -> None:
         """After the fallback or the way back: the app lets go, unless the room stays in "Steuern"."""
         state.restore_c = None
+        state.taking_over = False
         controlled = (
             command.reason is RoomReason.RESTORE
             and room is not None
@@ -1895,7 +1928,10 @@ def _check_room_value(
     details = room.details
     low, high = details.setpoint_range()
     normal = low - details.correction_limit_k - 1e-6 <= celsius <= high + details.correction_limit_k + 1e-6
-    handing_back = {limits.round(value) for value in (details.fallback_c(), *details.setpoint_range())}
+    handing_back = {
+        limits.round(value)
+        for value in (details.fallback_c(), details.setpoint_c, *(window.setpoint_c for window in details.schedule))
+    }
     match command.reason:
         case RoomReason.TEST | RoomReason.SWEEP:
             return

@@ -158,6 +158,7 @@ from vaillant_eebus.write_gate import (
     ReadValvePosition,
     RoomGate,
     RoomReason,
+    RoomWriteResult,
     SetThermostatSetpoint,
     WriteNotExecuted,
     WriteOutcomeUnknown,
@@ -205,6 +206,13 @@ READS_KEPT = 6
 ANSWER_SLACK = timedelta(seconds=5)
 # A command of the app and the setpoint change it caused are this close.
 OWN_CHANGE = timedelta(minutes=2)
+# The valve position against the probe pair's spread (1.4.3, finding 4c): a step of a test run within this much
+# spread tells the opening; a reported position this far off and this old is named as probably stale.
+SPREAD_MATCH_K = 1.0
+SPREAD_DOUBT = 30.0
+SPREAD_DOUBT_AGE = timedelta(minutes=30)
+# A way back that did not surely go out is tried again this long (every minute once the gate knows the outcome).
+RESTORE_RETRY_FOR = timedelta(hours=2)
 VALVE_TREND_OVER = timedelta(minutes=30)
 # A window counts against the control's quality and following the demand this long after it closed.
 AFTER_WINDOW = timedelta(minutes=30)
@@ -389,6 +397,20 @@ class SweepStatus:
 
 
 @dataclass(frozen=True, slots=True)
+class ValveCheck:
+    """How old the reported valve position is, and what the probe pair's spread says about it (1.4.3)."""
+
+    # When the thermostat last reported the position (its entity), and how many minutes ago.
+    reported_at: datetime | None
+    age_min: float | None
+    # Flow minus return at the radiator now (probe pair hanging there, warm water), and the opening the test runs
+    # measured at that spread.
+    spread_k: float | None
+    spread_valve: float | None
+    doubt: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ReadInfo:
     """The reads of a W600's valve position (reads.py, write gate)."""
 
@@ -452,6 +474,7 @@ class RoomControlRoom:
     sweep_blocked: str | None
     sweep_queued: bool
     regulation: RegulationStatus
+    valve_check: ValveCheck
 
 
 @dataclass(frozen=True, slots=True)
@@ -593,6 +616,9 @@ class RoomControl:
         self._test: TestRun | None = None
         # A test run that was interrupted by a restart: its thermostat goes back to this value.
         self._restore: tuple[str, float] | None = None
+        # The way back is tried again (it and the fallback did not surely go out) since then; retries log nothing.
+        self._restore_retry = False
+        self._restore_since: datetime | None = None
         self._alive_at: datetime | None = None
         # The last beat of the control that ran through, and the start as grace for the first one.
         self._ticked_at: datetime | None = None
@@ -1196,7 +1222,9 @@ class RoomControl:
 
     # --- the rooms ---------------------------------------------------------------------------
 
-    async def _control(self, room: Room, stage: RoomControlMode, now: datetime, settings: Settings) -> None:
+    async def _control(
+        self, room: Room, stage: RoomControlMode, now: datetime, settings: Settings
+    ) -> RoomWriteResult | None:
         details = room.details
         trv = details.trv_entity
         assert trv is not None
@@ -1294,7 +1322,7 @@ class RoomControl:
             decision = replace(decision, reason=RoomReason.WINDOW)
         state.decision = decision
         if decision.target_c is None or decision.reason is None:
-            return
+            return None
         if stage is RoomControlMode.CONTROL and thermostat is not None and blocking(thermostat):
             if thermostat.available and trv in self._gate.touched():
                 # It must not stay on a window's or a large correction's value while the app cannot set it.
@@ -1304,7 +1332,7 @@ class RoomControl:
                     problem=True,
                 )
                 await self.release(f"Warnung bei {room.name}", {room.entity_id})
-            return
+            return None
         refused = state.refused
         if (
             refused is not None
@@ -1312,21 +1340,22 @@ class RoomControl:
             and refused[1] is decision.reason
             and now - refused[2] < RETRY_REJECTED
         ):
-            return
+            return None
         command = SetThermostatSetpoint(room_id=room.entity_id, celsius=decision.target_c, reason=decision.reason)
         try:
             result = await self._gate.submit(command, preview=stage is not RoomControlMode.CONTROL)
         except (WriteRejected, WriteNotExecuted) as err:
             state.refused = (decision.target_c, decision.reason, now)
             _LOGGER.info("Thermostat %s: %s", room.name, err)
-            return
+            return None
         except WriteOutcomeUnknown:
-            return
+            return None
         state.refused = None
         if result.sent and decision.manual:
             self._log.add(LogCategory.ROOMS, f"Handänderung am Thermostat {room.name} zurückgesetzt.")
         if result.held is Held.LIMIT:
             state.refused = (decision.target_c, decision.reason, now)
+        return result
 
     async def _update_zones(self, now: datetime, settings: Settings) -> None:
         names = ["power", "buffer"]
@@ -1604,7 +1633,7 @@ class RoomControl:
             # The run ended during its sweep: the sweep ends with it, the run's way back covers both.
             await self._end_sweep(sweep_abort(sweep, self._clock(), f"Testlauf beendet: {action.note}"), restore=False)
         if restore and action.celsius is not None and room is not None:
-            await self._restore_thermostat(room, action.celsius, f"Testlauf {name} beendet")
+            await self._hand_back_after_run(room, action.celsius, f"Testlauf {name} beendet", what="dem Testlauf")
         result, run.outcome = run.outcome, None
         if result is not None:
             self._curves[run.trv] = self._curves.get(run.trv, ValveCurve()).add(result)
@@ -1663,6 +1692,7 @@ class RoomControl:
             rated_basis=surface.rated_basis.value if surface is not None else "75/65",
             sweep_needed=not sweep_fresh(self._sweeps.get(trv, []), now),
             positions=hold_positions(self._maps.get(trv, ValveMap()), now),
+            restore_c=self._gate.restore_value(trv),
         )
 
     async def _restore_after_restart(self) -> None:
@@ -1675,29 +1705,134 @@ class RoomControl:
             if await self.release("Testlauf nach einem Neustart", {room_id}):
                 self._restore = None
             return
-        if self._gate.limits(room.details.trv_entity) is None:
-            # Not known yet after the start; tried again next minute.
+        trv = room.details.trv_entity
+        if self._restore_retry and (
+            trv not in self._gate.touched()
+            or (self._restore_since is not None and self._clock() - self._restore_since >= RESTORE_RETRY_FOR)
+        ):
+            if trv in self._gate.touched():
+                self._log.add(
+                    LogCategory.ROOMS,
+                    f"{room.name}: Rückweg nach Testlauf oder Durchlauf nach 2 h aufgegeben; bitte den Sollwert am "
+                    "Thermostat prüfen.",
+                    problem=True,
+                )
+            self._restore, self._restore_retry, self._restore_since = None, False, None
             return
-        if await self._restore_thermostat(room, celsius, "Testlauf nach einem Neustart"):
-            self._restore = None
+        if self._gate.limits(trv) is None or (self._restore_retry and self._gate.sending(trv)):
+            # Not known yet after the start (or still unreachable), or the gate still waits whether the last try
+            # arrived: tried again next minute.
+            return
+        retry = self._restore_retry
+        reason = "Rückweg nachgeholt" if retry else "Testlauf nach einem Neustart"
+        if await self._hand_back_after_run(room, celsius, reason, what="dem Testlauf", quiet=retry):
+            if retry:
+                self._log.add(LogCategory.ROOMS, f"{room.name}: Rückweg nach Testlauf oder Durchlauf nachgeholt.")
+            self._restore, self._restore_retry, self._restore_since = None, False, None
 
-    async def _restore_thermostat(self, room: Room, celsius: float, reason: str, *, what: str = "dem Testlauf") -> bool:
-        """The way back after a test run or sweep; when it does not go out, the fallback. True when one went out."""
+    async def _hand_back_after_run(
+        self, room: Room, celsius: float, reason: str, *, what: str, quiet: bool = False
+    ) -> bool:
+        """After a test run or sweep (1.4.3, finding 4 of the acceptance 1.4.0): a room in "Steuern" is taken over
+        by the control at once - its value, free of dead band and interval -, else the way back to the setpoint
+        from before. True when the thermostat is handed over or back."""
+        trv = room.details.trv_entity
+        if trv is None or trv not in self._gate.touched():
+            # The run sent nothing that stayed: nothing to hand back.
+            return True
+        settings = self._settings.current
+        stage = effective_stage(settings.room_control.mode, room.details.stage)
+        if stage is RoomControlMode.CONTROL and settings.operating_mode is OperatingMode.LIVE:
+            now = self._clock()
+            self._gate.take_over(trv)
+            self._refresh_thermostats(now)
+            result = await self._control(room, stage, now, settings)
+            if result is not None and (result.sent or result.held is Held.SAME):
+                decision = self._rooms[room.entity_id].decision
+                value = f" ({_celsius(decision.target_c)})" if decision is not None and decision.target_c else ""
+                self._log.add(LogCategory.ROOMS, f"{room.name}: Die Regelung übernimmt nach {what} sofort{value}.")
+                return True
+            self._gate.take_over(trv, active=False)
+        return await self._restore_thermostat(room, celsius, reason, what=what, quiet=quiet)
+
+    async def _restore_thermostat(
+        self, room: Room, celsius: float, reason: str, *, what: str = "dem Testlauf", quiet: bool = False
+    ) -> bool:
+        """The way back after a test run or sweep; when it does not go out, the room's setpoint (not the emergency
+        value: the app keeps the room). When neither surely went out, it is tried again every minute.
+        True when one went out."""
         command = SetThermostatSetpoint(room_id=room.entity_id, celsius=celsius, reason=RoomReason.RESTORE)
+        try:
+            result = await self._gate.submit(command)
+        except WriteOutcomeUnknown as err:
+            # It may have arrived: the gate finds out (the thermostat reports it, or not within 5 minutes); until
+            # then the same value again would count as sent. Tried again once the gate knows.
+            if not quiet:
+                self._log.add(
+                    LogCategory.ROOMS,
+                    f"Rückweg nach {what} {room.name}: Ergebnis unbekannt ({err}); die App versucht es wieder, bis "
+                    "das Thermostat den Wert meldet.",
+                    problem=True,
+                )
+            self._retry_restore(room, celsius)
+            return False
+        except (WriteRejected, WriteNotExecuted) as err:
+            problem = str(err) or type(err).__name__
+        else:
+            if result.sent or result.held is Held.SAME:
+                return True
+            problem = result.message
+        if not quiet:
+            self._log.add(
+                LogCategory.ROOMS,
+                f"Rückweg nach {what} {room.name} nicht gesendet ({problem}); Rückfall auf das Raum-Soll.",
+                problem=True,
+            )
+        if await self._fallback_to_setpoint(room, reason, quiet=quiet):
+            return True
+        self._retry_restore(room, celsius)
+        return False
+
+    def _retry_restore(self, room: Room, celsius: float) -> None:
+        """Neither the way back nor the fallback surely arrived (thermostat unreachable, Home Assistant busy):
+        again every minute, at most 2 hours."""
+        trv = room.details.trv_entity
+        if trv is None or trv not in self._gate.touched():
+            return
+        if not self._restore_retry:
+            self._restore_since = self._clock()
+        self._restore = (room.entity_id, celsius)
+        self._restore_retry = True
+
+    async def _fallback_to_setpoint(self, room: Room, reason: str, *, quiet: bool = False) -> bool:
+        """The thermostat to the room's setpoint now (after a way back that did not go out)."""
+        trv = room.details.trv_entity
+        if trv is None:
+            return True
+        value = room.details.setpoint_at(self._clock().astimezone(self._zone).time())
+        limits = self._gate.known_limits(trv)
+        if limits is not None:
+            value = limits.round(value)
+        command = SetThermostatSetpoint(room_id=room.entity_id, celsius=value, reason=RoomReason.FALLBACK)
         try:
             result = await self._gate.submit(command)
         except (WriteRejected, WriteNotExecuted, WriteOutcomeUnknown) as err:
             problem = str(err) or type(err).__name__
         else:
             if result.sent or result.held is Held.SAME:
+                self._log.add(
+                    LogCategory.ROOMS, f"Thermostat {room.name} auf das Raum-Soll {_celsius(value)} ({reason})."
+                )
                 return True
             problem = result.message
-        self._log.add(
-            LogCategory.ROOMS,
-            f"Rückweg nach {what} {room.name} nicht gesendet ({problem}); Rückfall auf den Notfallwert.",
-            problem=True,
-        )
-        return await self.release(reason, {room.entity_id})
+        if not quiet:
+            self._log.add(
+                LogCategory.ROOMS,
+                f"Thermostat {room.name}: Raum-Soll {_celsius(value)} nicht sicher angekommen ({problem}); die App "
+                "versucht es jede Minute wieder.",
+                problem=True,
+            )
+        return False
 
     # --- quality, demand and gain (1.4.3) ---------------------------------------------------------------
 
@@ -1957,6 +2092,9 @@ class RoomControl:
         if problem is not None:
             return problem
         sweep = Sweep(room_id=room.entity_id, trv=trv, started_at=now, part_of_test=part_of_test)
+        if before_c is None:
+            # An earlier run that was not handed back cleanly: its setpoint before is the way back (finding 4).
+            before_c = self._gate.restore_value(trv)
         action = begin(sweep, inputs, before_c=before_c)
         self._sweep = sweep
         if not part_of_test:
@@ -2046,7 +2184,7 @@ class RoomControl:
                 else:
                     await self._end_test(abort(run, now, f"Durchlauf abgebrochen: {sweep.message}"))
         elif restore and action.celsius is not None and room is not None and sweep.commands > 0:
-            await self._restore_thermostat(room, action.celsius, f"Durchlauf {name} beendet", what="dem Durchlauf")
+            await self._hand_back_after_run(room, action.celsius, f"Durchlauf {name} beendet", what="dem Durchlauf")
         self._save()
         self._notify()
 
@@ -2173,7 +2311,60 @@ class RoomControl:
             sweep_blocked=self._sweep_blocked(room, settings, now),
             sweep_queued=room.entity_id in self._sweep_queue,
             regulation=self._regulation_status(room, state),
+            valve_check=self._valve_check(room, now),
         )
+
+    def _valve_check(self, room: Room, now: datetime) -> ValveCheck:
+        """The age of the reported valve position and the probe pair's spread as a check (finding 4c: the Comet
+        reports its position mostly right after a new setpoint; Zigbee2MQTT cannot read it)."""
+        state = self._hems.sources.get(room.details.valve_entity)
+        valve = self._hems.sources.number(room.details.valve_entity)
+        reported = state.last_reported if state is not None and valve is not None else None
+        age = round((now - reported).total_seconds() / 60, 1) if reported is not None else None
+        spread = estimate = None
+        settings = self._settings.current
+        probe = settings.room_control.probe
+        if probe.room_id == room.entity_id and not self._swap.swapped:
+            flow, flow_problem = self._probe_value(probe.flow_entity, "Vorlauf", now)
+            back, back_problem = self._probe_value(probe.return_entity, "Rücklauf", now)
+            thermostat = self._thermostats.get(room.details.trv_entity or "")
+            reference = room_celsius(self._hems.sources.get(room.entity_id))
+            if reference is None and thermostat is not None:
+                reference = thermostat.temperature_c
+            warm = flow is not None and reference is not None and flow >= reference + 5.0
+            if flow is not None and back is not None and flow_problem is None and back_problem is None and warm:
+                spread = round(flow - back, 1)
+                estimate = self._valve_by_spread(room.details.trv_entity, spread)
+        doubt = None
+        if (
+            estimate is not None
+            and valve is not None
+            and spread is not None
+            and abs(estimate - valve) >= SPREAD_DOUBT
+            and (reported is None or now - reported >= SPREAD_DOUBT_AGE)
+        ):
+            doubt = (
+                f"Die Spreizung am Heizkörper ({_number(spread)} K) passt eher zu etwa {estimate:.0f} % Ventil "
+                f"(Testlauf); die gemeldete Stellung ({valve:.0f} %) ist vermutlich alt."
+            )
+        return ValveCheck(reported_at=reported, age_min=age, spread_k=spread, spread_valve=estimate, doubt=doubt)
+
+    def _valve_by_spread(self, trv: str | None, spread: float) -> float | None:
+        """The opening the test runs measured at about this spread (warm water at the radiator)."""
+        steps = [
+            (step.flow_c - step.return_c, step.valve)
+            for result in self._curves.get(trv or "", ValveCurve()).results
+            for step in result.steps
+            if step.flow_c is not None
+            and step.return_c is not None
+            and step.valve is not None
+            and step.room_c is not None
+            and step.flow_c >= step.room_c + 5.0
+        ]
+        if not steps:
+            return None
+        nearest = min(steps, key=lambda item: abs(item[0] - spread))
+        return float(nearest[1]) if abs(nearest[0] - spread) <= SPREAD_MATCH_K else None
 
     def _control_blocked(self, room: Room, settings: Settings) -> str | None:
         """Why the room may not go to "Steuern"; None when it may."""

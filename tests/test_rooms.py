@@ -896,9 +896,11 @@ async def test_a_way_back_that_does_not_go_out_falls_back(world: World) -> None:
 
     await world.control.cancel_test(OFFICE)
 
-    # Finding 2: the fallback follows.
-    assert world.calls(TRV_OFFICE) == [24.0, 20.0]
-    assert any("Rückweg nach dem Testlauf Büro nicht gesendet" in text for text in await messages(world.log))
+    # Finding 2: the fallback follows - since 1.4.3 to the room's setpoint (finding 4b), not the emergency value.
+    assert world.calls(TRV_OFFICE) == [24.0, 21.0]
+    texts = await messages(world.log)
+    assert any("Rückweg nach dem Testlauf Büro nicht gesendet" in text for text in texts)
+    assert "Thermostat Büro auf das Raum-Soll 21,0 °C (Testlauf Büro beendet)." in texts
     assert world.gate.touched() == []
 
 
@@ -1648,3 +1650,152 @@ async def test_a_night_test_run_begins_with_a_sweep_and_then_holds_four_position
     cancelled = await world.http.post(f"/api/rooms/{OFFICE}/test", json={"action": "cancel"})
     assert cancelled.status_code == 200
     assert world.calls(TRV_OFFICE)[-1] == 21.0
+
+
+# --- 1.4.3: finding 4 of the acceptance 1.4.0 (bath too cold after the test run of 23./24.11.) ----------------
+
+
+def bath_test(celsius: float, reason: RoomReason = RoomReason.TEST) -> SetThermostatSetpoint:
+    return SetThermostatSetpoint(TRV_BATH_TEMPERATURE, celsius, reason)
+
+
+async def bath_at(world: World, celsius: float) -> None:
+    await eventually(lambda: world.home.hems_sources.attribute(TRV_BATH, "temperature") == celsius)
+
+
+def bath_run(before_c: float | None) -> TestRun:
+    return TestRun(
+        room_id=TRV_BATH_TEMPERATURE,
+        trv=TRV_BATH,
+        armed_at=T0,
+        state=TestState.RUNNING,
+        before_c=before_c,
+        started_at=T0,
+    )
+
+
+async def test_a_way_back_with_an_unknown_outcome_is_tried_again_until_it_arrives(world: World) -> None:
+    # 23.11. 23:25: the run ends while the Comet is briefly unreachable; Home Assistant answers 502.
+    await world.gate.submit(bath_test(26.0))
+    await bath_at(world, 26.0)
+    world.fake.service_status["climate.set_temperature"] = 502
+    world.control._test = bath_run(22.0)
+
+    await world.control.cancel_test(TRV_BATH_TEMPERATURE)
+
+    assert world.control._restore == (TRV_BATH_TEMPERATURE, 22.0)
+    texts = await messages(world.log, LogCategory.ROOMS)
+    assert any(text.startswith("Rückweg nach dem Testlauf Bad: Ergebnis unbekannt (HTTP 502)") for text in texts)
+    # The thermostat is back; the gate still waits whether the last try arrived: nothing goes out yet.
+    del world.fake.service_status["climate.set_temperature"]
+    calls = len(world.calls(TRV_BATH))
+    world.clock.now += timedelta(minutes=1)
+    await world.control.minute()
+    assert len(world.calls(TRV_BATH)) == calls
+
+    # 5 minutes without the thermostat showing it: not confirmed; then the way back goes out again.
+    world.clock.now += timedelta(minutes=5)
+    world.gate.expire()
+    await world.control.minute()
+
+    assert world.calls(TRV_BATH)[-1] == 22.0
+    await bath_at(world, 22.0)
+    assert world.control._restore is None
+    assert "Bad: Rückweg nach Testlauf oder Durchlauf nachgeholt." in await messages(world.log, LogCategory.ROOMS)
+    assert world.gate.restore_value(TRV_BATH) is None
+
+
+async def test_a_run_after_one_that_was_not_handed_back_goes_back_to_the_setpoint_before_both(world: World) -> None:
+    # The first run left 26 °C at the thermostat and its way back unconfirmed (the gate keeps 22 °C).
+    await world.gate.submit(bath_test(26.0))
+    await bath_at(world, 26.0)
+
+    # The next run (23:49, downward only) takes the gate's 22 °C as its setpoint before, not the 26 °C it finds.
+    run = TestRun(room_id=TRV_BATH_TEMPERATURE, trv=TRV_BATH, armed_at=T0, down_only=True, full_offset_k=3.5)
+    night = datetime(2026, 11, 23, 23, 49, tzinfo=UTC)
+    inputs = TestInputs(
+        now=night,
+        local=night,
+        setpoint_c=22.0,
+        room_c=22.0,
+        trv_c=22.5,
+        trv_setpoint_c=26.0,
+        valve=88.0,
+        flow_c=40.0,
+        return_c=37.0,
+        window_open=False,
+        limits=ThermostatLimits(8.0, 28.0, 0.5),
+        probe_problem=None,
+        may_write=True,
+        restore_c=world.gate.restore_value(TRV_BATH),
+    )
+    advance(run, inputs, time(22, 0), time(1, 0), time(5, 0))
+    assert run.before_c == 22.0
+
+    world.clock.now += timedelta(minutes=1)
+    await world.gate.submit(bath_test(24.0))
+    await bath_at(world, 24.0)
+    world.control._test = bath_run(run.before_c)
+    await world.control.cancel_test(TRV_BATH_TEMPERATURE)
+
+    # 24.11. 02:03 the way back to 26 °C was refused; now it goes to 22 °C.
+    assert world.calls(TRV_BATH)[-1] == 22.0
+    assert not any(text.startswith("Abgelehnt") for text in await messages(world.log, LogCategory.WRITE))
+    assert world.gate.restore_value(TRV_BATH) is None
+
+
+async def test_after_a_run_a_room_in_control_is_taken_over_at_once(world: World) -> None:
+    learned(world, TRV_BATH)
+    world.stage(TRV_BATH_TEMPERATURE, RoomStage.CONTROL, offset_k=1.0)
+    await beat(world)
+    assert world.calls(TRV_BATH) == [23.0]
+    await bath_at(world, 23.0)
+    world.clock.now += timedelta(minutes=1)
+    await world.gate.submit(bath_test(26.0))
+    await bath_at(world, 26.0)
+    world.clock.now += timedelta(minutes=2)
+    # A setpoint before the run that is not the control's (the restore would go there).
+    world.control._test = bath_run(22.0)
+
+    await world.control.cancel_test(TRV_BATH_TEMPERATURE)
+
+    # 3 minutes after the last control command: the control's 23 °C (setpoint + offset), not the way back to 22 °C
+    # and without waiting the 15 minutes (on 24.11. it came 18 minutes later).
+    assert world.calls(TRV_BATH) == [23.0, 26.0, 23.0]
+    assert "Bad: Die Regelung übernimmt nach dem Testlauf sofort (23,0 °C)." in await messages(
+        world.log, LogCategory.ROOMS
+    )
+    assert world.gate.restore_value(TRV_BATH) is None
+    assert TRV_BATH in world.gate.touched()
+
+
+def spread_curve() -> ValveCurve:
+    """A test run at the radiator with the probe pair: the spread shrinks as the valve opens."""
+    steps = tuple(
+        Step(21.5 + offset, 21.5, 21.0, offset, valve, True, 30.0, None, 40.0, back)
+        for offset, valve, back in ((0.5, 10.0, 31.0), (1.0, 30.0, 34.0), (2.0, 60.0, 36.5), (3.0, 85.0, 37.8))
+    )
+    return ValveCurve((TestResult(T0, T0 + timedelta(hours=3), True, "Fertig", steps),))
+
+
+async def test_an_old_valve_position_is_shown_with_its_age_and_checked_by_the_spread(world: World) -> None:
+    world.fake.clock = world.clock
+    world.fake.set(
+        TRV_OFFICE_VALVE, "29", unit="%", name="Thermostat Büro Ventil", reported=T0 - timedelta(hours=1, minutes=14)
+    )
+    await eventually(lambda: world.home.hems_sources.number(TRV_OFFICE_VALVE) == 29.0)
+    world.control._curves[TRV_OFFICE] = spread_curve()
+    await hang_probe_at_the_office(world)
+    # 03:35 at the bath: flow 33.6 / return 31.4 - here 40.0 / 37.8: a spread of 2.2 K.
+    await probe_values(world, "40.0", "37.8")
+
+    office = await room_status(world, "Büro")
+
+    check = office["valve_check"]
+    assert check["age_min"] == 74.0 and check["spread_k"] == 2.2 and check["spread_valve"] == 85.0
+    assert check["doubt"] == (
+        "Die Spreizung am Heizkörper (2,2 K) passt eher zu etwa 85 % Ventil (Testlauf); die gemeldete Stellung "
+        "(29 %) ist vermutlich alt."
+    )
+    bath = await room_status(world, "Bad")
+    assert bath["valve_check"]["spread_k"] is None and bath["valve_check"]["doubt"] is None

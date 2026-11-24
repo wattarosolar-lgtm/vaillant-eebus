@@ -183,6 +183,9 @@ class TestInputs:
     sweep_needed: bool = False
     # Offsets to hold with the probe pair, from the valve map (hold_positions); empty: step up and down.
     positions: tuple[float, ...] = ()
+    # The setpoint from before an earlier run that was not handed back cleanly (write gate); the run takes it as
+    # its own setpoint before, so run and gate agree on the way back (1.4.3, finding 4 of the acceptance 1.4.0).
+    restore_c: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,7 +308,7 @@ def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, en
         run.state = TestState.RUNNING
         run.started_at = inputs.now
         run.ended_at = None
-        run.before_c = inputs.trv_setpoint_c
+        run.before_c = inputs.restore_c if inputs.restore_c is not None else inputs.trv_setpoint_c
         run.commands = 0
         run.steps = []
         run.outcome = None

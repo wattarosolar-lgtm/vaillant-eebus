@@ -640,3 +640,18 @@ def test_without_a_known_map_the_run_steps_as_before_after_the_sweep() -> None:
 def test_the_stages_cover_minus_10_to_15() -> None:
     assert STAGES == (-10.0, -5.0, 0.0, 5.0, 10.0, 15.0)
     assert flat().weights(7.5) == [(3, 0.5), (4, 0.5)]
+
+
+def test_a_run_takes_the_gates_way_back_as_its_setpoint_before() -> None:
+    valve = Valve()
+    valve.setpoint = 26.0
+    run = TestRun(room_id="sensor.bad", trv="climate.bad", armed_at=T0 - timedelta(days=1))
+    start = datetime(2026, 11, 24, 22, 0, tzinfo=UTC)
+
+    run_step(run, night(start, run, valve, restore_c=22.0), time(22, 0), time(1, 0), time(5, 0))
+
+    # Finding 4a: a run that finds the last step of an earlier one (26 °C) goes back to that run's setpoint before.
+    assert run.state is TestState.RUNNING and run.before_c == 22.0
+    other = TestRun(room_id="sensor.bad", trv="climate.bad", armed_at=T0 - timedelta(days=1))
+    run_step(other, night(start, other, valve), time(22, 0), time(1, 0), time(5, 0))
+    assert other.before_c == 26.0
