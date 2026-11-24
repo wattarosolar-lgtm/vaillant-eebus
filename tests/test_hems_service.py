@@ -516,6 +516,9 @@ async def test_a_cold_morning_goes_down_to_the_minimum_power_step_by_step(app: A
     assert (zone2.mode, zone2.shift_k, zone2.off) == ("reduce", -1.0, False)
     # The executor sends from the plan: the window's start asks for a new plan at once.
     assert app.hems._wake.is_set()
+    # F2 holds in the window (the night runs first in each sample).
+    flow = app.hems.status().flow[0]
+    assert (flow.offset_k, flow.holding) == (0.0, "Nachtabsenkung läuft")
     # Zone 1 only with the frost protection.
     assert night_of(app, MV_ZONE_1).shift_k == 0.0
     await app.hems.plan_now()

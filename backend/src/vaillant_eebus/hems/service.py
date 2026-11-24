@@ -1128,14 +1128,15 @@ class HemsService:
                 await listener(now)
             except Exception:
                 _LOGGER.exception("The room control failed after the samples")
-        try:
-            await self._update_flow(now)
-        except Exception:
-            _LOGGER.exception("The flow of the radiator zone failed")
+        # The night first: in its window F2 holds.
         try:
             await self._update_night(now)
         except Exception:
             _LOGGER.exception("The night setback failed")
+        try:
+            await self._update_flow(now)
+        except Exception:
+            _LOGGER.exception("The flow of the radiator zone failed")
 
     async def _update_supply(self, now: datetime) -> dict[str, list[tuple[datetime, float]]]:
         settings = self._settings.current
