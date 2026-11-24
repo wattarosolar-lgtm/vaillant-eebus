@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.4.3
+
+**Schneller lernen, Fenster sicher erkennen, Regelung lernt mit.** Mit 1.4.2 lernte das Thermostat sein
+Regelverhalten aus Testläufen und Alltag – das dauerte Nächte bzw. Tage. Beim Lüften am 23.11. erkannte die App ein
+offenes Fenster mit den Aqara-Raumsensoren oft gar nicht oder erst nach Minuten.
+
+- **Fenster werden schneller und sicherer erkannt:** Die App vergleicht jede Meldung des Raumsensors mit der letzten,
+  auch wenn die älter ist (bisher nur innerhalb 10 Minuten – die Sensoren melden oft nur bei einer Änderung). Die
+  **Luftfeuchte** ist das Hauptsignal: Fällt die absolute Feuchte schnell genug um eine Schwelle, die sich nach dem
+  Wetter richtet (0,2 × Unterschied innen/außen, 0,5–1,0 g/m³; bei mildem, feuchtem Wetter zählt sie nicht), und
+  steigt die Temperatur nicht, ist das Fenster offen. Dazu die Temperatur (−0,5 K in 15, −0,8 K in 30 Minuten, wenn
+  es draußen deutlich kälter ist) und der **Fühler am Thermostat** (−1 K in 8 Minuten, der Raumsensor steigt nicht).
+  Zu gilt es nach +0,3 g/m³, +0,2 K im Raum oder +0,5 K am Thermostat, spätestens nach 30 Minuten. Nachgerechnet mit
+  dem Lüften vom 23.11.: offen nach 2,5 bzw. 3,4 Minuten (bisher nicht bzw. nach 6 Minuten erkannt).
+- **Fensterkontakt je Raum (optional):** ein `binary_sensor` im Raum-Editor; mit Kontakt gilt nur er, sofort. Meldet
+  er sich 10 Minuten nicht, gelten wieder die Regeln.
+- **Sofort reagieren:** Die Raumregelung entscheidet beim Öffnen und Schließen eines Fensters sofort, nicht erst im
+  5-Minuten-Takt. Das Protokoll nennt das Signal; die Seite zeigt je Raum, wie das Fenster erkannt wird.
+- **Schneller Durchlauf:** In etwa 30 Minuten, ohne Fühlerpaar und ohne warmes Wasser, lernt die App, ab wann das
+  Ventil öffnet und schließt: alle 2 Minuten ein neuer Sollwert, 0,5 K (1 K, wenn sich das Ventil kaum bewegt), hoch
+  bis ganz offen, runter bis zu, zurück. Höchstens 20 Befehle, eigenes Budget (nicht bei den 24 am Tag). Per Knopf
+  je Raum oder **„Alle Räume nacheinander“**. Das Ergebnis geht ins Kennfeld (Quelle „Durchlauf“, nur wo sonst
+  nichts bekannt ist) und **reicht für „Steuern“**. Die Seite zeigt Fortschritt und die Kurve des letzten Durchlaufs.
+- **Nacht-Testlauf kürzer:** Er beginnt mit einem schnellen Durchlauf (entfällt, wenn einer jünger als 7 Tage ist)
+  und hält danach mit dem Fühlerpaar nur noch vier Stellungen – zu, etwa 30 %, 60 %, ganz offen – für Spreizung und
+  Wärme.
+- **Regelgüte je Raum und Tag** (ab „Vorschau“): mittlere Abweichung (zu kalt/zu warm und Betrag), Zeit außerhalb
+  des Komfortbands, Überschwinger, Hin und her, Aufheizen nach einer Soll-Erhöhung (getrennt), Befehle, Ventil.
+  Ohne Fenster, Testlauf und Durchlauf. Die Seite zeigt heute und 7 Tage, kurz nach Mitternacht steht je Raum eine
+  Zeile im Protokoll.
+- **Bedarf je Außentemperatur:** Die Ventilöffnung, die den Raum am Soll hält, je Stufe −10 … 15 °C (Mittel der
+  letzten 3 Stunden, dazwischen gemittelt), Startwert aus den ruhigen Stunden der letzten 21 Tage. In „Steuern“ führt
+  die App ihn nach (±2 % je halbe Stunde daneben); täglich rückt er 20 % zum Verlauf der letzten 7 Tage.
+- **Verstärkung je Raum:** Start aus dem Raummodell (20–40 %/K, sonst 30 %/K); höchstens einmal am Tag nach einem
+  Tag mit mindestens 12 Stunden „Steuern“ ×0,8 bei Überschwingern oder Hin und her, ×1,2, wenn der Raum lange träge
+  daneben liegt (10–60 %/K). Jede Änderung mit Grund im Protokoll.
+- **Seite „Räume“:** je Raum „Regelung lernt mit“ mit Bedarfskurve, Verstärkung, Regelgüte und dem Knopf „Gelerntes
+  der Regelung zurücksetzen“ (am Handy zugeklappt).
+
 ## 1.4.2
 
 **Das Thermostat lernt sein Regelverhalten** (Abnahme 1.4.0, Befunde 2 und 3). In 1.4.0/1.4.1 ließ sich „Steuern“
