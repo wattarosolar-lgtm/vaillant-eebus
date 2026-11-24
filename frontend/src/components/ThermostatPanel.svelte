@@ -3,7 +3,9 @@
   import { formatNumber, maybe, moment, signed } from '../lib/format';
   import { ROOM_CONTROL_LABELS, ROOM_STAGES } from '../lib/texts';
   import type { OperatingMode, RoomControlRoom, RoomsPage, RoomStage } from '../lib/types';
+  import RegulationPanel from './RegulationPanel.svelte';
   import StatusPill from './StatusPill.svelte';
+  import SweepPanel from './SweepPanel.svelte';
 
   let {
     room,
@@ -56,9 +58,10 @@
 
   async function arm(): Promise<void> {
     const confirm = window.confirm(
-      `Testlauf ${room.name}: In der kommenden Nacht ab ${testStart} Uhr stellt die App das Thermostat Schritt für ` +
-        'Schritt (0,5 bis 3 K, je nach Ventil) höher und wieder tiefer, bis 5 Uhr, höchstens 16 Befehle. Der Raum kann ' +
-        'dabei bis zu 1 K wärmer werden. Vormerken?',
+      `Testlauf ${room.name}: In der kommenden Nacht ab ${testStart} Uhr zuerst ein schneller Durchlauf (etwa 30 ` +
+        'Minuten; entfällt, wenn einer jünger als 7 Tage ist), danach hält die App mit dem Fühlerpaar vier Stellungen ' +
+        '(zu, etwa 30 %, 60 %, ganz offen) je 20 bis 40 Minuten, bis spätestens 5 Uhr. Der Raum kann dabei bis zu 1 K ' +
+        'wärmer werden. Vormerken?',
     );
     if (confirm) {
       await act(() => roomTest(room.room_id, 'arm', true));
@@ -190,7 +193,7 @@
       <p>
         <StatusPill label={room.test.state_name} tone={room.test.state === 'failed' ? 'warn' : 'neutral'} />
         {room.test.message}
-        {#if room.test.state === 'running'}
+        {#if room.test.state === 'running' && room.test.phase !== 'sweep'}
           <span class="hint">· {room.test.steps} Stufen gemessen, Soll {maybe(room.test.setpoint_c, 1, '°C')}</span>
         {/if}
         {#if room.test.state === 'armed' && room.test.nights > 0}
@@ -213,13 +216,18 @@
     {/if}
   </div>
 
+  <SweepPanel {room} {appMode} {onChange} />
+
+  <RegulationPanel {room} {onChange} />
+
   <details>
     <summary>
       Regelverhalten: {learned.ready ? '„zu“ und „ganz offen“ bekannt' : `es fehlt ${learned.missing.join(' und ')}`}
     </summary>
     <p class="hint">
-      Gelernt aus {learned.points_test} Punkten von Testläufen und {learned.points_daily} aus dem Alltag (ruhige halbe
-      Stunde mit warmem Wasser), {learned.responses} Sprungantworten. Abweichung = Sollwert minus Temperatur am Thermostat.
+      Gelernt aus {learned.points_test} Punkten von Testläufen, {learned.points_daily} aus dem Alltag (ruhige halbe
+      Stunde mit warmem Wasser) und {learned.points_sweep} aus schnellen Durchläufen (zählen nur, wo sonst nichts
+      bekannt ist), {learned.responses} Sprungantworten. Abweichung = Sollwert minus Temperatur am Thermostat.
     </p>
     <dl class="grid-facts">
       <div>
@@ -279,7 +287,10 @@
   <details>
     <summary>Testläufe ({room.curve.complete_runs} von {room.curve.runs} vollständig)</summary>
     {#if room.curve.steps.length === 0}
-      <p class="hint">Noch kein Testlauf. Die App lernt auch im Alltag; ein Testlauf geht schneller.</p>
+      <p class="hint">
+        Noch kein Testlauf. Die App lernt auch im Alltag und aus dem schnellen Durchlauf; der Testlauf misst zusätzlich
+        Vor- und Rücklauf.
+      </p>
     {:else}
       <p class="hint">
         {#if room.curve.last_at}Letzter Lauf {moment(room.curve.last_at)} Uhr ({room.curve.last_ending}).{/if}
@@ -420,6 +431,9 @@
 
   .table-wrap {
     overflow-x: auto;
+    /* Scrolls inside the card instead of widening it: no width of its own to the layout, the card's width. */
+    width: 0;
+    min-width: 100%;
   }
 
   table {

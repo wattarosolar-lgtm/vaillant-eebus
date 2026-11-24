@@ -713,10 +713,80 @@ export interface MapStatus {
   smallest_step_k: number | null;
   points_test: number;
   points_daily: number;
+  /** Points of sweeps (1.4.3): they only fill cells without other points. */
+  points_sweep: number;
   responses: number;
   last_point_at: string | null;
   cells: MapCell[];
   water: string[];
+}
+/** The control's quality of one day (1.4.3); deviation = setpoint - room (positive: too cold). */
+export interface QualityDay {
+  day: string;
+  today: boolean;
+  hours: number;
+  control_hours: number;
+  /** The room was in "Steuern" at some time of the day (else the commands are the preview's). */
+  in_control: boolean;
+  mean_k: number | null;
+  mean_abs_k: number | null;
+  cold_pct: number | null;
+  warm_pct: number | null;
+  overshoots: number;
+  overshoot_max_k: number | null;
+  swings: number;
+  heatups: number;
+  heatup_median_min: number | null;
+  heatups_missed: number;
+  commands: number;
+  movements: number;
+  valve_mean: number | null;
+  valve_stop_pct: number | null;
+  at_thermostat: boolean;
+}
+export interface DemandStage {
+  outdoor_c: number;
+  value: number;
+  hours: number;
+  learned: boolean;
+}
+/** What the control learned of the room (1.4.3) and how well it controls it. */
+export interface RegulationStatus {
+  /** Demand and gain apply (a room with its own sensor); the bathroom has only the quality. */
+  applies: boolean;
+  basis: string | null;
+  stages: DemandStage[];
+  outdoor_c: number | null;
+  demand_now: number | null;
+  gain: number | null;
+  trend: number | null;
+  gain_start: number | null;
+  gain_start_reason: string | null;
+  gain_changed_at: string | null;
+  gain_reason: string | null;
+  quality: QualityDay[];
+}
+export type SweepState = 'running' | 'done' | 'aborted';
+export interface SweepPoint {
+  setpoint_c: number;
+  offset_k: number;
+  valve: number;
+  rising: boolean;
+  reaction_min: number | null;
+}
+/** The room's sweep now (running) or its last one. */
+export interface SweepStatus {
+  state: SweepState;
+  state_name: string;
+  message: string;
+  phase_name: string | null;
+  started_at: string;
+  ended_at: string | null;
+  setpoint_c: number | null;
+  commands: number;
+  complete: boolean;
+  part_of_test: boolean;
+  points: SweepPoint[];
 }
 /** The reads of a W600's valve position. */
 export interface ReadInfo {
@@ -773,6 +843,11 @@ export interface RoomControlRoom {
   cold: boolean;
   can_control: boolean;
   control_blocked: string | null;
+  sweep: SweepStatus | null;
+  /** Why a sweep cannot start now; null when it can. */
+  sweep_blocked: string | null;
+  sweep_queued: boolean;
+  regulation: RegulationStatus;
 }
 
 export interface ZoneControl {
@@ -802,6 +877,8 @@ export interface RoomControlStatus {
   rooms: RoomControlRoom[];
   zones: ZoneControl[];
   problems: string[];
+  /** Rooms still waiting for their sweep ("Alle Räume nacheinander"). */
+  sweep_queue: string[];
 }
 
 /** The page "Räume": the energy management's view of the rooms and the room control. */

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ApiError, getAutomation, saveProbe, setMqttBaseTopic, setRoomControl } from '../lib/api';
+  import { allRoomsSweep, ApiError, getAutomation, saveProbe, setMqttBaseTopic, setRoomControl } from '../lib/api';
   import { duration, maybe, moment } from '../lib/format';
   import { ROOM_CONTROL_HINTS, ROOM_CONTROL_LABELS } from '../lib/texts';
   import type { RoomControlMode, RoomControlStatus, RoomsPage } from '../lib/types';
@@ -47,6 +47,32 @@
   }
 
   const live = $derived(control.app_mode === 'live');
+  const sweeping = $derived(control.sweep_queue.length > 0 || control.rooms.some((room) => room.sweep?.state === 'running' && !room.sweep.part_of_test));
+  let sweepBusy = $state(false);
+  let sweepError = $state<string | null>(null);
+
+  async function sweepAll(action: 'start' | 'cancel'): Promise<void> {
+    let confirm = false;
+    if (action === 'start') {
+      confirm = window.confirm(
+        'Schneller Durchlauf für alle Räume nacheinander: Jedes Thermostat mit Ventilstellung bekommt etwa 30 Minuten ' +
+          'lang alle 2 Minuten einen neuen Sollwert (höchstens 20 Befehle je Raum, nicht im Tageskontingent) und ' +
+          'danach wieder seinen alten. Räume mit offenem Fenster oder zu warm werden übersprungen. Starten?',
+      );
+      if (!confirm) {
+        return;
+      }
+    }
+    sweepBusy = true;
+    sweepError = null;
+    try {
+      onChange(await allRoomsSweep(action, confirm));
+    } catch (err) {
+      sweepError = err instanceof ApiError ? err.message : 'Das hat nicht geklappt.';
+    } finally {
+      sweepBusy = false;
+    }
+  }
 
   async function switchMode(mode: RoomControlMode): Promise<void> {
     let confirm = false;
@@ -133,7 +159,7 @@
   <p class="secondary">
     Die App gibt jedem Heizkörperthermostat seinen Sollwert vor, damit der Raum sein Soll hält. Jeder Raum hat dazu
     eine eigene Stufe; es gilt die kleinere von beiden. „Steuern“ geht nur im Live-Betrieb und erst, wenn die App vom
-    Thermostat „zu“ und „ganz offen“ kennt – aus einem Testlauf oder aus dem Alltag.
+    Thermostat „zu“ und „ganz offen“ kennt – aus einem schnellen Durchlauf, einem Testlauf oder dem Alltag.
   </p>
   <div class="segments stage" role="group" aria-label="Stufe der Raumregelung">
     {#each MODES as mode (mode)}
@@ -200,6 +226,34 @@
       {/if}
     </div>
   </details>
+
+  {#if control.mode !== 'off' && live}
+    <div class="sweep-all">
+      <span class="field-label">Schneller Durchlauf</span>
+      {#if sweeping}
+        <p class="hint">
+          Läuft{control.sweep_queue.length > 0 ? `; danach noch: ${control.sweep_queue.join(', ')}` : ''}.
+        </p>
+        <div>
+          <button type="button" class="button small" disabled={sweepBusy} onclick={() => void sweepAll('cancel')}
+            >Durchläufe abbrechen</button
+          >
+        </div>
+      {:else}
+        <p class="hint">
+          Lernt in etwa 25 Minuten je Raum, ab wann jedes Ventil öffnet und schließt – danach ist „Steuern“ möglich.
+        </p>
+        <div>
+          <button type="button" class="button small" disabled={sweepBusy} onclick={() => void sweepAll('start')}
+            >Alle Räume nacheinander</button
+          >
+        </div>
+      {/if}
+      {#if sweepError}
+        <p class="error" role="alert">{sweepError}</p>
+      {/if}
+    </div>
+  {/if}
 
   <details>
     <summary>Notfall-Automation für Home Assistant</summary>
@@ -412,6 +466,16 @@
     flex-direction: column;
     gap: 4px;
     min-width: 0;
+  }
+
+  .sweep-all {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .sweep-all p {
+    margin: 0;
   }
 
   .field-label {

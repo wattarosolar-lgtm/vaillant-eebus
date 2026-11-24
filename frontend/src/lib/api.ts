@@ -240,6 +240,21 @@ export async function roomTest(entityId: string, action: 'arm' | 'cancel', confi
   return putJson(`api/rooms/${encodeURIComponent(entityId)}/test`, { action, confirm }, 'POST');
 }
 
+/** A sweep of the room now (1.4.3), or cancel it. */
+export async function roomSweep(entityId: string, action: 'start' | 'cancel', confirm: boolean): Promise<RoomsPage> {
+  return putJson(`api/rooms/${encodeURIComponent(entityId)}/sweep`, { action, confirm }, 'POST');
+}
+
+/** Sweeps of all rooms one after the other, or stop them. */
+export async function allRoomsSweep(action: 'start' | 'cancel', confirm: boolean): Promise<RoomsPage> {
+  return putJson('api/rooms/sweep', { action, confirm }, 'POST');
+}
+
+/** Forget what the control learned of the room: demand from the history again, gain at its start. */
+export async function resetRegulation(entityId: string): Promise<RoomsPage> {
+  return putJson(`api/rooms/${encodeURIComponent(entityId)}/regulation/reset`, {}, 'POST');
+}
+
 /** The emergency automation for Home Assistant, as YAML. */
 export async function getAutomation(): Promise<string> {
   const body = (await (await send('api/rooms/automation')).json()) as { yaml: string };
