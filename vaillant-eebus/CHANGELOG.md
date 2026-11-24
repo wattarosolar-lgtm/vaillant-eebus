@@ -1,18 +1,41 @@
 # Changelog
 
-## 1.5.0 (in Arbeit)
+## 1.5.0
 
-**Zonen steuern, erster Teil: Zone 1 Aus/Auto, Quick-Veto, Tagesgrenze.** Das Energiemanagement kann jetzt an die
-Wärmepumpe senden – Funktion für Funktion, jede mit eigener Stufe (Aus, Vorschau, Steuern) unter Einstellungen →
-Energiemanagement → Zonensteuerung.
+**Zonen steuern.** Das Energiemanagement sendet jetzt selbst an die Wärmepumpe (nur mit myVAILLANT) – Funktion für
+Funktion, jede mit eigener Stufe (Aus, Vorschau, Steuern) unter Einstellungen → Energiemanagement → Zonensteuerung.
+Alles startet auf Vorschau.
 
 - **Stufe „Steuern“** des Energiemanagements ist wählbar. Gespeicherte Einstellungen älterer Versionen mit „Steuern“
   starten in „Vorschau“.
 - **Zone 1 Aus/Auto** ersetzt die eigene Automation: Zone mit Fußbodenheizung aus, solange die Wärmepumpe steht,
   sofort Auto, wenn sie läuft; nicht bei Frostschutz, kalten Räumen oder an der Tagesgrenze, Aus frühestens 5 min nach
   dem letzten Auto. Läuft die alte Automation noch, hält die Funktion an und warnt.
-- **Quick-Veto** für „Vorlauf und Vorausschau“ (Steuern nach 1.4.2): bis zur nächsten geplanten Änderung, 1–4 h,
-  erneuert 10 min vor dem Ende, Abstand zwischen Änderungen, sofortiges Ende ohne Verschiebung.
+- **Quick-Veto** für „Vorlauf und Vorausschau“ und die Nachtabsenkung: bis zur nächsten geplanten Änderung, 1–4 h,
+  erneuert 10 min vor dem Ende; tiefer frühestens nach dem Abstand, höher sofort; Ende sofort ohne Verschiebung.
+- **Vorlauf der Heizkörper-Zone nach dem Engpassraum:** der Raum mit dem im Mittel am weitesten offenen Ventil der
+  letzten 7 Tage (nur mit Wärme von der Wärmepumpe, ohne Fenster, Sollwechsel, Aufheizen, Testlauf und Durchlauf).
+  Ist ein Raum unterversorgt und hilft Umverteilen nicht, springt eine Verschiebung unter 0 sofort auf 0 (bisher
+  0,5 K je 30 min, Befund der Abnahme 1.3.0), darüber 0,5 K je 30 min. Tiefer nur um 0,5 K, wenn das Ventil des
+  Engpassraums zwischen 10 und 70 % steht, höchstens alle 2 h, 6 h nach einem Sprung zurück gar nicht und nur, solange
+  Zone 2 den Vorlauf bestimmt (1 K über Zone 1). Nachts mit zuen Ventilen geht es nicht mehr bis an die Bandgrenze.
+- **Heizkurven-Empfehlung:** aus 7 Tagen Verschiebung eine steilere oder flachere Kurve oder eine andere
+  Wunschtemperatur im Zeitprogramm; die Heizkurve lässt sich als Entität wählen (nur lesen). Die App ändert sie nie.
+- **Voreinstellung am Maximum** je Heizfläche: Der Hinweis nennt dann Absperrungen (H-Block), Vorlauf oder Heizfläche.
+- **Nachtabsenkung neu:** nur noch 5:30–10:00 Uhr (das alte Fenster 0–10 Uhr wird einmal umgestellt). Über 3 °C im
+  Mittel der Prognose gehen die Zonen auf Aus – bei Vereisungsgefahr erst direkt nach einer Abtauung, bis 7:00, sonst
+  Minimalleistung; zurück auf Auto um 10 Uhr oder früher beim erlaubten Verlust, bei Feuchte oder Frostschutz.
+  Darunter senkt die App Zone 2 in 0,5-K-Schritten alle 20 min bis zur **Minimalleistung**: Sobald der Puffer über
+  den Vorlauf-Soll steigt, ist die Wärmepumpe am Minimum – einen Schritt zurück, damit sie nicht abschaltet; Zone 1
+  −1 K bei Frostschutz. Aufheizen ab 10 Uhr. Die Raumthermostate behalten ihr Soll (die abgesenkten Raum-Sollwerte im
+  Plan entfallen). Keine Absenkung bei 65 % Luftfeuchte oder Testlauf in der Zone.
+- **Minimalleistung erkannt:** je Außentemperatur aus den Phasen, in denen der Puffer über den gleichbleibenden
+  Vorlauf-Soll steigt (Karte Zonensteuerung).
+- **Prognosewerte korrigiert** (Befund 24.11.2026): Die Arbeitszahl rechnet Wärme und Strom über dieselben Stunden und
+  verlängert die Gerade nicht mehr weit in den Frost (bei −4,5 °C eher 2,0–2,3 statt 1,5); Laufstunden zählen für die
+  Abtaurate bei der Außentemperatur ihrer Stunde (bisher beim Start: „unter 0 °C“ stand bei 13 Abtauungen auf
+  1,2 Laufstunden) und die Feuchte nur einmal; eine Verzögerung des Hauses am Ende der Suche (8 h) gilt als nicht
+  gelernt; Räume kühlen bis zum Lernen mit 150 h statt 30 h Zeitkonstante ab.
 - **Änderungen von Hand** (myVAILLANT, Regler, diese App) geben der Zone Ruhe bis zur nächsten geplanten Änderung,
   höchstens 3 h.
 - **Tagesgrenze** für Befehle an myVAILLANT: jeder Befehl wird gezählt; Warnung ab 80 %, an der Grenze nur noch
@@ -20,6 +43,8 @@ Energiemanagement → Zonensteuerung.
 - **Zurückgeben** bei Stufenwechsel, Demo-Betrieb und Stopp; neues Lebenszeichen
   `sensor.vaillant_eebus_zones_lifesign` und die Vorlage der Automation „Zonen auf Auto, wenn die App schweigt“.
 - **Übersteuerung verlängern:** an der Zonen-Kachel eine Dauer von 1–12 h wählen und verlängern.
+- **Vor „Steuern“ umstellen:** Zeitprogramm der Zonen auf durchgehend Komfort, Zonen auf Auto, eigene Zone-1-Automation
+  aus, Automation „Zonen auf Auto, wenn die App schweigt“ anlegen.
 
 ## 1.4.3
 

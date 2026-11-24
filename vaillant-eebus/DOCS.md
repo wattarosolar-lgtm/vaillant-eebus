@@ -298,11 +298,23 @@ kommt später neu auf dieser Grundlage.
   Geräte und Sonne bringen, wie träge das Haus ist und – aus echten Wärme- und Stromwerten – die Arbeitszahl je
   Außentemperatur. Dafür braucht sie die Wärmesensoren der myVAILLANT-Integration (Heizen und Warmwasser), die
   Leistung und die Außentemperatur. Bis zehn Heiztage bekannt sind, gilt die Heizlast aus dem statischen Abgleich als
-  Startwert. Daraus schätzt sie Wärme- und Strombedarf je Stunde für die nächsten 48 Stunden.
+  Startwert. Daraus schätzt sie Wärme- und Strombedarf je Stunde für die nächsten 48 Stunden. Seit 1.5.0 zählen für
+  die Arbeitszahl Wärme und Strom nur über dieselben Stunden (ein Tag ab 20 solchen Stunden; Lücken in den
+  Cloud-Werten drückten sie vorher zu tief), und über die gelernten Außentemperaturen hinaus geht die Gerade nur 2 K
+  weiter und bleibt dann gleich. Eine Verzögerung des Hauses, die genau am Ende der Suche (8 h) liegt, gilt als nicht
+  gelernt.
 - **Räume:** Alle 5 Minuten speichert die App je Raum Temperatur, Feuchte, Ventilstellung und Thermostat-Soll
   (21 Tage). Daraus lernt sie, wie schnell der Raum ohne Heizung abkühlt, wie schnell er aufheizt, wie lange es nach
   einem Start der Wärmepumpe dauert, bis er nicht mehr fällt, und wie weit das Ventil für das Soll offen steht. Bis
-  genug Phasen gesehen sind, steht „lernt noch“ da.
+  genug Phasen gesehen sind, steht „lernt noch“ da; die Abkühlung rechnet bis dahin mit einer Zeitkonstante von 150 h
+  (seit 1.5.0; vorher 30 h, viel zu schnell). Ist eine Zone ausgeschaltet, zählen ihre Räume als „ohne Heizung“.
+- **Abtaurate:** je Außentemperatur, seit 1.5.0 zählt jede Laufstunde bei der Außentemperatur dieser Stunde (vorher
+  beim Start des Laufs) und mit der Luftfeuchte ihres Wetters (feuchte Stunden wiegen mehr), so dass die Feuchte der
+  Prognose nur einmal zählt.
+- **Minimalleistung (1.5.0):** Steigt die Puffertemperatur über den Vorlauf-Soll, obwohl der gleich bleibt, kann die
+  Wärmepumpe nicht weiter herunterregeln und überhöht, um ihre Mindestlaufzeit zu schaffen – an milden Tagen bei jedem
+  Lauf zu sehen. Die Leistung in solchen Phasen (ohne Abtauung und Warmwasser) ist ihre kleinste; die App zeigt sie
+  je Außentemperatur in der Karte Zonensteuerung.
 - **Fenster (würde):** Erkennt die App ein offenes Fenster (Regeln unter „Raumregelung → Fenster offen“), meldet sie
   es im Protokoll (Kategorie „Räume“) mit dem Signal, an dem sie es erkannt hat. So lässt sich prüfen, ob die
   Erkennung zu echtem Lüften passt. Räume, die in der Raumregelung auf „Vorschau“ oder „Steuern“ stehen, meldet die
@@ -317,18 +329,15 @@ kommt später neu auf dieser Grundlage.
 
 **Was der Plan berücksichtigt** (je Zone und Stunde, mit Grund):
 
-- **Vorlauf:** die Verschiebung aus den Ventilstellungen (höher bei einem unterversorgten Raum, tiefer, wenn alle
-  Räume versorgt sind und kein Ventil weit offen steht).
+- **Vorlauf:** die Verschiebung der Heizkörper-Zone nach dem Engpassraum (Abschnitt „Zonen steuern“).
 - **Vorausschauend:** Wird es in der Zeit, die die Zone braucht (Fußbodenheizung etwa 3 h, Heizkörper 1 h), deutlich
   kälter, etwas früher mehr; wird es milder oder kommt Sonne, etwas früher weniger.
 - **Warmer Tag:** Liegt das Tagesmittel über der Heizgrenze, wird nicht geheizt.
 - **Abtaurisiko:** je Stunde aus Temperatur und Luftfeuchte der Prognose, gelernt aus den gezählten Abtauungen. In
   riskanten Stunden etwas weniger Last (höchstens 3 Stunden am Stück), davor speichert die Fußbodenheizung etwas
   mehr – im erlaubten Verlust.
-- **Nachtabsenkung:** im Nachtfenster (Voreinstellung 0–10 Uhr) um den erlaubten Verlust (Voreinstellung 0,5 K, je
-  Raum einstellbar), aber nur, wenn sich das Wiederaufheizen lohnt (kein Frostschutz, kein Abtaurisiko beim
-  Aufheizen, nicht kälter als −5 °C), und nicht in Räumen mit mindestens 65 % Luftfeuchte (Schimmelschutz). Die Zone
-  heizt rechtzeitig vor dem Ende des Fensters wieder auf.
+- **Nachtabsenkung:** im Nachtfenster (seit 1.5.0 Voreinstellung 5:30–10:00 Uhr) Zonen aus oder Minimalleistung
+  (Abschnitt „Zonen steuern“); die Räume behalten ihr Soll.
 - **Blockbetrieb:** In milden Stunden (Voreinstellung ab 5 °C) lange Läufe und lange Pausen; Zone 1 nimmt im Lauf
   Wärme auf, Zone 2 darf in Pausen etwas tiefer liegen.
 
@@ -357,9 +366,11 @@ kommt später neu auf dieser Grundlage.
 - **Lernen:** die Wärmesensoren Heizen und Warmwasser, wenn vorhanden die Puffertemperatur, und aus dem statischen
   Abgleich Normaußentemperatur und Heizlast des Hauses.
 - **Zonen:** je Zone die Art (Fußbodenheizung oder Heizkörper), Auslegung Vor- und Rücklauf, die Vorlauf-Sensoren
-  (Ist und Soll, bei myVAILLANT „… circuit_0/1 … flow temperature“) und wie weit das Soll verschoben werden darf
-  (Vorgabe: Fußbodenheizung −1 … +2 K, Heizkörper −2 … +2 K).
-- **Nachtabsenkung und Abtauen:** Nachtfenster und erlaubte Verluste (Vorgabe für alle Räume).
+  (Ist und Soll, bei myVAILLANT „… circuit_0/1 … flow temperature“), die Heizkurve (optional, nur gelesen, „…
+  circuit_0/1 heating curve“) und wie weit das Soll verschoben werden darf (Vorgabe: Fußbodenheizung −1 … +2 K,
+  Heizkörper −2 … +2 K).
+- **Nachtabsenkung und Abtauen:** Nachtfenster und erlaubte Verluste (Vorgabe für alle Räume). Wer bisher das
+  Fenster 0–10 Uhr der Voreinstellung hatte, bekommt mit 1.5.0 einmalig 5:30–10:00.
 - **Takten und Grenzen:** Ziel Starts je Tag, Blockbetrieb ab, Heizgrenze, Schwelle der Zone-1-Logik, Schritt und
   Abstand des Quick-Veto sowie die Tagesgrenze für Befehle an die Vaillant-Cloud.
 
@@ -386,10 +397,46 @@ Steuern):
 - **Vorlauf und Vorausschau:** die Verschiebung der Zonen aus Ventilstellungen, Vorausschau und warmen Tagen als
   **Quick-Veto** (Programmwert ± Verschiebung). Das Quick-Veto gilt bis zur nächsten geplanten Änderung, mindestens
   1 und höchstens 4 Stunden, wird 10 Minuten vor dem Ende erneuert und endet sofort, wenn keine Verschiebung mehr
-  geplant ist. Zwischen zwei Änderungen liegt mindestens der eingestellte Abstand (Vorgabe 30 min). Nur im
-  Auto-Betrieb und nur mit bekanntem Programmwert (in einer Absenkung des Zeitprogramms sendet die App nichts). In
-  dieser Version bis „Vorschau“; „Steuern“ kommt nach Version 1.4.2.
-- Abtaurisiko und Blockbetrieb (geplant für 1.6.0) und die Nachtabsenkung (nach 1.4.2) stehen weiter nur im Plan.
+  geplant ist. Tiefer geht es frühestens nach dem eingestellten Abstand (Vorgabe 30 min), höher sofort. Nur im
+  Auto-Betrieb und nur mit bekanntem Programmwert (in einer Absenkung des Zeitprogramms sendet die App nichts).
+  **Vorlauf der Heizkörper-Zone (seit 1.5.0):**
+  - **Engpassraum:** der Raum mit dem im Mittel am weitesten offenen Ventil der letzten 7 Tage – gezählt nur, wenn die
+    Wärmepumpe Wärme liefert, ohne Fenster (und 30 min danach), Sollwechsel, Aufheizen nach einer Soll-Erhöhung,
+    Testlauf und Durchlauf. Bis 24 solche Stunden gesammelt sind, gilt die Momentaufnahme der letzten halben Stunde.
+    Ein am Thermostat gemessener Raum (Bad) zählt nur mit seinem Ventil. Die Seite „Räume“ zeigt ihn mit Mittel,
+    Anteil „unterversorgt“ und dem Wert jetzt.
+  - **Höher, sofort:** Ist ein Raum unterversorgt und hilft Umverteilen nicht (mehr), springt eine Verschiebung unter
+    0 sofort auf 0; ab 0 geht es alle 30 min um 0,5 K höher, bis zur Bandgrenze.
+  - **Tiefer, langsam:** 0,5 K, wenn die Wärmepumpe Wärme liefert, kein Raum unterversorgt ist, kein Ventil im Mittel
+    der letzten Stunde zu 90 % offen steht und das Ventil des Engpassraums zwischen 10 und 70 % liegt (es zieht Wärme
+    und hat Reserve; ist es zu, sagt das nichts). Höchstens alle 2 Stunden, nach einem Sprung zurück 6 Stunden gar
+    nicht, und nur, solange der Vorlauf-Soll der Zone mindestens 1 K über dem der Fußbodenheizung bleibt (sonst
+    bestimmt die den Vorlauf) und deren Raum nicht unter seinem Komfortband ist. Zwischen 70 und 90 % hält die App.
+  - **Heizkurven-Empfehlung:** Liegt die Verschiebung über 7 Tage (je Tag mindestens 6 Stunden mit Wärme, mindestens
+    5 Tage) im Mittel bei mindestens ±0,5 K, empfiehlt die App eine steilere oder flachere Heizkurve (wenn die
+    Verschiebung an kalten und milden Stunden deutlich verschieden ist) oder eine andere Wunschtemperatur im
+    Zeitprogramm. Die App ändert die Heizkurve nie; nach einer Änderung der Kurve beginnt die Rechnung neu.
+  - **Voreinstellung am Maximum:** im Raum-Editor je Heizfläche ankreuzbar. Dann nennt der Hinweis bei oft offenen
+    Ventilen die Absperrungen am Heizkörper (H-Block, Rücklaufverschraubung), den Vorlauf oder eine zu kleine
+    Heizfläche statt „Voreinstellung größer“.
+- **Nachtabsenkung (seit 1.5.0):** nur im Nachtfenster (Vorgabe 5:30–10:00). Maßgeblich ist das Mittel der Prognose
+  über das Fenster:
+  - **über 3 °C** (und ohne Frostschutz im Fenster): die Zonen gehen auf **Aus**. Ist Vereisung möglich (Abtaurisiko
+    der Stunde mindestens „gering“), schaltet die App erst **direkt nach einer Abtauung** ab, damit die Wärmepumpe
+    nicht vereist stillsteht; kommt bis 7:00 keine, bleibt es bei der Minimalleistung. Zurück auf **Auto** um das Ende
+    des Fensters, früher, wenn ein Raum der Zone seinen erlaubten Verlust (Vorgabe 0,5 K, je Raum einstellbar) bis auf
+    0,1 K erreicht, ein Raum 65 % Luftfeuchte erreicht oder der Frostschutz beginnt – dann Minimalleistung bis zum Ende.
+  - **3 °C und darunter:** **Minimalleistung**, ohne dass die Wärmepumpe abschaltet. Die Heizkörper-Zone beginnt mit
+    der gemerkten Verschiebung (zuerst −1 K) und geht alle 20 Minuten um 0,5 K tiefer, bis der Puffer über den
+    Vorlauf-Soll steigt (Wärmepumpe am Minimum); dann einen Schritt zurück und halten. Bleibt die Wärmepumpe trotzdem
+    stehen, 1 K höher. Die Zone mit Fußbodenheizung bekommt −1 K, solange der Frostschutz sie an hält. Die App merkt
+    sich, wo es hielt, und beginnt in der nächsten Nacht dort.
+  - Aufgeheizt wird ab dem Ende des Fensters (kein Vorheizen); der Vorlauf (F2) hält derweil. Keine Absenkung in einer
+    Zone mit einem Raum ab 65 % Luftfeuchte oder mit vorgemerktem oder laufendem Testlauf. Die Raumthermostate behalten
+    ihr Soll.
+  - **Vorher umstellen:** Zeitprogramm der Zonen in myVAILLANT auf durchgehend Komfort (ohne Absenkfenster), Zonen auf
+    **Auto** (in „Ein“ gibt es kein Quick-Veto), die Automation „Zonen auf Auto, wenn die App schweigt“ anlegen.
+- Abtaurisiko und Blockbetrieb (geplant für 1.6.0) stehen weiter nur im Plan.
 
 **Änderungen von Hand haben Vorrang:** Ändert jemand Soll, Betriebsart oder Quick-Veto einer Zone – in myVAILLANT,
 am Regler oder in dieser App (auch „Verlängern“) –, lässt der Planer die Zone bis zur nächsten geplanten Änderung in
@@ -411,7 +458,8 @@ einfügen): Kommt 15 Minuten kein Lebenszeichen, setzt sie die Zonen, die die Ap
 **Eigene Übersteuerung verlängern:** Läuft an einer Zone eine zeitweise Übersteuerung, lässt sie sich auf der
 Übersicht mit gleichem Soll für 1 bis 12 Stunden ab jetzt verlängern.
 
-**Was das Energiemanagement nie tut:** Heizkurve, Zeitprogramm, Warmwasser oder Leistungsdeckel ändern. Es sendet nur
+**Was das Energiemanagement nie tut:** Heizkurve, Zeitprogramm, Warmwasser oder Leistungsdeckel ändern (die Heizkurve
+liest es nur für die Empfehlung). Es sendet nur
 Quick-Veto, das Ende eines Quick-Veto und die Betriebsarten Aus und Auto einer Zone – über die Schreibsperre, die das
 prüft; ein Test der App stellt sicher, dass nur die Zonensteuerung sie aufruft. Die Thermostate stellt allein die
 Raumregelung über ihren eigenen Teil der Schreibsperre.
@@ -488,8 +536,8 @@ ankommt (von der Wärmepumpe oder aus dem Puffer, mit Restzeit) – nur dann dar
 Vorlauf und Puffer, gilt das Wärmeangebot als unklar. Ist ein Raum
 trotz offenem Ventil zu kalt, **verteilt sie erst um**: gut versorgte Räume (in derselben Stufe, „Darf gedrosselt
 werden“ an) gehen bis zur unteren Komfortgrenze herunter, höchstens 2 Stunden. Reicht das nach 45 Minuten nicht,
-zeigt die Seite **„Vorlauf höher nötig“**. Die App hebt den Vorlauf erst mit den Zonen (Version 1.5.0) an; bis dahin
-können Sie ihn in myVAILLANT von Hand anheben.
+zeigt die Seite **„Vorlauf höher nötig“**. Die App hebt den Vorlauf, wenn „Vorlauf und Vorausschau“ auf Steuern
+steht; bis dahin können Sie ihn in myVAILLANT von Hand anheben.
 
 **Ventile schonen** (je Raum einstellbar, von der Schreibsperre erzwungen): kein Befehl unter der **Totzone**
 (0,5 K), höchstens alle **15 Minuten** und höchstens **24 Befehle** je Thermostat und Tag. Testlauf und schneller
