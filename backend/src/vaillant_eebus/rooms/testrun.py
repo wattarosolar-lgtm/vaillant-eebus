@@ -38,6 +38,13 @@ silent for an hour. A pair whose return is warmer than its flow while warm
 water reaches the open valve looks swapped; no run starts then
 (fehlerliste-abnahme-1.4.0.md, finding 1).
 
+Since 1.4.3 (plan-1.4.3.md A) a run begins with a sweep (sweep.py, about half
+an hour without the probe pair) unless the thermostat had a complete one in
+the last 7 days. With a valve map that knows "closed" and "fully open" the run
+then holds only four positions with the probe pair - closed, about 30 %, about
+60 % and fully open, from the map - 20 to 40 minutes each as before, for the
+spread and the heat. Without such a map it steps up and down as before.
+
 advance() is a pure step function: the room control feeds it every minute and
 sends what it asks for through the write gate.
 """
@@ -55,7 +62,16 @@ from typing import Any
 
 from vaillant_eebus.hems.config import in_window
 from vaillant_eebus.rooms.curve import Step, TestResult
-from vaillant_eebus.rooms.learning import CLOSED, FULL_OPEN, PLATEAU_FROM, PLATEAU_GAIN, PLATEAU_K
+from vaillant_eebus.rooms.learning import (
+    CLOSED,
+    FULL_OPEN,
+    GRID_K,
+    PLATEAU_FROM,
+    PLATEAU_GAIN,
+    PLATEAU_K,
+    Supply,
+    ValveMap,
+)
 from vaillant_eebus.write_gate import TEST_COMMANDS_MAX, ThermostatLimits
 
 STEP_MIN = timedelta(minutes=20)
@@ -83,6 +99,8 @@ MARK_MARGIN = 2.0
 # How long a step takes until the run has measured its own.
 STEP_MINUTES = 30.0
 DOWN_BELOW_K = 2.0
+# The positions held with the probe pair after a sweep (besides closed and fully open).
+HOLD_LEVELS = (30.0, 60.0)
 # Warm water at the radiator: its flow at least this much above the room.
 HEAT_K = 5.0
 # A reading of the probe pair counts this long after its last report. Sensors that report only on a change
@@ -119,9 +137,13 @@ class TestState(StrEnum):
 
 
 class Phase(StrEnum):
+    # The sweep at the start (1.4.3); the room control runs it.
+    SWEEP = "sweep"
     BASELINE = "baseline"
     UP = "up"
     DOWN = "down"
+    # Holding the positions from the valve map (1.4.3).
+    HOLD = "hold"
 
 
 STATE_NAMES = {
@@ -157,11 +179,16 @@ class TestInputs:
     # Rated output of the radiator and its basis, for the heat estimate.
     rated_w: float | None = None
     rated_basis: str = "75/65"
+    # The thermostat had no complete sweep in the last 7 days: the run begins with one (1.4.3).
+    sweep_needed: bool = False
+    # Offsets to hold with the probe pair, from the valve map (hold_positions); empty: step up and down.
+    positions: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class Action:
-    # "send": set the thermostat to celsius; "end": the night's run ended (back to celsius if given); "wait".
+    # "send": set the thermostat to celsius; "end": the night's run ended (back to celsius if given); "sweep":
+    # the room control runs a sweep as the first part; "wait".
     kind: str
     celsius: float | None = None
     note: str = ""
@@ -207,6 +234,9 @@ class TestRun:
     reached_bottom: bool = False
     # What the night measured, kept when the run goes on the next night.
     outcome: TestResult | None = None
+    # The offsets held with the probe pair after a sweep, and which one is held now.
+    positions: list[float] = field(default_factory=list)
+    position_index: int = 0
 
     @property
     def active(self) -> bool:
@@ -272,11 +302,9 @@ def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, en
         if problem is not None:
             run.message = f"{WAITING}{problem}"
             return Action("wait")
-        assert inputs.limits is not None and inputs.trv_c is not None
         run.state = TestState.RUNNING
         run.started_at = inputs.now
         run.ended_at = None
-        run.phase = Phase.BASELINE
         run.before_c = inputs.trv_setpoint_c
         run.commands = 0
         run.steps = []
@@ -284,11 +312,13 @@ def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, en
         run.reached_closed = run.reached_bottom = False
         run.reached_full = run.down_only
         run.phase_size = None
-        if run.down_only and run.full_offset_k is not None:
-            run.message = "Ausgangslage ganz offen, dann nur abwärts"
-            return _set(run, inputs, inputs.limits.round(inputs.trv_c + run.full_offset_k))
-        run.message = "Ausgangslage"
-        return _set(run, inputs, inputs.limits.round(inputs.trv_c))
+        run.positions = []
+        if inputs.sweep_needed:
+            run.phase = Phase.SWEEP
+            run.step_started = inputs.now
+            run.message = "Teil 1: schneller Durchlauf"
+            return Action("sweep")
+        return _begin(run, inputs)
     if in_window(moment, latest_start, end) and run.counted_night != night:
         run.counted_night = night
         night_began = datetime.combine(night, start, tzinfo=inputs.local.tzinfo)
@@ -306,6 +336,56 @@ def _armed(run: TestRun, inputs: TestInputs, start: time, latest_start: time, en
     return Action("wait")
 
 
+def _begin(run: TestRun, inputs: TestInputs) -> Action:
+    """The part with the probe pair: the positions from the map, else up and down as before."""
+    assert inputs.limits is not None and inputs.trv_c is not None
+    if inputs.positions:
+        run.phase = Phase.HOLD
+        run.positions = list(inputs.positions)
+        run.position_index = 0
+        run.reached_full = False
+        run.message = _hold_text(run)
+        return _set(run, inputs, inputs.limits.round(inputs.trv_c + run.positions[0]))
+    run.phase = Phase.BASELINE
+    if run.down_only and run.full_offset_k is not None:
+        run.message = "Ausgangslage ganz offen, dann nur abwärts"
+        return _set(run, inputs, inputs.limits.round(inputs.trv_c + run.full_offset_k))
+    run.message = "Ausgangslage"
+    return _set(run, inputs, inputs.limits.round(inputs.trv_c))
+
+
+def after_sweep(run: TestRun, inputs: TestInputs) -> Action:
+    """The sweep at the start ended (done or cut short by its budget): the part with the probe pair."""
+    if run.state is not TestState.RUNNING or run.phase is not Phase.SWEEP:
+        return Action("wait")
+    if inputs.limits is None or inputs.trv_c is None:
+        return _finish(run, inputs, "Das Thermostat meldet seine Werte nicht")
+    return _begin(run, inputs)
+
+
+def hold_positions(valve_map: ValveMap, now: datetime) -> tuple[float, ...]:
+    """The offsets to hold with the probe pair: closed (0.5 K below the highest closed one), about 30 % and 60 %
+    and fully open, rising, from the map; empty while it does not know closed and fully open."""
+    if not valve_map.ready(now):
+        return ()
+    closed = valve_map.offset_for(0.0, rising=True, supply=Supply.UNKNOWN, now=now)
+    full = valve_map.full(now, rising=True) or valve_map.full(now)
+    if closed is None or full is None:
+        return ()
+    offsets = {round(closed - GRID_K, 2), round(full[0], 2)}
+    for level in HOLD_LEVELS:
+        offset = valve_map.offset_for(level, rising=True, supply=Supply.UNKNOWN, now=now)
+        if offset is not None and closed < offset < full[0]:
+            offsets.add(round(offset, 2))
+    return tuple(sorted(offsets))
+
+
+def _hold_text(run: TestRun) -> str:
+    offset = run.positions[run.position_index]
+    count = len(run.positions)
+    return f"Stellung {run.position_index + 1} von {count} ({_signed(offset)} K)"
+
+
 def _running(run: TestRun, inputs: TestInputs, start: time, end: time) -> Action:
     if not in_window(inputs.local.time(), start, end):
         return _finish(run, inputs, NIGHT_OVER)
@@ -315,6 +395,9 @@ def _running(run: TestRun, inputs: TestInputs, start: time, end: time) -> Action
         return _finish(run, inputs, "Raum über Soll + 1 K")
     if inputs.window_open:
         return _finish(run, inputs, "Fenster offen")
+    if run.phase is Phase.SWEEP:
+        # The room control runs the sweep; the run waits for its end.
+        return Action("wait")
     if inputs.valve is None:
         run.no_valve_since = run.no_valve_since or inputs.now
         if inputs.now - run.no_valve_since >= MISSING_FOR:
@@ -359,9 +442,11 @@ def _settled(run: TestRun, now: datetime) -> bool:
 
 def _next(run: TestRun, inputs: TestInputs, end: time) -> Action:
     assert run.setpoint_c is not None and run.phase is not None and inputs.limits is not None
-    rising = run.phase is not Phase.DOWN
+    rising = run.phase is not Phase.DOWN and not (run.phase is Phase.HOLD and run.position_index == 0)
     run.steps.append(_point(run, inputs, rising=rising))
     match run.phase:
+        case Phase.HOLD:
+            return _hold_next(run, inputs)
         case Phase.BASELINE if run.down_only:
             # The start at "fully open" (known from before): from here downward.
             return _turn_down(run, inputs, end)
@@ -378,6 +463,25 @@ def _next(run: TestRun, inputs: TestInputs, end: time) -> Action:
         case Phase.DOWN:
             return _down(run, inputs, end)
     return Action("wait")
+
+
+def _hold_next(run: TestRun, inputs: TestInputs) -> Action:
+    assert inputs.limits is not None
+    valve = inputs.valve
+    last = run.position_index == len(run.positions) - 1
+    if valve is not None and run.position_index == 0 and valve <= CLOSED:
+        run.reached_closed = True
+    if valve is not None and (valve >= FULL_OPEN or (last and valve >= PLATEAU_FROM)):
+        run.reached_full = True
+    run.position_index += 1
+    if run.position_index >= len(run.positions):
+        return _finish(run, inputs, "Fertig", done=True)
+    if TEST_COMMANDS_MAX - run.commands <= 0:
+        return _finish(run, inputs, BUDGET_USED)
+    if inputs.trv_c is None:
+        return Action("wait")
+    run.message = _hold_text(run)
+    return _set(run, inputs, inputs.limits.round(inputs.trv_c + run.positions[run.position_index]))
 
 
 def _fully_open(run: TestRun, valve: float | None) -> bool:

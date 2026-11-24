@@ -9,7 +9,9 @@ once. The room control reads each W600
 - one and three minutes after each change of the setpoint (its own, by hand or
   by a schedule), for the step response;
 - in a test run every minute for ten minutes after each step, then every two
-  minutes.
+  minutes;
+- in a sweep (1.4.3) every minute from a minute after each step, so the step
+  two minutes later finds a fresh position.
 
 The write gate spaces and caps the reads per thermostat on its own. Pure: the
 room control keeps one ReadPlan per thermostat.
@@ -41,7 +43,19 @@ class ReadPlan:
         """The setpoint changed: reads one and three minutes later."""
         self.extra = sorted({*self.extra, *(now + delay for delay in AFTER_CHANGE)})
 
-    def due(self, now: datetime, *, next_beat: datetime | None, test_step_at: datetime | None) -> bool:
+    def due(
+        self,
+        now: datetime,
+        *,
+        next_beat: datetime | None,
+        test_step_at: datetime | None,
+        sweep_step_at: datetime | None = None,
+    ) -> bool:
+        if sweep_step_at is not None:
+            # Not right after the step: the valve has not moved yet.
+            if now - sweep_step_at < TEST_FAST - SLACK:
+                return False
+            return self.last is None or now - self.last >= TEST_FAST - SLACK
         if any(moment <= now + SLACK for moment in self.extra):
             return True
         if test_step_at is not None:

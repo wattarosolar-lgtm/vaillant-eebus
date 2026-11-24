@@ -9,6 +9,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,7 @@ from vaillant_eebus.rooms.curve import Step, TestResult, ValveCurve, curve_from_
 from vaillant_eebus.rooms.learning import MapPoint, Source, Supply, ValveMap, points_from_steps
 from vaillant_eebus.rooms.service import LIFESIGN_ENTITY, RoomControl, _Zone
 from vaillant_eebus.rooms.supply import HeatSupply, SupplyNow, heat_supply, restart_temperature
-from vaillant_eebus.rooms.testrun import TestInputs, TestRun, TestState, advance
+from vaillant_eebus.rooms.testrun import Phase, TestInputs, TestRun, TestState, advance
 from vaillant_eebus.rooms.thermostats import TrvModel, blocking, read, side_entities
 from vaillant_eebus.settings import Connection, MyVaillantEntities, OperatingMode, Room, SettingsStore
 from vaillant_eebus.write_gate import RoomGate, RoomReason, SetThermostatSetpoint, ThermostatLimits, WriteGate
@@ -1380,7 +1381,7 @@ async def test_everyday_points_free_control_without_a_test_run(world: World) -> 
 
     assert refused.status_code == 409
     assert refused.json()["detail"] == (
-        "Die App kennt noch nicht: „ganz offen“ bei warmem Wasser (aus einem Testlauf oder dem Alltag)."
+        "Die App kennt noch nicht: „ganz offen“ (aus einem schnellen Durchlauf, einem Testlauf oder dem Alltag)."
     )
     assert allowed.status_code == 200
     bath = next(room for room in allowed.json()["control"]["rooms"] if room["name"] == "Bad")
@@ -1445,3 +1446,205 @@ async def test_the_base_topic_and_a_rooms_own_device_name_go_into_the_topic(worl
     assert reads(world)[-1]["topic"] == "z2m/Heizung Büro/get"
     office = await room_status(world, "Büro")
     assert office["read"]["topic"] == "z2m/Heizung Büro/get" and office["read"]["found_name"] == "Thermostat Büro"
+
+
+# --- 1.4.3: sweeps, quality, demand and gain -------------------------------------------------------------
+
+
+def office_valve(world: World) -> float:
+    """The W600 in the office: opens 40 % per K above -0.5 K to the 21.5 °C at the thermostat."""
+    setpoint = float(world.fake.states[TRV_OFFICE]["attributes"]["temperature"])
+    return max(0.0, min(100.0, (setpoint - 21.5 + 0.5) * 40))
+
+
+def _valve_is(world: World, wanted: float) -> bool:
+    return world.home.hems_sources.number(TRV_OFFICE_VALVE) == wanted
+
+
+async def sweep_minutes(world: World, minutes: int, *, until: Any = None) -> None:
+    """Minute by minute; the W600 answers each read with the position for its setpoint now."""
+    for _ in range(minutes):
+        world.fake.positions["Thermostat Büro"] = office_valve(world)
+        before = len(reads(world))
+        world.clock.now += timedelta(minutes=1)
+        await world.control.minute()
+        if len(reads(world)) > before:
+            await eventually(partial(_valve_is, world, world.fake.positions["Thermostat Büro"]))
+        if until is not None and until():
+            return
+
+
+async def test_a_sweep_by_the_button_learns_the_map_and_frees_control(world: World) -> None:
+    await world.control.minute()
+    refused = await world.http.post(f"/api/rooms/{OFFICE}/sweep", json={"action": "start"})
+    started = await world.http.post(f"/api/rooms/{OFFICE}/sweep", json={"action": "start", "confirm": True})
+
+    assert refused.status_code == 400
+    assert started.status_code == 200
+    office = next(room for room in started.json()["control"]["rooms"] if room["name"] == "Büro")
+    assert office["sweep"]["state"] == "running" and office["sweep_blocked"] == "Der Durchlauf läuft."
+    await sweep_minutes(world, 30, until=lambda: world.control._sweep is None)
+
+    assert world.calls(TRV_OFFICE) == [21.5, 22.0, 22.5, 23.0, 23.5, 23.0, 22.5, 22.0, 21.5, 21.0]
+    texts = await messages(world.log, LogCategory.ROOMS)
+    assert "Schneller Durchlauf Büro gestartet." in texts
+    assert any(text.startswith("Schneller Durchlauf Büro fertig (Fertig): 10 Punkte") for text in texts)
+    assert (
+        "Büro: Die App kennt jetzt „zu“ und „ganz offen“ (aus dem schnellen Durchlauf); „Steuern“ ist möglich." in texts
+    )
+    office = await room_status(world, "Büro")
+    assert office["can_control"] and office["valve_map"]["points_sweep"] == 10
+    assert office["sweep"]["state_name"] == "fertig" and len(office["sweep"]["points"]) == 10
+    # Its own budget: not among the day's commands.
+    commands = world.gate.commands(TRV_OFFICE)
+    assert (commands.today, commands.sweep_today) == (0, 10)
+    assert world.control._testing(world.settings.current.rooms[0]) is False
+
+
+async def test_a_sweep_stops_and_goes_back_when_the_window_opens(world: World) -> None:
+    world.stage(OFFICE, RoomStage.OBSERVE, window_entity=CONTACT_OFFICE)
+    world.home.watch()
+    world.fake.set(CONTACT_OFFICE, "off", attributes={"device_class": "window"})
+    await eventually(lambda: world.home.hems_sources.get(CONTACT_OFFICE) is not None)
+    await world.control.minute()
+    await world.http.post(f"/api/rooms/{OFFICE}/sweep", json={"action": "start", "confirm": True})
+    await sweep_minutes(world, 5)
+
+    world.fake.set(CONTACT_OFFICE, "on", attributes={"device_class": "window"})
+    await eventually(lambda: world.hems.window_open(OFFICE))
+    await sweep_minutes(world, 1)
+
+    assert world.control._sweep is None
+    assert world.calls(TRV_OFFICE)[-1] == 21.0
+    texts = await messages(world.log, LogCategory.ROOMS)
+    assert any(text.startswith("Schneller Durchlauf Büro abgebrochen (Fenster offen)") for text in texts)
+
+
+async def test_sweeps_for_all_rooms_run_one_after_the_other_and_stop_together(world: World) -> None:
+    await world.control.minute()
+    response = await world.http.post("/api/rooms/sweep", json={"action": "start", "confirm": True})
+
+    assert response.status_code == 200
+    assert response.json()["control"]["sweep_queue"] == ["Bad"]
+
+    def bath_runs() -> bool:
+        sweep = world.control._sweep
+        return sweep is not None and sweep.trv == TRV_BATH
+
+    await sweep_minutes(world, 30, until=bath_runs)
+
+    sweep = world.control._sweep
+    assert sweep is not None and sweep.room_id == TRV_BATH_TEMPERATURE
+    # The Comet starts at the 22.5 °C at its sensor.
+    assert world.calls(TRV_BATH) == [22.5]
+    await eventually(lambda: world.home.hems_sources.attribute(TRV_BATH, "temperature") == 22.5)
+    cancelled = await world.http.post("/api/rooms/sweep", json={"action": "cancel"})
+
+    assert cancelled.status_code == 200
+    assert world.control._sweep is None and world.control._sweep_queue == []
+    assert world.calls(TRV_BATH) == [22.5, 22.0]
+    texts = await messages(world.log, LogCategory.ROOMS)
+    assert "Schneller Durchlauf für alle Räume nacheinander: Büro, Bad." in texts
+    assert any(text.startswith("Schneller Durchlauf Bad abgebrochen (vom Nutzer abgebrochen)") for text in texts)
+
+
+async def test_a_sweep_needs_live_mode_and_no_test_run_going_on(world: World) -> None:
+    world.settings.update(lambda current: replace(current, operating_mode=OperatingMode.DEMO))
+    demo = await world.http.post(f"/api/rooms/{OFFICE}/sweep", json={"action": "start", "confirm": True})
+    world.settings.update(lambda current: replace(current, operating_mode=OperatingMode.LIVE))
+    world.control._test = TestRun(room_id=TRV_BATH_TEMPERATURE, trv=TRV_BATH, armed_at=T0, state=TestState.RUNNING)
+    testing = await world.http.post(f"/api/rooms/{OFFICE}/sweep", json={"action": "start", "confirm": True})
+
+    assert demo.status_code == 409 and "Live-Betrieb" in demo.json()["detail"]
+    assert testing.status_code == 409 and testing.json()["detail"] == "Es läuft gerade ein Testlauf."
+    assert world.calls() == []
+
+
+async def test_the_quality_of_each_day_is_logged_shortly_after_midnight(world: World) -> None:
+    world.stage(OFFICE, RoomStage.PREVIEW)
+    world.fake.set(OFFICE, "20.2", unit="°C", name="Büro Temperatur")
+    await eventually(lambda: world.home.hems_sources.number(OFFICE) == 20.2)
+
+    await beat(world)
+    await beat(world)
+    office = await room_status(world, "Büro")
+    quality = office["regulation"]["quality"]
+    assert len(quality) == 1 and quality[0]["today"] and quality[0]["hours"] == 0.2
+    assert quality[0]["mean_k"] == 0.8 and quality[0]["cold_pct"] == 100
+
+    world.clock.now = datetime(2026, 11, 24, 0, 0, tzinfo=UTC)
+    await beat(world)
+
+    texts = await messages(world.log, LogCategory.ROOMS)
+    line = next(text for text in texts if text.startswith("Regelgüte Büro am 23.11.:"))
+    assert "im Mittel 0,8 K zu kalt" in line and "(Vorschau: würde senden)" in line
+    office = await room_status(world, "Büro")
+    assert [day["today"] for day in office["regulation"]["quality"]] == [True, False]
+
+
+async def test_the_demand_and_the_gain_start_and_can_be_reset(world: World) -> None:
+    world.stage(OFFICE, RoomStage.PREVIEW)
+    await beat(world)
+    office = await room_status(world, "Büro")
+    regulation = office["regulation"]
+    assert regulation["applies"] and regulation["gain"] == 30.0 and regulation["trend"] == 10.0
+    assert [stage["outdoor_c"] for stage in regulation["stages"]] == [-10.0, -5.0, 0.0, 5.0, 10.0, 15.0]
+    assert [stage["value"] for stage in regulation["stages"]] == [30.0] * 6
+    assert (await room_status(world, "Bad"))["regulation"]["applies"] is False
+
+    state = world.control._rooms[OFFICE]
+    assert state.gain is not None
+    state.gain = replace(state.gain, value=45.0, reason="zu träge")
+    reset = await world.http.post(f"/api/rooms/{OFFICE}/regulation/reset")
+    bath = await world.http.post(f"/api/rooms/{TRV_BATH_TEMPERATURE}/regulation/reset")
+
+    assert reset.status_code == 200 and bath.status_code == 409
+    office = next(room for room in reset.json()["control"]["rooms"] if room["name"] == "Büro")
+    assert office["regulation"]["gain"] == 30.0 and office["regulation"]["gain_reason"] is None
+    assert "Büro: Gelerntes der Regelung zurückgesetzt (Bedarf aus dem Verlauf, Verstärkung 30 %/K)." in (
+        await messages(world.log, LogCategory.ROOMS)
+    )
+
+
+async def test_quality_demand_gain_and_sweeps_survive_a_restart(world: World, tmp_path: Path) -> None:
+    world.stage(OFFICE, RoomStage.PREVIEW)
+    await beat(world)
+    await world.control.minute()
+    await world.http.post(f"/api/rooms/{OFFICE}/sweep", json={"action": "start", "confirm": True})
+    await sweep_minutes(world, 30, until=lambda: world.control._sweep is None)
+    world.control._save()
+
+    again = RoomControl(world.settings, world.control._state, world.hems, world.gate, world.home, world.log, tmp_path)
+
+    state = again._rooms[OFFICE]
+    assert state.quality.today is not None and state.demand is not None and state.gain is not None
+    assert len(again._sweeps[TRV_OFFICE][0].points) == 10
+
+
+async def test_a_night_test_run_begins_with_a_sweep_and_then_holds_four_positions(world: World) -> None:
+    await hang_probe_at_the_office(world)
+    armed = await world.http.post(f"/api/rooms/{OFFICE}/test", json={"action": "arm", "confirm": True})
+    assert armed.status_code == 200
+    world.clock.now = datetime(2026, 11, 23, 22, 0, tzinfo=UTC)
+    await probe_values(world, "40.0", "30.0")
+
+    await sweep_minutes(world, 1)
+    run = world.control._test
+    sweep = world.control._sweep
+    assert run is not None and (run.state, run.phase) == (TestState.RUNNING, Phase.SWEEP)
+    assert sweep is not None and sweep.part_of_test
+
+    await sweep_minutes(world, 30, until=lambda: world.control._sweep is None)
+
+    assert run.phase is Phase.HOLD and run.positions == [-1.0, 0.5, 1.0, 2.0]
+    # The sweep's commands, then the first position (closed) as a test run's command.
+    assert world.calls(TRV_OFFICE) == [21.5, 22.0, 22.5, 23.0, 23.5, 23.0, 22.5, 22.0, 21.5, 21.0, 20.5]
+    commands = world.gate.commands(TRV_OFFICE)
+    assert (commands.sweep_today, commands.test_today) == (10, 1)
+    texts = await messages(world.log, LogCategory.ROOMS)
+    assert "Testlauf Büro: Teil 1, schneller Durchlauf ohne Fühlerpaar." in texts
+    assert "Testlauf Büro: Teil 2 mit Fühlerpaar, Stellung 1 von 4 (\u22121,0 K)." in texts
+
+    cancelled = await world.http.post(f"/api/rooms/{OFFICE}/test", json={"action": "cancel"})
+    assert cancelled.status_code == 200
+    assert world.calls(TRV_OFFICE)[-1] == 21.0

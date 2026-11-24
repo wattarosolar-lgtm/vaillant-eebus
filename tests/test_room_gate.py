@@ -773,3 +773,19 @@ async def test_the_client_publishes_only_to_a_get_topic(fake_ha: FakeHomeAssista
                 await client.publish_position_read(base, device)
         await client.publish_position_read("z2m", "Etage 1/Büro")
     assert fake_ha.mqtt_reads == ["z2m/Etage 1/Büro/get"]
+
+
+async def test_a_sweep_has_its_own_budget_and_may_go_back(rig: Rig) -> None:
+    # 1.4.3: 20 commands a sweep, 40 a day per thermostat; neither the day's commands nor the test run's.
+    for index in range(40):
+        assert (await rig.gate.submit(bath(20.0 + 0.5 * (index % 2), RoomReason.SWEEP))).sent
+        rig.clock.advance(seconds=6)
+    assert (await rig.gate.submit(bath(21.0, RoomReason.SWEEP))).held is Held.LIMIT
+    commands = rig.gate.commands(TRV_BATH)
+    assert (commands.today, commands.test_today, commands.sweep_today) == (0, 0, 40)
+
+    # The way back goes to the setpoint from before the first command, whatever the budget.
+    assert (await rig.gate.submit(bath(22.0, RoomReason.RESTORE))).sent
+    rig.clock.now = datetime(2026, 11, 24, 8, 0, tzinfo=UTC)
+    assert (await rig.gate.submit(bath(21.0, RoomReason.SWEEP))).sent
+    assert rig.gate.commands(TRV_BATH).sweep_today == 1

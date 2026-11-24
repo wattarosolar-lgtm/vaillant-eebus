@@ -339,6 +339,13 @@ class TestRunRequest(BaseModel):
     confirm: bool = False
 
 
+class SweepRequest(BaseModel):
+    """A sweep of one room, or (POST api/rooms/sweep) of all rooms one after the other."""
+
+    action: Literal["start", "cancel"]
+    confirm: bool = False
+
+
 class ProbeRequest(BaseModel):
     flow_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
     return_entity: str | None = Field(default=None, pattern=SENSOR_ENTITY.pattern)
@@ -878,6 +885,29 @@ def create_app(
             await control.arm_test(entity_id, confirm=request.confirm)
         else:
             await control.cancel_test(entity_id)
+        return rooms_page()
+
+    @app.post("/api/rooms/sweep")
+    async def rooms_sweep(request: SweepRequest) -> RoomsPage:
+        control = room_control()
+        if request.action == "start":
+            await control.start_sweep_all(confirm=request.confirm)
+        else:
+            await control.cancel_sweeps()
+        return rooms_page()
+
+    @app.post("/api/rooms/{entity_id}/sweep")
+    async def room_sweep(entity_id: RoomId, request: SweepRequest) -> RoomsPage:
+        control = room_control()
+        if request.action == "start":
+            await control.start_sweep(entity_id, confirm=request.confirm)
+        else:
+            await control.cancel_sweep(entity_id)
+        return rooms_page()
+
+    @app.post("/api/rooms/{entity_id}/regulation/reset")
+    async def reset_regulation(entity_id: RoomId) -> RoomsPage:
+        await room_control().reset_regulation(entity_id)
         return rooms_page()
 
     @app.put("/api/rooms/{entity_id}")

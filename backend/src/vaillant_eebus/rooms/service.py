@@ -16,6 +16,12 @@ Since 1.4.2 it also learns each thermostat's valve map every minute
 steps), asks the Aqara W600 for their valve position (reads.py, through the
 write gate) and tells the page "Räume" when something changed (changes()).
 A room may go to "Steuern" once its map knows the valve closed and fully open.
+
+Since 1.4.3 it also rates its own control per room and day (quality.py, a
+line in the protocol shortly after midnight), learns each room's demand by the
+outside temperature and its gain (regulation.py) and runs sweeps (sweep.py):
+by a button per room, for all rooms one after the other, and as the first part
+of a night's test run.
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ from vaillant_eebus.ha_client import EntityState, HomeAssistantUnavailable
 from vaillant_eebus.ha_export import PREFIX, Sensor
 from vaillant_eebus.ha_import import room_celsius
 from vaillant_eebus.hems.config import ZoneKind, in_window
-from vaillant_eebus.hems.room_model import FlowHint, Supply
+from vaillant_eebus.hems.room_model import FlowHint, RoomModel, Supply
 from vaillant_eebus.hems.samples import room_series
 from vaillant_eebus.hems.service import SAMPLE_EVERY, HemsService
 from vaillant_eebus.home_assistant import HomeAssistant
@@ -61,20 +67,73 @@ from vaillant_eebus.rooms.learning import (
     supply_class,
 )
 from vaillant_eebus.rooms.learning import SUPPLY_NAMES as WATER_NAMES
+from vaillant_eebus.rooms.quality import (
+    QualityDay,
+    QualitySample,
+    QualityWatch,
+    summary,
+    watch_from_json,
+    watch_to_json,
+)
 from vaillant_eebus.rooms.reads import ReadPlan
+from vaillant_eebus.rooms.regulation import (
+    HISTORY,
+    OUTDOOR_OVER,
+    RECENT,
+    CalmHour,
+    DemandCurve,
+    DemandFollow,
+    Gain,
+    calm_hours,
+    daily_gain,
+    demand_changes,
+    demand_from_history,
+    gain_from_json,
+    gain_to_json,
+    outdoor_mean,
+    recent_medians,
+    start_gain,
+    valve_at_stop,
+)
+from vaillant_eebus.rooms.regulation import curve_from_json as demand_from_json
+from vaillant_eebus.rooms.regulation import curve_to_json as demand_to_json
 from vaillant_eebus.rooms.supply import SUPPLY_NAMES, HeatSupply, SupplyNow, heat_supply, restart_temperature
+from vaillant_eebus.rooms.sweep import BUDGET_USED as SWEEP_BUDGET_USED
+from vaillant_eebus.rooms.sweep import PHASE_NAMES as SWEEP_PHASE_NAMES
+from vaillant_eebus.rooms.sweep import RESULTS_KEEP as SWEEP_RESULTS_KEEP
+from vaillant_eebus.rooms.sweep import STATE_NAMES as SWEEP_STATE_NAMES
+from vaillant_eebus.rooms.sweep import (
+    Sweep,
+    SweepAction,
+    SweepInputs,
+    SweepPoint,
+    SweepResult,
+    SweepState,
+    begin,
+    result_from_json,
+    result_to_json,
+    running_to_json,
+)
+from vaillant_eebus.rooms.sweep import abort as sweep_abort
+from vaillant_eebus.rooms.sweep import advance as sweep_advance
+from vaillant_eebus.rooms.sweep import describe as sweep_describe
+from vaillant_eebus.rooms.sweep import fresh as sweep_fresh
+from vaillant_eebus.rooms.sweep import start_problem as sweep_start_problem
 from vaillant_eebus.rooms.testrun import (
     GOES_ON,
     PROBE_VALID,
     STATE_NAMES,
     Action,
+    Phase,
     SwapWatch,
     TestInputs,
     TestRun,
     TestState,
     abort,
     advance,
+    after_sweep,
     describe,
+    hold_positions,
     night_of,
     probe_reading,
     run_from_json,
@@ -147,6 +206,10 @@ ANSWER_SLACK = timedelta(seconds=5)
 # A command of the app and the setpoint change it caused are this close.
 OWN_CHANGE = timedelta(minutes=2)
 VALVE_TREND_OVER = timedelta(minutes=30)
+# A window counts against the control's quality and following the demand this long after it closed.
+AFTER_WINDOW = timedelta(minutes=30)
+# Following the demand waits this long after a new setpoint.
+AFTER_SETPOINT = timedelta(minutes=30)
 MODE_TEXTS = {
     RoomControlMode.OFF: "Raumregelung ausgeschaltet.",
     RoomControlMode.OBSERVE: "Raumregelung auf Beobachten: Sie lernt und zeigt Fenster und Versorgung als „würde“.",
@@ -238,11 +301,90 @@ class MapStatus:
     smallest_step_k: float | None
     points_test: int
     points_daily: int
+    points_sweep: int
     responses: int
     last_point_at: datetime | None
     cells: list[MapCell]
     # How warm the water was at the points (names).
     water: list[str]
+
+
+@dataclass(frozen=True, slots=True)
+class QualityStatus:
+    """The control's quality of one day (quality.py); deviation = setpoint - room (positive: too cold)."""
+
+    day: date
+    today: bool
+    hours: float
+    control_hours: float
+    mean_k: float | None
+    mean_abs_k: float | None
+    cold_pct: float | None
+    warm_pct: float | None
+    overshoots: int
+    overshoot_max_k: float | None
+    swings: int
+    heatups: int
+    heatup_median_min: float | None
+    heatups_missed: int
+    commands: int
+    movements: int
+    valve_mean: float | None
+    valve_stop_pct: float | None
+    at_thermostat: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DemandStageStatus:
+    outdoor_c: float
+    value: float
+    hours: int
+    learned: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RegulationStatus:
+    """What the control learned of the room (regulation.py) and how well it controls it (quality.py)."""
+
+    # The demand and the gain apply (a room with its own sensor); the bathroom has only the quality.
+    applies: bool
+    basis: str | None
+    stages: list[DemandStageStatus]
+    outdoor_c: float | None
+    demand_now: float | None
+    gain: float | None
+    trend: float | None
+    gain_start: float | None
+    gain_start_reason: str | None
+    gain_changed_at: datetime | None
+    gain_reason: str | None
+    quality: list[QualityStatus]
+
+
+@dataclass(frozen=True, slots=True)
+class SweepPointStatus:
+    setpoint_c: float
+    offset_k: float
+    valve: float
+    rising: bool
+    reaction_min: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class SweepStatus:
+    """The room's sweep now (running) or its last one."""
+
+    state: SweepState
+    state_name: str
+    message: str
+    phase_name: str | None
+    started_at: datetime
+    ended_at: datetime | None
+    setpoint_c: float | None
+    commands: int
+    complete: bool
+    part_of_test: bool
+    points: list[SweepPointStatus]
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +446,11 @@ class RoomControlRoom:
     cold: bool
     can_control: bool
     control_blocked: str | None
+    # 1.4.3: the sweep (running or the last one), whether one may start, and what the control learned.
+    sweep: SweepStatus | None
+    sweep_blocked: str | None
+    sweep_queued: bool
+    regulation: RegulationStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +483,8 @@ class RoomControlStatus:
     rooms: list[RoomControlRoom]
     zones: list[ZoneControl]
     problems: list[str]
+    # Rooms still waiting for their sweep ("Alle Räume nacheinander").
+    sweep_queue: list[str]
 
 
 @dataclass
@@ -356,6 +505,13 @@ class _RoomState:
     window_ignored: bool = False
     # The last command that was rejected or failed: (value, reason, when), not tried again for a while.
     refused: tuple[float, RoomReason, datetime] | None = None
+    # 1.4.3: the control's quality per day, the demand by the outside temperature (with its values at the
+    # start of the day, for the daily line), following it, and the gain.
+    quality: QualityWatch = field(default_factory=QualityWatch)
+    demand: DemandCurve | None = None
+    demand_day_start: list[float] | None = None
+    follow: DemandFollow = field(default_factory=DemandFollow)
+    gain: Gain | None = None
 
 
 @dataclass
@@ -449,6 +605,12 @@ class RoomControl:
         self._lock = asyncio.Lock()
         # Rooms whose window just opened or closed, decided at once (1.4.3) instead of at the next beat.
         self._window_tasks: set[asyncio.Task[None]] = set()
+        # The sweep running now, the rooms waiting for theirs and the last sweeps per thermostat (1.4.3).
+        self._sweep: Sweep | None = None
+        self._sweep_queue: list[str] = []
+        self._sweeps: dict[str, list[SweepResult]] = {}
+        # The outside temperature's mean over the last 3 hours, from the last beat.
+        self._outdoor_3h: float | None = None
         self._load()
         hems.on_sampled(self.tick)
         hems.set_flow_advisor(self.flow_advice)
@@ -488,6 +650,7 @@ class RoomControl:
             self._watch_probe(now)
             await self._restore_after_restart()
             await self._advance_test(now)
+            await self._advance_sweep(now)
             self._learn(now)
             if self._dirty:
                 self._dirty = False
@@ -516,6 +679,8 @@ class RoomControl:
                 return
             await self._update_zones(now, settings)
             self._redistribute(now, settings)
+            self._outdoor_3h = await self._outdoor_mean(now)
+            await self._new_day(now, settings)
             # Fresh right before deciding: the awaits above may have brought new states.
             self._refresh_thermostats(now)
             for room in settings.rooms:
@@ -526,8 +691,12 @@ class RoomControl:
                     self._rooms.setdefault(room.entity_id, _RoomState()).decision = None
                     continue
                 if self._testing(room):
+                    self._rate(room, stage, now, excluded=True)
                     continue
+                await self._ensure_regulation(room, now, settings)
                 await self._control(room, stage, now, settings)
+                self._rate(room, stage, now)
+                self._follow_demand(room, stage, now, settings)
             if self._recommended_at is None or now - self._recommended_at >= RECOMMEND_EVERY:
                 self._recommended_at = now
                 await self._recommend(now, settings)
@@ -552,6 +721,8 @@ class RoomControl:
                 await self.release(f"Raumregelung auf {STAGE_NAMES[mode]}")
             if mode is RoomControlMode.OFF and self._test is not None and self._test.active:
                 await self._end_test(abort(self._test, self._clock(), "Raumregelung ausgeschaltet"))
+            if mode is RoomControlMode.OFF:
+                await self._stop_sweeps("Raumregelung ausgeschaltet")
             self._settings.update(
                 lambda current: replace(current, room_control=replace(current.room_control, mode=mode))
             )
@@ -682,11 +853,99 @@ class RoomControl:
                 reason += f"; wartete zuletzt: {waited}"
             await self._end_test(abort(run, self._clock(), reason))
 
+    async def start_sweep(self, room_id: str, *, confirm: bool) -> None:
+        """A sweep of the room's thermostat now (1.4.3, plan-1.4.3.md A)."""
+        room = self._room(room_id)
+        self._refresh_thermostats(self._clock())
+        problem = self._sweep_blocked(room, self._settings.current, self._clock())
+        if problem is not None:
+            raise WriteRejected(409, problem)
+        if not confirm:
+            raise WriteRejected(400, "Der Durchlauf muss ausdrücklich bestätigt werden.")
+        async with self._lock:
+            now = self._clock()
+            self._refresh_thermostats(now)
+            problem = self._sweep_blocked(room, self._settings.current, now)
+            if problem is not None:
+                raise WriteRejected(409, problem)
+            problem = await self._begin_sweep(room, now)
+            if problem is not None:
+                raise WriteRejected(409, problem)
+
+    async def start_sweep_all(self, *, confirm: bool) -> None:
+        """A sweep of every room with a thermostat and its valve, one after the other."""
+        settings = self._settings.current
+        rooms = [room for room in settings.rooms if room.details.trv_entity and room.details.valve_entity]
+        if not rooms:
+            raise WriteRejected(409, "Kein Raum hat ein Thermostat mit Ventilstellung.")
+        if settings.operating_mode is not OperatingMode.LIVE:
+            raise WriteRejected(409, "Ein Durchlauf stellt die Thermostate und geht nur im Live-Betrieb.")
+        if settings.room_control.mode is RoomControlMode.OFF:
+            raise WriteRejected(409, "Die Raumregelung ist aus.")
+        if (self._sweep is not None and self._sweep.active) or self._sweep_queue:
+            raise WriteRejected(409, "Es läuft schon ein Durchlauf.")
+        if self._test is not None and self._test.state is TestState.RUNNING:
+            raise WriteRejected(409, "Es läuft gerade ein Testlauf.")
+        if not confirm:
+            raise WriteRejected(400, "Die Durchläufe müssen ausdrücklich bestätigt werden.")
+        async with self._lock:
+            self._refresh_thermostats(self._clock())
+            self._sweep_queue = [room.entity_id for room in rooms]
+            self._log.add(
+                LogCategory.ROOMS,
+                "Schneller Durchlauf für alle Räume nacheinander: " + ", ".join(room.name for room in rooms) + ".",
+            )
+            await self._next_sweep(self._clock())
+        self._notify()
+
+    async def cancel_sweep(self, room_id: str) -> None:
+        async with self._lock:
+            sweep = self._sweep
+            queued = room_id in self._sweep_queue
+            if (sweep is None or not sweep.active or sweep.room_id != room_id) and not queued:
+                raise WriteRejected(409, "Für diesen Raum läuft kein Durchlauf.")
+            if sweep is not None and sweep.active and sweep.part_of_test and sweep.room_id == room_id:
+                raise WriteRejected(409, "Der Durchlauf ist Teil des Testlaufs; bitte den Testlauf abbrechen.")
+            await self._stop_sweeps("vom Nutzer abgebrochen")
+
+    async def cancel_sweeps(self) -> None:
+        """Stop the running sweep and the rooms still waiting ("Alle Räume nacheinander")."""
+        async with self._lock:
+            sweep = self._sweep
+            running = sweep is not None and sweep.active and not sweep.part_of_test
+            if not running and not self._sweep_queue:
+                raise WriteRejected(409, "Es läuft kein Durchlauf.")
+            await self._stop_sweeps("vom Nutzer abgebrochen")
+            self._log.add(LogCategory.ROOMS, "Schnelle Durchläufe vom Nutzer abgebrochen.")
+        self._notify()
+
+    async def reset_regulation(self, room_id: str) -> None:
+        """Forget what the control learned of the room: the demand from the history again, the gain at its start."""
+        room = self._room(room_id)
+        if room.measured_at_thermostat:
+            raise WriteRejected(409, f"{room.name}: Am Thermostat gemessen; hier lernt die Regelung nichts.")
+        async with self._lock:
+            state = self._rooms.setdefault(room.entity_id, _RoomState())
+            state.demand = state.gain = None
+            state.demand_day_start = None
+            state.follow = DemandFollow()
+            now = self._clock()
+            await self._ensure_regulation(room, now, self._settings.current)
+            self._save()
+        gain = state.gain.value if state.gain is not None else None
+        text = f", Verstärkung {_number(gain)} %/K" if gain is not None else ""
+        self._log.add(
+            LogCategory.ROOMS,
+            f"{room.name}: Gelerntes der Regelung zurückgesetzt (Bedarf aus dem Verlauf{text}).",
+        )
+        self._notify()
+
     async def before_demo(self) -> None:
         """The app goes to demo mode: hand the thermostats back while still live."""
         async with self._lock:
             if self._test is not None and self._test.active:
                 await self._end_test(abort(self._test, self._clock(), "Demo-Betrieb"), restore=False)
+            await self._stop_sweeps("Demo-Betrieb", restore=False)
             await self.release("Demo-Betrieb")
 
     async def before_rooms_change(self, rooms: Iterable[tuple[str, str | None]], reason: str) -> None:
@@ -885,6 +1144,7 @@ class RoomControl:
             rooms=rooms,
             zones=zones,
             problems=list(self._problems),
+            sweep_queue=[self._name(room_id) for room_id in self._sweep_queue],
         )
 
     async def release(self, reason: str, room_ids: set[str] | None = None) -> bool:
@@ -1001,7 +1261,8 @@ class RoomControl:
             settle_min=valve_map.settle_min(),
             valve_trend_per_h=await self._valve_trend(room, now),
             changed_at=self._gate.commands(trv, preview=stage is not RoomControlMode.CONTROL).last_sent,
-            demand_valve=model.demand_valve.value if model is not None and model.demand_valve.learned else None,
+            demand_valve=self._demand_now(state, model),
+            gain_per_k=state.gain.value if state.gain is not None else None,
             heating_rate=model.heating_rate.value if model is not None and model.heating_rate.learned else None,
             startup_min=model.startup_min.value if model is not None and model.startup_min.learned else None,
             flow_c=flow_c,
@@ -1232,6 +1493,10 @@ class RoomControl:
         if room is None or room.details.trv_entity != run.trv:
             await self._end_test(abort(run, now, "Raum oder Thermostat geändert"))
             return
+        sweep = self._sweep
+        if run.state is TestState.ARMED and sweep is not None and sweep.active:
+            # A sweep has a thermostat now (by the button or for all rooms): the run starts after it.
+            return
         inputs = self._test_inputs(room, run.trv, now, settings)
         was = run.state
         counted = run.counted_night
@@ -1254,21 +1519,33 @@ class RoomControl:
                 self._dirty = True
                 self._notify()
         self._log_waiting(run, room, inputs.local, counted, settings)
+        if action.kind == "sweep":
+            self._log.add(LogCategory.ROOMS, f"Testlauf {room.name}: Teil 1, schneller Durchlauf ohne Fühlerpaar.")
+            problem = await self._begin_sweep(room, now, part_of_test=True, before_c=run.before_c)
+            if problem is not None:
+                await self._end_test(abort(run, now, f"Durchlauf nicht möglich ({problem})"))
+                return
+        elif not await self._test_action(run, room, action, now):
+            return
+        self._save()
+
+    async def _test_action(self, run: TestRun, room: Room, action: Action, now: datetime) -> bool:
+        """Carry out what the test run asks for; False when it ended."""
         if action.kind == "send" and action.celsius is not None:
             command = SetThermostatSetpoint(room_id=room.entity_id, celsius=action.celsius, reason=RoomReason.TEST)
             try:
                 result = await self._gate.submit(command)
             except (WriteRejected, WriteNotExecuted, WriteOutcomeUnknown) as err:
                 await self._end_test(abort(run, now, f"Befehl nicht ausgeführt ({err})"))
-                return
+                return False
             if not result.sent and result.held is not Held.SAME:
                 await self._end_test(abort(run, now, f"Befehl nicht gesendet ({result.message})"))
-                return
+                return False
             self._notify()
         elif action.kind == "end":
             await self._end_test(action, run=run)
-            return
-        self._save()
+            return False
+        return True
 
     def _log_waiting(self, run: TestRun, room: Room, local: datetime, counted: date | None, settings: Settings) -> None:
         """Each new reason an armed run waits for, once a night; a line when its start window passed without a start."""
@@ -1321,6 +1598,10 @@ class RoomControl:
             return
         room = next((item for item in self._settings.current.rooms if item.entity_id == run.room_id), None)
         name = room.name if room is not None else run.room_id
+        sweep = self._sweep
+        if sweep is not None and sweep.part_of_test and sweep.room_id == run.room_id and sweep.active:
+            # The run ended during its sweep: the sweep ends with it, the run's way back covers both.
+            await self._end_sweep(sweep_abort(sweep, self._clock(), f"Testlauf beendet: {action.note}"), restore=False)
         if restore and action.celsius is not None and room is not None:
             await self._restore_thermostat(room, action.celsius, f"Testlauf {name} beendet")
         result, run.outcome = run.outcome, None
@@ -1379,6 +1660,8 @@ class RoomControl:
             may_write=may_write,
             rated_w=surface.rated_w if surface is not None else None,
             rated_basis=surface.rated_basis.value if surface is not None else "75/65",
+            sweep_needed=not sweep_fresh(self._sweeps.get(trv, []), now),
+            positions=hold_positions(self._maps.get(trv, ValveMap()), now),
         )
 
     async def _restore_after_restart(self) -> None:
@@ -1397,8 +1680,8 @@ class RoomControl:
         if await self._restore_thermostat(room, celsius, "Testlauf nach einem Neustart"):
             self._restore = None
 
-    async def _restore_thermostat(self, room: Room, celsius: float, reason: str) -> bool:
-        """The way back after a test run; when it does not go out, the fallback. True when one went out."""
+    async def _restore_thermostat(self, room: Room, celsius: float, reason: str, *, what: str = "dem Testlauf") -> bool:
+        """The way back after a test run or sweep; when it does not go out, the fallback. True when one went out."""
         command = SetThermostatSetpoint(room_id=room.entity_id, celsius=celsius, reason=RoomReason.RESTORE)
         try:
             result = await self._gate.submit(command)
@@ -1410,10 +1693,419 @@ class RoomControl:
             problem = result.message
         self._log.add(
             LogCategory.ROOMS,
-            f"Rückweg nach dem Testlauf {room.name} nicht gesendet ({problem}); Rückfall auf den Notfallwert.",
+            f"Rückweg nach {what} {room.name} nicht gesendet ({problem}); Rückfall auf den Notfallwert.",
             problem=True,
         )
         return await self.release(reason, {room.entity_id})
+
+    # --- quality, demand and gain (1.4.3) ---------------------------------------------------------------
+
+    async def _outdoor_mean(self, now: datetime) -> float | None:
+        """The outside temperature's mean over the last 3 hours; the reading now when there are no samples."""
+        series = await self._hems.samples.series_async(["outdoor"], now - OUTDOOR_OVER)
+        mean = outdoor_mean(series["outdoor"], now)
+        if mean is not None:
+            return mean
+        heat_pump = self._state.current
+        reading = heat_pump.measurements.get("outdoor_temperature") if heat_pump is not None else None
+        return round(reading.value, 1) if reading is not None else None
+
+    async def _calm_hours(self, rooms: Sequence[Room], now: datetime, since: timedelta) -> dict[str, list[CalmHour]]:
+        if not rooms:
+            return {}
+        names = ["outdoor"]
+        for room in rooms:
+            names += [room_series(room.entity_id, value) for value in ("temperature", "setpoint", "valve")]
+        series = await self._hems.samples.series_async(names, now - since)
+        return {
+            room.entity_id: calm_hours(
+                series[room_series(room.entity_id, "temperature")],
+                series[room_series(room.entity_id, "setpoint")],
+                series[room_series(room.entity_id, "valve")],
+                series["outdoor"],
+            )
+            for room in rooms
+        }
+
+    async def _new_day(self, now: datetime, settings: Settings) -> None:
+        """Shortly after midnight: each room's day is closed - the gain is adjusted (R3), the demand moves
+        toward the recent history (R2) and the protocol gets a line on the day (R1)."""
+        day = now.astimezone(self._zone).date()
+        closed: list[tuple[Room, _RoomState, QualityDay]] = []
+        for room in settings.rooms:
+            state = self._rooms.get(room.entity_id)
+            finished = state.quality.roll(day) if state is not None else None
+            if state is not None and finished is not None:
+                closed.append((room, state, finished))
+        if not closed:
+            return
+        regulated = [
+            room for room, state, _day in closed if state.demand is not None and not room.measured_at_thermostat
+        ]
+        hours = await self._calm_hours(regulated, now, RECENT)
+        for room, state, finished in closed:
+            if not room.measured_at_thermostat and state.gain is not None:
+                gain, why = daily_gain(state.gain, finished, now)
+                if why is not None:
+                    self._log.add(
+                        LogCategory.ROOMS,
+                        f"{room.name}: Verstärkung {_number(state.gain.value)} → {_number(gain.value)} %/K, {why}.",
+                    )
+                    state.gain = gain
+            changes: list[str] = []
+            if state.demand is not None and not room.measured_at_thermostat:
+                before = state.demand_day_start or state.demand.values()
+                state.demand = state.demand.toward(recent_medians(hours.get(room.entity_id, []), now))
+                changes = demand_changes(before, state.demand)
+                state.demand_day_start = state.demand.values()
+            line = summary(finished, room.name, preview=not finished.in_control)
+            if changes:
+                line += "; Bedarf " + ", ".join(changes)
+            self._log.add(LogCategory.ROOMS, line + ".")
+        self._dirty = True
+
+    def _rate(self, room: Room, stage: RoomControlMode, now: datetime, *, excluded: bool = False) -> None:
+        """Every five minutes: the room's quality of control (R1)."""
+        trv = room.details.trv_entity
+        assert trv is not None
+        state = self._rooms.setdefault(room.entity_id, _RoomState())
+        thermostat = self._thermostats.get(trv)
+        window = state.window_open or (
+            state.window_closed_at is not None and now - state.window_closed_at < AFTER_WINDOW
+        )
+        excluded = excluded or window or thermostat is None or not thermostat.available
+        local = now.astimezone(self._zone)
+        decision = state.decision
+        moves = self._movements.get(trv)
+        commands = self._gate.commands(trv).today + self._gate.commands(trv, preview=True).today
+        state.quality.update(
+            QualitySample(
+                now=now,
+                day=local.date(),
+                minutes=SAMPLE_EVERY / 60,
+                setpoint_c=decision.setpoint_c if decision is not None else room.details.setpoint_at(local.time()),
+                room_c=room_celsius(self._hems.sources.get(room.entity_id)),
+                valve=self._hems.sources.number(room.details.valve_entity),
+                comfort_down_k=room.details.comfort_down_k,
+                comfort_up_k=room.details.comfort_up_k,
+                excluded=excluded,
+                at_thermostat=room.measured_at_thermostat,
+                control=stage is RoomControlMode.CONTROL,
+                commands=commands,
+                movements=moves.count if moves is not None and moves.day == local.date() else 0,
+            )
+        )
+
+    async def _ensure_regulation(self, room: Room, now: datetime, settings: Settings) -> None:
+        """The room's demand curve from its history and its gain from the room model, when it has none yet."""
+        if room.measured_at_thermostat:
+            return
+        state = self._rooms.setdefault(room.entity_id, _RoomState())
+        model = self._hems.room_model(room.entity_id)
+        if state.demand is None:
+            hours = (await self._calm_hours([room], now, HISTORY)).get(room.entity_id, [])
+            fallback = model.demand_valve.value if model is not None and model.demand_valve.learned else None
+            state.demand = demand_from_history(hours, now, fallback)
+            state.demand_day_start = state.demand.values()
+            self._dirty = True
+        if state.gain is None:
+            rate = model.heating_rate.value if model is not None and model.heating_rate.learned else None
+            state.gain = start_gain(
+                rate, self._flow_now(room.zone_id, settings), room_celsius(self._hems.sources.get(room.entity_id))
+            )
+            self._dirty = True
+
+    def _follow_demand(self, room: Room, stage: RoomControlMode, now: datetime, settings: Settings) -> None:
+        """In "Steuern": the demand follows a room that has been off the same way for half an hour (R2)."""
+        state = self._rooms.get(room.entity_id)
+        trv = room.details.trv_entity
+        if state is None or state.demand is None or room.measured_at_thermostat or trv is None:
+            return
+        decision = state.decision
+        room_c = room_celsius(self._hems.sources.get(room.entity_id))
+        outdoor = self._outdoor_3h
+        valve = self._hems.sources.number(room.details.valve_entity)
+        zone = self._zones.get(room.zone_id or "")
+        deviation = decision.setpoint_c - room_c if decision is not None and room_c is not None else None
+        sign = 0 if deviation is None else (1 if deviation > 0 else -1)
+        blocked = (
+            stage is not RoomControlMode.CONTROL
+            or decision is None
+            or decision.mode is not RoomMode.NORMAL
+            or decision.reason is not RoomReason.CONTROL
+            or outdoor is None
+            or not self._maps.get(trv, ValveMap()).ready(now)
+            or zone is None
+            or not zone.supply.usable
+            or state.window_open
+            or (state.window_closed_at is not None and now - state.window_closed_at < AFTER_WINDOW)
+            or (state.setpoint_changed_at is not None and now - state.setpoint_changed_at < AFTER_SETPOINT)
+            or state.quality.heatup_since is not None
+            or valve_at_stop(valve, sign)
+        )
+        step = state.follow.update(now, deviation, blocked=blocked)
+        if step and outdoor is not None:
+            state.demand = state.demand.follow(outdoor, step)
+            self._dirty = True
+
+    def _demand_now(self, state: _RoomState, model: RoomModel | None) -> float | None:
+        """The opening that holds the room now: its demand curve at the outside temperature, else the room model."""
+        if state.demand is not None and self._outdoor_3h is not None:
+            return state.demand.value(self._outdoor_3h)
+        if model is not None and model.demand_valve.learned:
+            return model.demand_valve.value
+        return None
+
+    def _regulation_status(self, room: Room, state: _RoomState) -> RegulationStatus:
+        today = state.quality.today
+        quality = [_quality_status(day, today=day is today) for day in state.quality.shown()]
+        outdoor = self._outdoor_3h
+        if room.measured_at_thermostat or room.details.trv_entity is None:
+            return RegulationStatus(
+                applies=False,
+                basis=None,
+                stages=[],
+                outdoor_c=outdoor,
+                demand_now=None,
+                gain=None,
+                trend=None,
+                gain_start=None,
+                gain_start_reason=None,
+                gain_changed_at=None,
+                gain_reason=None,
+                quality=quality,
+            )
+        demand, gain = state.demand, state.gain
+        return RegulationStatus(
+            applies=True,
+            basis=demand.basis if demand is not None else None,
+            stages=[
+                DemandStageStatus(stage.outdoor_c, round(stage.value, 1), stage.hours, stage.learned)
+                for stage in (demand.stages if demand is not None else ())
+            ],
+            outdoor_c=outdoor,
+            demand_now=demand.value(outdoor) if demand is not None and outdoor is not None else None,
+            gain=gain.value if gain is not None else None,
+            trend=gain.trend if gain is not None else None,
+            gain_start=gain.start if gain is not None else None,
+            gain_start_reason=gain.start_reason if gain is not None else None,
+            gain_changed_at=gain.changed_at if gain is not None else None,
+            gain_reason=gain.reason or None if gain is not None else None,
+            quality=quality,
+        )
+
+    # --- sweeps (1.4.3) ------------------------------------------------------------------------------------
+
+    def _sweep_inputs(self, room: Room, now: datetime, settings: Settings) -> SweepInputs:
+        trv = room.details.trv_entity
+        assert trv is not None
+        thermostat = self._thermostats.get(trv)
+        may_write = (
+            settings.operating_mode is OperatingMode.LIVE
+            and settings.room_control.mode is not RoomControlMode.OFF
+            and thermostat is not None
+            and thermostat.available
+            and not blocking(thermostat)
+        )
+        local = now.astimezone(self._zone)
+        return SweepInputs(
+            now=now,
+            setpoint_c=room.details.setpoint_at(local.time()),
+            # A room measured at its thermostat has no sensor of its own: the radiator's warmth is no measure.
+            room_c=None if room.measured_at_thermostat else room_celsius(self._hems.sources.get(room.entity_id)),
+            trv_c=thermostat.temperature_c if thermostat else None,
+            trv_setpoint_c=thermostat.setpoint_c if thermostat else None,
+            valve=self._hems.sources.number(room.details.valve_entity),
+            valve_at=self._valve_confirmed(room, thermostat) if thermostat is not None else None,
+            window_open=self._hems.window_open(room.entity_id),
+            limits=self._gate.limits(trv),
+            may_write=may_write,
+            sending=self._gate.sending(trv),
+            supply=supply_class(self._radiator_flow(room, settings, now)),
+        )
+
+    def _sweep_blocked(self, room: Room, settings: Settings, now: datetime) -> str | None:
+        """Why the room's sweep cannot start now; None when it can."""
+        trv = room.details.trv_entity
+        if trv is None:
+            return "Es ist kein Thermostat gewählt."
+        if room.details.valve_entity is None:
+            return "Für den Durchlauf braucht die App die Ventilstellung des Thermostats (im Raum wählen)."
+        if settings.operating_mode is not OperatingMode.LIVE:
+            return "Ein Durchlauf stellt das Thermostat und geht nur im Live-Betrieb."
+        if settings.room_control.mode is RoomControlMode.OFF:
+            return "Die Raumregelung ist aus."
+        if self._test is not None and self._test.state is TestState.RUNNING:
+            return "Es läuft gerade ein Testlauf."
+        sweep = self._sweep
+        if sweep is not None and sweep.active:
+            return "Der Durchlauf läuft." if sweep.room_id == room.entity_id else "Es läuft schon ein Durchlauf."
+        thermostat = self._thermostats.get(trv)
+        if thermostat is not None and blocking(thermostat):
+            return blocking(thermostat)[0]
+        return sweep_start_problem(self._sweep_inputs(room, now, settings))
+
+    async def _begin_sweep(
+        self, room: Room, now: datetime, *, part_of_test: bool = False, before_c: float | None = None
+    ) -> str | None:
+        """Start the room's sweep; why it cannot, else None."""
+        trv = room.details.trv_entity
+        assert trv is not None
+        inputs = self._sweep_inputs(room, now, self._settings.current)
+        problem = sweep_start_problem(inputs)
+        if problem is not None:
+            return problem
+        sweep = Sweep(room_id=room.entity_id, trv=trv, started_at=now, part_of_test=part_of_test)
+        action = begin(sweep, inputs, before_c=before_c)
+        self._sweep = sweep
+        if not part_of_test:
+            self._log.add(LogCategory.ROOMS, f"Schneller Durchlauf {room.name} gestartet.")
+        await self._sweep_action(sweep, room, action, now)
+        self._save()
+        self._notify()
+        return None
+
+    async def _advance_sweep(self, now: datetime) -> None:
+        sweep = self._sweep
+        if sweep is None or not sweep.active:
+            self._sweep = None
+            await self._next_sweep(now)
+            return
+        settings = self._settings.current
+        room = next((item for item in settings.rooms if item.entity_id == sweep.room_id), None)
+        if room is None or room.details.trv_entity != sweep.trv:
+            await self._end_sweep(sweep_abort(sweep, now, "Raum oder Thermostat geändert"), restore=False)
+            return
+        action = sweep_advance(sweep, self._sweep_inputs(room, now, settings))
+        self._take_sweep_learning(sweep, room, now)
+        await self._sweep_action(sweep, room, action, now)
+
+    async def _sweep_action(self, sweep: Sweep, room: Room, action: SweepAction, now: datetime) -> None:
+        if action.kind == "send" and action.celsius is not None:
+            command = SetThermostatSetpoint(room_id=room.entity_id, celsius=action.celsius, reason=RoomReason.SWEEP)
+            try:
+                result = await self._gate.submit(command)
+            except (WriteRejected, WriteNotExecuted, WriteOutcomeUnknown) as err:
+                await self._end_sweep(sweep_abort(sweep, now, f"Befehl nicht ausgeführt ({err})"))
+                return
+            if not result.sent and result.held is not Held.SAME:
+                await self._end_sweep(sweep_abort(sweep, now, f"Befehl nicht gesendet ({result.message})"))
+                return
+            self._notify()
+        elif action.kind == "end":
+            await self._end_sweep(action)
+
+    def _take_sweep_learning(self, sweep: Sweep, room: Room, now: datetime) -> None:
+        """The sweep's new points and step responses into the valve map."""
+        if not sweep.new_points and not sweep.new_responses:
+            return
+        valve_map = self._maps.get(sweep.trv, ValveMap())
+        was_ready = valve_map.ready(now)
+        valve_map = valve_map.add_points(sweep.new_points)
+        for response in sweep.new_responses:
+            valve_map = valve_map.add_response(response)
+        sweep.new_points.clear()
+        sweep.new_responses.clear()
+        self._maps[sweep.trv] = valve_map
+        self._dirty = True
+        if not was_ready and valve_map.ready(now):
+            self._log.add(
+                LogCategory.ROOMS,
+                f"{room.name}: Die App kennt jetzt „zu“ und „ganz offen“ (aus dem schnellen Durchlauf); "
+                "„Steuern“ ist möglich.",
+            )
+        self._notify()
+
+    async def _end_sweep(self, action: SweepAction, *, restore: bool = True) -> None:
+        sweep = self._sweep
+        if sweep is None:
+            return
+        self._sweep = None
+        now = self._clock()
+        settings = self._settings.current
+        room = next((item for item in settings.rooms if item.entity_id == sweep.room_id), None)
+        name = room.name if room is not None else sweep.room_id
+        if room is not None:
+            self._take_sweep_learning(sweep, room, now)
+        result = sweep.result()
+        if result is not None and result.points:
+            self._sweeps[sweep.trv] = [*self._sweeps.get(sweep.trv, []), result][-SWEEP_RESULTS_KEEP:]
+        ended = "fertig" if sweep.state is SweepState.DONE else "abgebrochen"
+        what = sweep_describe(result) if result is not None and result.points else "keine Punkte"
+        self._log.add(LogCategory.ROOMS, f"Schneller Durchlauf {name} {ended} ({sweep.message}): {what}.")
+        run = self._test
+        if sweep.part_of_test:
+            if run is not None and run.state is TestState.RUNNING and run.phase is Phase.SWEEP and room is not None:
+                if sweep.state is SweepState.DONE or sweep.message == SWEEP_BUDGET_USED:
+                    test_action = after_sweep(run, self._test_inputs(room, run.trv, now, settings))
+                    if run.state is TestState.RUNNING:
+                        self._log.add(LogCategory.ROOMS, f"Testlauf {name}: Teil 2 mit Fühlerpaar, {run.message}.")
+                    if await self._test_action(run, room, test_action, now):
+                        self._save()
+                else:
+                    await self._end_test(abort(run, now, f"Durchlauf abgebrochen: {sweep.message}"))
+        elif restore and action.celsius is not None and room is not None and sweep.commands > 0:
+            await self._restore_thermostat(room, action.celsius, f"Durchlauf {name} beendet", what="dem Durchlauf")
+        self._save()
+        self._notify()
+
+    async def _next_sweep(self, now: datetime) -> None:
+        """The next room waiting for its sweep, as soon as none runs."""
+        while self._sweep_queue and (self._sweep is None or not self._sweep.active):
+            if self._test is not None and self._test.state is TestState.RUNNING:
+                return
+            settings = self._settings.current
+            room_id = self._sweep_queue.pop(0)
+            room = next((item for item in settings.rooms if item.entity_id == room_id), None)
+            if room is None or room.details.trv_entity is None:
+                continue
+            problem = self._sweep_blocked(room, settings, now)
+            if problem is None:
+                problem = await self._begin_sweep(room, now)
+            if problem is not None:
+                self._log.add(LogCategory.ROOMS, f"Schneller Durchlauf {room.name} übersprungen: {problem}")
+                self._notify()
+
+    async def _stop_sweeps(self, reason: str, *, restore: bool = True) -> None:
+        """No more sweeps: the queue is emptied and a running sweep (not one of a test run) ends."""
+        self._sweep_queue = []
+        sweep = self._sweep
+        if sweep is not None and sweep.active and not sweep.part_of_test:
+            await self._end_sweep(sweep_abort(sweep, self._clock(), reason), restore=restore)
+
+    def _sweep_status(self, room: Room) -> SweepStatus | None:
+        sweep = self._sweep
+        if sweep is not None and sweep.room_id == room.entity_id:
+            return SweepStatus(
+                state=sweep.state,
+                state_name=SWEEP_STATE_NAMES[sweep.state],
+                message=sweep.message,
+                phase_name=SWEEP_PHASE_NAMES[sweep.phase],
+                started_at=sweep.started_at,
+                ended_at=sweep.ended_at,
+                setpoint_c=sweep.setpoint_c,
+                commands=sweep.commands,
+                complete=sweep.reached_full and sweep.reached_closed,
+                part_of_test=sweep.part_of_test,
+                points=[_sweep_point(point) for point in sweep.points],
+            )
+        results = self._sweeps.get(room.details.trv_entity or "")
+        if not results:
+            return None
+        last = results[-1]
+        return SweepStatus(
+            state=SweepState.DONE,
+            state_name="fertig" if last.complete else "unvollständig",
+            message=last.ending,
+            phase_name=None,
+            started_at=last.started_at,
+            ended_at=last.ended_at,
+            setpoint_c=None,
+            commands=0,
+            complete=last.complete,
+            part_of_test=False,
+            points=[_sweep_point(point) for point in last.points],
+        )
 
     # --- helpers ------------------------------------------------------------------------------
 
@@ -1476,6 +2168,10 @@ class RoomControl:
             cold=red is not None and red.cold == room.entity_id,
             can_control=blocked is None,
             control_blocked=blocked,
+            sweep=self._sweep_status(room),
+            sweep_blocked=self._sweep_blocked(room, settings, now),
+            sweep_queued=room.entity_id in self._sweep_queue,
+            regulation=self._regulation_status(room, state),
         )
 
     def _control_blocked(self, room: Room, settings: Settings) -> str | None:
@@ -1487,7 +2183,10 @@ class RoomControl:
             return "„Steuern“ geht nur im Live-Betrieb."
         missing = self._maps.get(trv, ValveMap()).missing(self._clock())
         if missing:
-            return f"Die App kennt noch nicht: {' und '.join(missing)} (aus einem Testlauf oder dem Alltag)."
+            return (
+                f"Die App kennt noch nicht: {' und '.join(missing)} (aus einem schnellen Durchlauf, einem Testlauf "
+                "oder dem Alltag)."
+            )
         thermostat = self._thermostats.get(trv)
         if thermostat is not None and blocking(thermostat):
             return blocking(thermostat)[0]
@@ -1734,10 +2433,18 @@ class RoomControl:
             run = self._test
             test_step = (
                 run.step_started
-                if run is not None and run.state is TestState.RUNNING and run.room_id == room.entity_id
+                if run is not None
+                and run.state is TestState.RUNNING
+                and run.room_id == room.entity_id
+                and run.phase is not Phase.SWEEP
                 else None
             )
-            if self._plans.setdefault(trv, ReadPlan()).due(now, next_beat=next_beat, test_step_at=test_step):
+            sweep = self._sweep
+            sweep_step = (
+                sweep.step_at if sweep is not None and sweep.active and sweep.room_id == room.entity_id else None
+            )
+            plan = self._plans.setdefault(trv, ReadPlan())
+            if plan.due(now, next_beat=next_beat, test_step_at=test_step, sweep_step_at=sweep_step):
                 due.append((room, device))
         return due
 
@@ -1924,8 +2631,12 @@ class RoomControl:
         self._notify()
 
     def _testing(self, room: Room) -> bool:
+        """A test run or a sweep has the room's thermostat now."""
         run = self._test
-        return run is not None and run.state is TestState.RUNNING and run.room_id == room.entity_id
+        sweep = self._sweep
+        return (run is not None and run.state is TestState.RUNNING and run.room_id == room.entity_id) or (
+            sweep is not None and sweep.active and sweep.room_id == room.entity_id
+        )
 
     async def _release_on_stop(self) -> None:
         if self._settings.current.operating_mode is not OperatingMode.LIVE or not self._gate.touched():
@@ -1948,21 +2659,39 @@ class RoomControl:
             if not isinstance(item, dict):
                 continue
             correction = item.get("correction_k")
+            day_start = item.get("demand_day_start")
             self._rooms[room_id] = _RoomState(
                 correction=Correction(value_k=float(correction) if isinstance(correction, int | float) else 0.0),
                 helps_ok=int(item.get("helps_ok", 0)),
                 helps_failed=int(item.get("helps_failed", 0)),
+                quality=watch_from_json(item.get("quality")),
+                demand=demand_from_json(item.get("demand")),
+                demand_day_start=[float(value) for value in day_start if isinstance(value, int | float)]
+                if isinstance(day_start, list)
+                else None,
+                gain=gain_from_json(item.get("gain")),
             )
         for trv, item in (raw.get("curves") or {}).items():
             self._curves[trv] = curve_from_json(item)
         for trv, item in (raw.get("maps") or {}).items():
             self._maps[trv] = map_from_json(item)
+        for trv, items in (raw.get("sweeps") or {}).items():
+            results = [result for item in items or [] if (result := result_from_json(item)) is not None]
+            if results:
+                self._sweeps[trv] = results[-SWEEP_RESULTS_KEEP:]
         for trv, curve in self._curves.items():
             if trv not in self._maps:
                 # From 1.4.1: the steps of the test runs so far are the map's first points.
                 self._maps[trv] = ValveMap().add_points(
                     point for result in curve.results for point in points_from_steps(result.steps, result.ended_at)
                 )
+        sweep = raw.get("sweep")
+        if isinstance(sweep, dict) and not sweep.get("part_of_test"):
+            before = sweep.get("before_c")
+            if isinstance(sweep.get("room_id"), str) and isinstance(before, int | float):
+                # Interrupted by a restart: the thermostat goes back to its setpoint from before.
+                self._restore = (sweep["room_id"], float(before))
+            self._log.add(LogCategory.ROOMS, "Schneller Durchlauf abgebrochen: Die App wurde neu gestartet.")
         run = run_from_json(raw.get("test"))
         if run is not None and run.state is TestState.RUNNING:
             # Interrupted by a restart: the thermostat goes back to its setpoint from before.
@@ -1981,9 +2710,15 @@ class RoomControl:
                     "correction_k": state.correction.value_k,
                     "helps_ok": state.helps_ok,
                     "helps_failed": state.helps_failed,
+                    "quality": watch_to_json(state.quality),
+                    "demand": demand_to_json(state.demand) if state.demand is not None else None,
+                    "demand_day_start": state.demand_day_start,
+                    "gain": gain_to_json(state.gain) if state.gain is not None else None,
                 }
                 for room_id, state in self._rooms.items()
             },
+            "sweeps": {trv: [result_to_json(result) for result in results] for trv, results in self._sweeps.items()},
+            "sweep": running_to_json(self._sweep) if self._sweep is not None and self._sweep.active else None,
             "curves": {trv: curve_to_json(curve) for trv, curve in self._curves.items()},
             "maps": {trv: map_to_json(valve_map) for trv, valve_map in self._maps.items()},
             "test": run_to_json(self._test) if self._test is not None else None,
@@ -2096,11 +2831,50 @@ def _map_status(valve_map: ValveMap, now: datetime) -> MapStatus:
         smallest_step_k=valve_map.smallest_step_k(),
         points_test=counts[Source.TEST],
         points_daily=counts[Source.DAILY],
+        points_sweep=counts[Source.SWEEP],
         responses=len(valve_map.responses),
         last_point_at=valve_map.points[-1].at if valve_map.points else None,
         cells=[MapCell(cell.offset_k, cell.rising, cell.valve, cell.count) for cell in valve_map.merged(now)],
         water=sorted({WATER_NAMES[point.supply] for point in valve_map.points}),
     )
+
+
+def _quality_status(day: QualityDay, *, today: bool) -> QualityStatus:
+    return QualityStatus(
+        day=day.day,
+        today=today,
+        hours=round(day.minutes / 60, 1),
+        control_hours=round(day.control_minutes / 60, 1),
+        mean_k=day.mean_k,
+        mean_abs_k=day.mean_abs_k,
+        cold_pct=day.cold_share,
+        warm_pct=day.warm_share,
+        overshoots=day.overshoots,
+        overshoot_max_k=day.overshoot_max_k,
+        swings=day.swings,
+        heatups=len(day.heatups),
+        heatup_median_min=day.heatup_median_min,
+        heatups_missed=day.heatups_missed,
+        commands=day.commands,
+        movements=day.movements,
+        valve_mean=day.valve_mean,
+        valve_stop_pct=day.stop_share,
+        at_thermostat=day.at_thermostat,
+    )
+
+
+def _sweep_point(point: SweepPoint) -> SweepPointStatus:
+    return SweepPointStatus(
+        setpoint_c=point.setpoint_c,
+        offset_k=point.offset_k,
+        valve=point.valve,
+        rising=point.rising,
+        reaction_min=point.reaction_min,
+    )
+
+
+def _number(value: float) -> str:
+    return f"{value:g}".replace(".", ",")
 
 
 def _celsius(value: float) -> str:

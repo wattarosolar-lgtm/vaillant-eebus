@@ -1052,6 +1052,10 @@ ROOM_UNCONFIRMED_MAX = 2
 ROOM_UNCONFIRMED_PAUSE = timedelta(hours=1)
 # A test run's own budget per thermostat and night (punkt1-trv-regelung.md 3b); not part of the daily limit.
 TEST_COMMANDS_MAX = 16
+# A sweep's own budget (1.4.3, plan-1.4.3.md A): at most this many commands per sweep (the sweep stops there),
+# and per thermostat and day at most SWEEP_COMMANDS_DAY (two sweeps); not part of the daily limit either.
+SWEEP_COMMANDS_MAX = 20
+SWEEP_COMMANDS_DAY = 2 * SWEEP_COMMANDS_MAX
 # A night runs from noon to noon (local), so a test run after midnight keeps its budget.
 _NIGHT_SHIFT = timedelta(hours=12)
 # Step of the thermostats when the entity does not report its own.
@@ -1074,7 +1078,9 @@ class RoomReason(StrEnum):
     MANUAL = "manual"
     SAFETY = "safety"
     TEST = "test"
-    # Back to the setpoint from before a test run.
+    # A step of a sweep ("schneller Durchlauf", 1.4.3).
+    SWEEP = "sweep"
+    # Back to the setpoint from before a test run or a sweep.
     RESTORE = "restore"
     FALLBACK = "fallback"
     # Reading the valve position (ReadValvePosition, 1.4.2); never a setpoint.
@@ -1089,7 +1095,8 @@ ROOM_REASON_NAMES = {
     RoomReason.MANUAL: "Handänderung zurückgesetzt",
     RoomReason.SAFETY: "Sicherheit, Raum zu warm",
     RoomReason.TEST: "Testlauf",
-    RoomReason.RESTORE: "Rückweg nach dem Testlauf",
+    RoomReason.SWEEP: "Schneller Durchlauf",
+    RoomReason.RESTORE: "Rückweg nach Testlauf oder Durchlauf",
     RoomReason.FALLBACK: "Rückfall auf den Notfallwert",
     RoomReason.READ: "Abfrage",
 }
@@ -1101,6 +1108,7 @@ _FREE_OF_SPARING = frozenset(
         RoomReason.SAFETY,
         RoomReason.FALLBACK,
         RoomReason.TEST,
+        RoomReason.SWEEP,
         RoomReason.RESTORE,
     }
 )
@@ -1197,8 +1205,9 @@ class ThermostatCommands:
 
     today: int
     limit: int
-    # Commands of test runs this night.
+    # Commands of test runs this night, of sweeps today.
     test_today: int
+    sweep_today: int
     last_sent: datetime | None
     # The value the app set last (confirmed or still on its way); None when unknown.
     expected_c: float | None
@@ -1223,6 +1232,8 @@ class _Trv:
     count: int = 0
     test_night: date | None = None
     test_count: int = 0
+    sweep_day: date | None = None
+    sweep_count: int = 0
     last_sent: datetime | None = None
     expected: float | None = None
     # The app has set this thermostat since it took it over; the fallback may only go to these.
@@ -1350,6 +1361,7 @@ class RoomGate:
             today=state.count,
             limit=room.details.max_commands if room is not None else 0,
             test_today=state.test_count,
+            sweep_today=state.sweep_count,
             last_sent=state.last_sent,
             expected_c=state.expected,
             pending_c=state.pending,
@@ -1559,9 +1571,11 @@ class RoomGate:
             return
         mode = settings.room_control.mode
         match command.reason:
-            case RoomReason.TEST:
+            case RoomReason.TEST | RoomReason.SWEEP:
                 if mode is RoomControlMode.OFF:
-                    raise WriteRejected(409, "Die Raumregelung ist aus; ein Testlauf geht erst, wenn sie läuft.")
+                    raise WriteRejected(
+                        409, "Die Raumregelung ist aus; Testlauf und Durchlauf gehen erst, wenn sie läuft."
+                    )
             case RoomReason.FALLBACK | RoomReason.RESTORE:
                 state = self._live.get(trv)
                 if settings.operating_mode is OperatingMode.LIVE and (state is None or not state.touched):
@@ -1637,6 +1651,10 @@ class RoomGate:
             if state.test_count >= TEST_COMMANDS_MAX:
                 return RoomWriteResult(sent=False, message="Testlauf-Budget verbraucht", held=Held.LIMIT)
             return None
+        if reason is RoomReason.SWEEP:
+            if state.sweep_count >= SWEEP_COMMANDS_DAY:
+                return RoomWriteResult(sent=False, message="Durchlauf-Budget für heute verbraucht", held=Held.LIMIT)
+            return None
         if state.count >= details.max_commands and reason not in _OVER_THE_LIMIT:
             if state.limit_logged != state.day and state is self._live.get(trv):
                 state.limit_logged = state.day
@@ -1664,9 +1682,9 @@ class RoomGate:
         assert self._client is not None
         # In the database before Home Assistant sees the command.
         await self._log.record(LogCategory.WRITE, f"Wird gesendet: {description}")
-        undo = (state.last_sent, state.count, state.test_count, state.restore_c)
-        if command.reason is RoomReason.TEST and state.restore_c is None:
-            # The first command of a test run: the way back goes to the setpoint from before.
+        undo = (state.last_sent, state.count, state.test_count, state.sweep_count, state.restore_c)
+        if command.reason in (RoomReason.TEST, RoomReason.SWEEP) and state.restore_c is None:
+            # The first command of a test run or sweep: the way back goes to the setpoint from before.
             state.restore_c = before if before is not None else state.expected
         self._count(state, command, now)
         if room is not None:
@@ -1680,7 +1698,7 @@ class RoomGate:
             if err.executed is False:
                 # Certainly not at the thermostat: as if it had not been tried.
                 state.pending = state.pending_since = None
-                state.last_sent, state.count, state.test_count, state.restore_c = undo
+                state.last_sent, state.count, state.test_count, state.sweep_count, state.restore_c = undo
                 self._save()
                 self._log.add(LogCategory.WRITE, f"Nicht ausgeführt: {description} ({err.code})", problem=True)
                 raise WriteNotExecuted(err.code) from err
@@ -1697,7 +1715,7 @@ class RoomGate:
         except ValueError:
             # Refused before anything was sent.
             state.pending = state.pending_since = None
-            state.last_sent, state.count, state.test_count, state.restore_c = undo
+            state.last_sent, state.count, state.test_count, state.sweep_count, state.restore_c = undo
             self._save()
             raise
         except BaseException:
@@ -1730,6 +1748,8 @@ class RoomGate:
         state.last_sent = now
         if command.reason is RoomReason.TEST:
             state.test_count += 1
+        elif command.reason is RoomReason.SWEEP:
+            state.sweep_count += 1
         elif command.reason is not RoomReason.RESTORE:
             state.count += 1
 
@@ -1741,6 +1761,8 @@ class RoomGate:
         night = (local - _NIGHT_SHIFT).date()
         if state.test_night != night:
             state.test_night, state.test_count = night, 0
+        if state.sweep_day != today:
+            state.sweep_day, state.sweep_count = today, 0
 
     def _new_read_day(self, state: _Reads, now: datetime) -> None:
         today = now.astimezone(self._zone).date()
@@ -1785,6 +1807,8 @@ class RoomGate:
                     count=int(item.get("count", 0)),
                     test_night=date.fromisoformat(item["test_night"]) if item.get("test_night") else None,
                     test_count=int(item.get("test_count", 0)),
+                    sweep_day=date.fromisoformat(item["sweep_day"]) if item.get("sweep_day") else None,
+                    sweep_count=int(item.get("sweep_count", 0)),
                     last_sent=_moment(item.get("last_sent")),
                     expected=_finite(item.get("expected")),
                     touched=bool(item.get("touched", False)),
@@ -1819,6 +1843,8 @@ class RoomGate:
                     "count": state.count,
                     "test_night": state.test_night.isoformat() if state.test_night else None,
                     "test_count": state.test_count,
+                    "sweep_day": state.sweep_day.isoformat() if state.sweep_day else None,
+                    "sweep_count": state.sweep_count,
                     "last_sent": state.last_sent.isoformat() if state.last_sent else None,
                     "expected": state.expected,
                     "touched": state.touched,
@@ -1871,7 +1897,7 @@ def _check_room_value(
     normal = low - details.correction_limit_k - 1e-6 <= celsius <= high + details.correction_limit_k + 1e-6
     handing_back = {limits.round(value) for value in (details.fallback_c(), *details.setpoint_range())}
     match command.reason:
-        case RoomReason.TEST:
+        case RoomReason.TEST | RoomReason.SWEEP:
             return
         case RoomReason.WINDOW if abs(celsius - limits.min_c) < 0.01 or normal:
             return
@@ -1883,7 +1909,8 @@ def _check_room_value(
             if not any(abs(celsius - value) < 0.01 for value in allowed):
                 raise WriteRejected(
                     422,
-                    f"{room.name}: Der Rückweg geht nur auf den Sollwert vor dem Testlauf, den Notfallwert oder das "
+                    f"{room.name}: Der Rückweg geht nur auf den Sollwert vor Testlauf oder Durchlauf, den Notfallwert "
+                    "oder das "
                     "Raum-Soll.",
                 )
         case _ if not normal:

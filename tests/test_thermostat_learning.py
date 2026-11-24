@@ -57,7 +57,7 @@ def test_closed_and_fully_open_are_known_from_everyday_points() -> None:
 
     assert valve_map.closed_k(T0) == -0.5
     assert valve_map.full(T0) is None
-    assert valve_map.missing(T0) == ["„ganz offen“ bei warmem Wasser"]
+    assert valve_map.missing(T0) == ["„ganz offen“"]
 
     valve_map = valve_map.add_points([point(2.5, 96.0)])
     assert valve_map.full(T0) == (2.5, 96.0) and valve_map.ready(T0)

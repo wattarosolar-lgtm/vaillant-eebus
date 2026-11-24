@@ -12,9 +12,12 @@ whether the valve keeps wandering at an unchanged offset (a PI controller),
 follows the offset (P) or knows only open and shut; and the smallest change of
 the setpoint that moved the valve at all.
 
-Points come from test runs (with the probe pair) and from everyday operation
-(CalmWatch: setpoint and offset calm for 30 minutes with warm water). The
-control may go to "Steuern" once the map knows the valve closed and fully open.
+Points come from test runs (with the probe pair), from everyday operation
+(CalmWatch: setpoint and offset calm for 30 minutes with warm water) and since
+1.4.3 from sweeps (sweep.py: a step every two minutes, what the valve did at
+once). Sweep points only fill gaps: a cell with points of a test run or of
+everyday operation does not count them. The control may go to "Steuern" once
+the map knows the valve closed and fully open.
 
 Pure data and step functions; the room control feeds them and keeps them.
 """
@@ -99,6 +102,8 @@ def supply_class(flow_c: float | None) -> Supply:
 class Source(StrEnum):
     TEST = "test"
     DAILY = "daily"
+    # The sweep (1.4.3): fills only cells without points of the other sources.
+    SWEEP = "sweep"
 
 
 class Kind(StrEnum):
@@ -200,8 +205,9 @@ class ValveMap:
         for point in self.points:
             groups.setdefault((point.offset_k, point.rising, point.supply), []).append(point)
         return [
-            Cell(offset, rising, supply, _weighted(points, now), len(points))
+            Cell(offset, rising, supply, _weighted(kept, now), len(kept))
             for (offset, rising, supply), points in sorted(groups.items(), key=lambda item: (item[0][0], item[0][1]))
+            for kept in [_settled_first(points)]
         ]
 
     def merged(self, now: datetime) -> list[Cell]:
@@ -210,8 +216,9 @@ class ValveMap:
         for point in self.points:
             groups.setdefault((point.offset_k, point.rising), []).append(point)
         return [
-            Cell(offset, rising, Supply.UNKNOWN, _weighted(points, now), len(points))
+            Cell(offset, rising, Supply.UNKNOWN, _weighted(kept, now), len(kept))
             for (offset, rising), points in sorted(groups.items())
+            for kept in [_settled_first(points)]
         ]
 
     def closed_k(self, now: datetime) -> float | None:
@@ -250,9 +257,9 @@ class ValveMap:
         """What the map still lacks before the room may go to "Steuern" (German)."""
         missing = []
         if self.closed_k(now) is None:
-            missing.append("„zu“ bei warmem Wasser")
+            missing.append("„zu“")
         if self.full(now) is None:
-            missing.append("„ganz offen“ bei warmem Wasser")
+            missing.append("„ganz offen“")
         return missing
 
     def ready(self, now: datetime) -> bool:
@@ -570,6 +577,12 @@ def map_from_json(raw: Any) -> ValveMap:
 
 
 # --- helpers ---------------------------------------------------------------------------------------------
+
+
+def _settled_first(points: Sequence[MapPoint]) -> Sequence[MapPoint]:
+    """A cell's points of test runs and everyday operation; the sweep's only when it has no others."""
+    settled = [point for point in points if point.source is not Source.SWEEP]
+    return settled or points
 
 
 def _weighted(points: Sequence[MapPoint], now: datetime) -> float:

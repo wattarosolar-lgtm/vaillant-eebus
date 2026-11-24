@@ -163,7 +163,7 @@ def test_the_stored_night_knows_fully_open_but_not_closed() -> None:
     # 88 % counts as fully open since 1.4.2 (at least 85 %); the valve never closed.
     assert valve_map.full(end, rising=True) == (5.0, 88.0)
     assert valve_map.closed_k(end) is None
-    assert valve_map.missing(end) == ["„zu“ bei warmem Wasser"]
+    assert valve_map.missing(end) == ["„zu“"]
 
 
 def test_the_real_night_shows_the_comets_answer_to_a_step() -> None:

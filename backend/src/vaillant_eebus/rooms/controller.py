@@ -8,7 +8,9 @@ plus
 - for a room with its own sensor: the correction. With a valve map that knows
   the valve closed and fully open (learning.py, 1.4.2) the app works out the
   opening the room needs and takes the smallest offset that reached it in the
-  current state - direction and warm water ("Kaskade"); a PI thermostat gets
+  current state - direction and warm water ("Kaskade"; since 1.4.3 with the
+  demand learned by the outside temperature and the gain learned per room,
+  regulation.py); a PI thermostat gets
   time: no new value before its learned settling time (at least 30 minutes)
   and none while its valve still wanders the right way. Without such a map, or
   when that does not work, a simple correction in steps of 0.5 K after 0.2 K
@@ -43,10 +45,11 @@ SAFETY_ABOVE_K = 0.5
 SAFETY_BELOW_K = 0.5
 PREHEAT_MAX = timedelta(hours=3)
 PREHEAT_DEFAULT = timedelta(hours=1)
-# Cascade: opening that holds the setpoint until learned, and how much more per K too cold and per K/h falling.
+# Cascade: opening that holds the setpoint until learned, and how much more per K too cold and per K/h falling
+# (the trend's share is the gain times a third of an hour).
 DEMAND_DEFAULT = 30.0
 GAIN_PER_K = 30.0
-GAIN_PER_K_PER_H = 10.0
+TREND_H = 1 / 3
 # The cascade changes the thermostat only beyond the dead band plus this, against flapping.
 CASCADE_HYSTERESIS_K = 0.25
 # A PI thermostat keeps moving its valve after a change: the next one waits at least this long (or its learned
@@ -115,6 +118,8 @@ class RoomInputs:
     valve_trend_per_h: float | None = None
     changed_at: datetime | None = None
     demand_valve: float | None = None
+    # % opening per K too cold (R3); None: the start value.
+    gain_per_k: float | None = None
     # For preheating: K/h per K of flow above the room, the startup in minutes and the flow now.
     heating_rate: float | None = None
     startup_min: float | None = None
@@ -249,7 +254,8 @@ def _cascade(inputs: RoomInputs, base: float) -> tuple[float, str] | None:
     deviation = base - inputs.room_c
     trend = inputs.trend_k_per_h or 0.0
     demand = inputs.demand_valve if inputs.demand_valve is not None else DEMAND_DEFAULT
-    wanted = max(0.0, min(100.0, demand + GAIN_PER_K * deviation - GAIN_PER_K_PER_H * trend))
+    gain = inputs.gain_per_k if inputs.gain_per_k is not None else GAIN_PER_K
+    wanted = max(0.0, min(100.0, demand + gain * deviation - gain * TREND_H * trend))
     if inputs.valve >= OPEN_VALVE and wanted > inputs.valve:
         # More setpoint does not help an open valve: water or flow is missing.
         wanted = inputs.valve
