@@ -195,7 +195,7 @@ def begin(sweep: Sweep, inputs: SweepInputs, *, before_c: float | None = None) -
     sweep.before_c = before_c if before_c is not None else inputs.trv_setpoint_c
     sweep.start_c = inputs.limits.round(inputs.trv_c)
     sweep.phase = SweepPhase.START
-    sweep.message = "Startpunkt"
+    sweep.message = "Startpunkt: Soll auf die Temperatur am Thermostat"
     return _set(sweep, inputs, sweep.start_c)
 
 

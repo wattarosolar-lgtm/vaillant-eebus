@@ -317,6 +317,7 @@ class QualityStatus:
     today: bool
     hours: float
     control_hours: float
+    in_control: bool
     mean_k: float | None
     mean_abs_k: float | None
     cold_pct: float | None
@@ -2845,6 +2846,7 @@ def _quality_status(day: QualityDay, *, today: bool) -> QualityStatus:
         today=today,
         hours=round(day.minutes / 60, 1),
         control_hours=round(day.control_minutes / 60, 1),
+        in_control=day.in_control,
         mean_k=day.mean_k,
         mean_abs_k=day.mean_abs_k,
         cold_pct=day.cold_share,
