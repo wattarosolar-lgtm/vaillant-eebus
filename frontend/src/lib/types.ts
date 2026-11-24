@@ -338,10 +338,11 @@ export interface HemsSettings {
   /** Stages of the functions; switched with setFunctionMode, not saved with the form. */
   zone1_mode: PlannerMode;
   flow_mode: PlannerMode;
+  night_mode: PlannerMode;
 }
 
-/** F1 zone 1 off/auto, F2 flow and forecast (plan 1.5.0). */
-export type HemsFunction = 'zone1' | 'flow';
+/** F1 zone 1 off/auto, F2 flow and forecast, F3 night setback (plan 1.5.0). */
+export type HemsFunction = 'zone1' | 'flow' | 'night';
 
 export interface FunctionStatus {
   function: HemsFunction;
@@ -370,6 +371,8 @@ export interface ZoneControlState {
   override_until: string | null;
   shift_k: number;
   off: boolean;
+  /** Switched off by the night setback (F3). */
+  night_off: boolean;
   rest_until: string | null;
   rest_reason: string | null;
   waiting: string | null;
@@ -556,6 +559,32 @@ export interface HemsStatus {
   plan_created_at: string | null;
   functions: FunctionStatus[];
   control: ControlStatus | null;
+  /** F3: the night setback per zone and the heat pump's minimum power per outdoor band. */
+  night: NightStatus[];
+  minimum: BandMinimum[];
+}
+
+export type NightMode = 'off' | 'reduce';
+
+export interface NightStatus {
+  zone_id: string;
+  label: string;
+  active: boolean;
+  mode: NightMode | null;
+  mean_c: number | null;
+  shift_k: number;
+  off: boolean;
+  off_since: string | null;
+  /** German: what it does or waits for. */
+  text: string;
+  start_k: number;
+  controlled: boolean;
+}
+
+export interface BandMinimum {
+  band: string;
+  power_w: number | null;
+  phases: number;
 }
 
 export interface ZoneHour {
@@ -565,6 +594,8 @@ export interface ZoneHour {
   flow_c: number | null;
   block: boolean;
   night: boolean;
+  /** F3: switched off in this hour. */
+  off: boolean;
 }
 
 export interface RoomHour {

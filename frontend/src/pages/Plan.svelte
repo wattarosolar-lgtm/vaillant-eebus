@@ -228,7 +228,10 @@
                   {#each zones as [zoneId] (zoneId)}
                     {@const entry = zoneEntry(hour, zoneId)}
                     <td>
-                      {#if entry}
+                      {#if entry?.off}
+                        <span class="shift">Aus</span>
+                        <span class="sub">Nachtabsenkung</span>
+                      {:else if entry}
                         <span class="shift">{signed(entry.shift_k)} K</span>
                         {#if entry.target_c !== null}<span class="sub">Soll {formatNumber(entry.target_c, 1)} °C</span>{/if}
                         {#if entry.flow_c !== null}<span class="sub">Vorlauf ~{formatNumber(entry.flow_c, 0)} °C</span>{/if}

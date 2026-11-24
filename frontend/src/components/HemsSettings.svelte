@@ -450,8 +450,11 @@
           </label>
         </div>
         <p class="hint">
-          Vorgabe für alle Räume; einzelne Räume stellen Sie auf der Seite „Räume“ anders ein. Die Absenkung nutzt die App
-          nur, wenn sich das Wiederaufheizen lohnt, und nie in feuchten Räumen.
+          Nachtabsenkung (Vorgabe 5:30–10:00 Uhr): Liegt die Prognose für das Fenster im Mittel über 3 °C, schaltet die
+          App die Zonen aus (bei Vereisungsgefahr erst direkt nach einer Abtauung), sonst senkt sie die Wärmepumpe auf ihre
+          Minimalleistung. Aufgeheizt wird ab dem Ende des Fensters. Der Verlust gilt beim Abschalten: erreicht ein Raum
+          ihn, geht seine Zone wieder auf Auto. Vorgabe für alle Räume, einzelne Räume auf der Seite „Räume“; nie in
+          feuchten Räumen (ab 65 %).
         </p>
       </section>
 

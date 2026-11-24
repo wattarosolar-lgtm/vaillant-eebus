@@ -25,6 +25,10 @@
       'Änderung (1–4 h). Vorlauf der Heizkörper-Zone nach dem Engpassraum: höher sofort, wenn ein Raum zu kalt ' +
       'bleibt (erst umverteilen), tiefer höchstens alle 2 h um 0,5 K, solange das Ventil des Engpassraums zwischen ' +
       '10 und 70 % steht.',
+    night:
+      'Im Nachtfenster (Vorgabe 5:30–10:00): über 3 °C im Mittel der Prognose Zonen aus (bei Vereisungsgefahr erst ' +
+      'direkt nach einer Abtauung, sonst bis 7:00 warten), darunter Zone 2 Schritt für Schritt bis zur Minimalleistung ' +
+      'der Wärmepumpe, ohne dass sie abschaltet. Aufheizen ab dem Ende des Fensters.',
   };
   const ACTIONS_SHOWN = 10;
 
@@ -38,6 +42,17 @@
 
   async function switchFunction(item: FunctionStatus, mode: PlannerMode): Promise<void> {
     if (mode === item.mode || !item.available_modes.includes(mode)) {
+      return;
+    }
+    if (
+      mode === 'control' &&
+      item.function === 'night' &&
+      !window.confirm(
+        '„Nachtabsenkung“ auf Steuern: Die App schaltet die Zonen im Nachtfenster aus oder senkt sie per Quick-Veto. ' +
+          'Bitte vorher das Zeitprogramm der Zonen in myVAILLANT auf durchgehend Komfort stellen (ohne Absenkfenster), ' +
+          'die Zonen auf Auto, und die Automation „Zonen auf Auto, wenn die App schweigt“ anlegen. Fortfahren?',
+      )
+    ) {
       return;
     }
     if (
@@ -68,7 +83,7 @@
       parts.push(`Quick-Veto ${maybe(zone.override_c, 1, '°C')} (${signed(zone.shift_k)} K)${until}`);
     }
     if (zone.off) {
-      parts.push('von der App ausgeschaltet');
+      parts.push(zone.night_off ? 'für die Nacht ausgeschaltet' : 'von der App ausgeschaltet');
     }
     if (zone.preview_shift_k !== null) {
       parts.push(`würde ${signed(zone.preview_shift_k)} K`);
@@ -170,6 +185,21 @@
           <div><dt>{zone.label}</dt><dd>{zoneText(zone)}</dd></div>
         {/each}
       </dl>
+    {/if}
+    {#each status.night.filter((item) => item.active || item.off) as night (night.zone_id)}
+      <p class="hint">Nacht {night.label}{night.controlled ? '' : ' (würde)'}: {night.text}</p>
+    {/each}
+    {#if status.minimum.some((band) => band.phases > 0)}
+      <p class="hint">
+        Kleinste Leistung der Wärmepumpe (Puffer über dem Vorlauf-Soll):
+        {status.minimum
+          .filter((band) => band.phases > 0)
+          .map(
+            (band) =>
+              `${band.band}: ${band.power_w !== null ? `${Math.round(band.power_w)} W` : 'noch zu wenig'} (${band.phases})`,
+          )
+          .join(' · ')}
+      </p>
     {/if}
     {#each status.flow as flow (flow.zone_id)}
       <p class="hint">
