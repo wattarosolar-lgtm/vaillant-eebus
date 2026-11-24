@@ -252,9 +252,12 @@
     {@render entity('Heizkörperthermostat', 'thermostat', draft.trv_entity, (value) => (draft.trv_entity = value))}
     {@render entity('Ventilstellung (%)', 'percent', draft.valve_entity, (value) => (draft.valve_entity = value))}
     {@render entity('Luftfeuchte (%)', 'humidity', draft.humidity_entity, (value) => (draft.humidity_entity = value))}
+    {@render entity('Fensterkontakt (optional)', 'window', draft.window_entity ?? null, (value) => (draft.window_entity = value))}
     <p class="hint">
-      Aqara W600: Sensor „position“; Eurotronic Comet: „pi_heating_demand“. Die Feuchte dient nur der Fenstererkennung und
-      dem Schutz vor Schimmel bei der Nachtabsenkung.
+      Aqara W600: Sensor „position“; Eurotronic Comet: „pi_heating_demand“. Die Feuchte dient der Fenstererkennung und
+      dem Schutz vor Schimmel bei der Nachtabsenkung. Mit einem Fensterkontakt entscheidet nur der Kontakt, sofort beim
+      Öffnen und Schließen; meldet er über 10 Minuten nichts, erkennt die App das Fenster wieder an Feuchte und
+      Temperatur.
     </p>
     {#if readsValve || draft.zigbee_name}
       <label class="field">

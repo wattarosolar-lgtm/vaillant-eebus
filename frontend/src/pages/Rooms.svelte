@@ -75,6 +75,20 @@
     editing = entityId;
   }
 
+  /** How the room's window is recognised now (1.4.3). */
+  function windowRule(room: RoomStatus): string {
+    if (room.window_source === 'contact') {
+      return 'Fensterkontakt';
+    }
+    if (room.measured_at_thermostat) {
+      return 'am Thermostat (−1,5 K in 8 min)';
+    }
+    if (room.window_threshold_g !== null) {
+      return `Feuchte ab −${formatNumber(room.window_threshold_g, 1)} g/m³, Temperatur, Thermostat`;
+    }
+    return room.details.humidity_entity ? 'Temperatur und Thermostat (Feuchte zählt bei diesem Wetter nicht)' : 'Temperatur und Thermostat';
+  }
+
   function controlOf(entityId: string): RoomControlRoom | undefined {
     return view?.control?.rooms.find((room) => room.room_id === entityId);
   }
@@ -208,6 +222,13 @@
                 {#if room.window_since}
                   <div><dt>Fenster offen seit</dt><dd>{moment(room.window_since)} Uhr</dd></div>
                 {/if}
+                <div>
+                  <dt>Fenstererkennung</dt>
+                  <dd>
+                    {windowRule(room)}
+                    {#if room.window_reason}<span class="hint">(zuletzt: {room.window_reason})</span>{/if}
+                  </dd>
+                </div>
               </dl>
 
               <details>

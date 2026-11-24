@@ -279,6 +279,7 @@ export type EntityKind =
   | 'power'
   | 'percent'
   | 'humidity'
+  | 'window'
   | 'room'
   | 'thermostat'
   | 'weather'
@@ -547,6 +548,8 @@ export interface RoomDetails {
   trv_entity: string | null;
   valve_entity: string | null;
   humidity_entity: string | null;
+  /** Optional window contact (binary_sensor); with it the contact alone decides (1.4.3). */
+  window_entity: string | null;
   setpoint_c: number;
   schedule: ScheduleWindow[];
   comfort_down_k: number;
@@ -601,6 +604,12 @@ export interface RoomStatus {
   supply: Supply;
   window_open: boolean;
   window_since: string | null;
+  /** What decides about the window (1.4.3). */
+  window_source: 'contact' | 'rules';
+  /** The fall of humidity (g/m³) that shows an open window now; null: the humidity does not count. */
+  window_threshold_g: number | null;
+  /** The signal of the last opening or closing, German. */
+  window_reason: string | null;
 }
 
 export interface ZoneRoomsStatus {
