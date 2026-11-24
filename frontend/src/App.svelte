@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
 
+  import ConfirmDialog from './components/ConfirmDialog.svelte';
   import HeaderStatus from './components/HeaderStatus.svelte';
   import ModeBanner from './components/ModeBanner.svelte';
   import ModeSwitch from './components/ModeSwitch.svelte';
   import StatusPill from './components/StatusPill.svelte';
   import { ApiError, getConnection, getPairing, setOperatingMode, subscribeState } from './lib/api';
+  import { ask } from './lib/confirm.svelte';
   import { BRIDGE_PROBLEMS, CONNECTION_SUBTITLES } from './lib/texts';
   import type { ApiState, Connection, ConnectionStatus, OperatingMode, PairingStatus } from './lib/types';
   import { hasUnsaved, UNSAVED_QUESTION } from './lib/unsaved';
@@ -193,9 +195,16 @@
 
   /** A link to another page: with unsaved settings the user decides first. */
   function leave(event: MouseEvent): void {
-    if (hasUnsaved() && !window.confirm(UNSAVED_QUESTION)) {
-      event.preventDefault();
+    if (!hasUnsaved()) {
+      return;
     }
+    event.preventDefault();
+    const target = (event.currentTarget as HTMLAnchorElement).hash;
+    void ask(UNSAVED_QUESTION, 'Verlassen').then((yes) => {
+      if (yes) {
+        window.location.hash = target;
+      }
+    });
   }
 </script>
 
@@ -297,6 +306,7 @@
     {/if}
   </main>
 </div>
+<ConfirmDialog />
 
 <style>
   .page {

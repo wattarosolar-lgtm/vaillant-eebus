@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ApiError, resetRegulation } from '../lib/api';
+  import { ask } from '../lib/confirm.svelte';
   import { formatNumber, maybe, moment, signed } from '../lib/format';
   import type { QualityDay, RoomControlRoom, RoomsPage } from '../lib/types';
 
@@ -87,9 +88,10 @@
   });
 
   async function reset(): Promise<void> {
-    const confirm = window.confirm(
+    const confirm = await ask(
       `Gelerntes der Regelung für ${room.name} zurücksetzen? Der Bedarf je Außentemperatur wird neu aus dem Verlauf ` +
         'berechnet, die Verstärkung geht auf ihren Startwert. Das Kennfeld des Ventils und die Regelgüte bleiben.',
+      'Zurücksetzen',
     );
     if (!confirm) {
       return;

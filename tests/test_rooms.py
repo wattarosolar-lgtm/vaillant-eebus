@@ -64,7 +64,14 @@ from vaillant_eebus.rooms.supply import HeatSupply, SupplyNow, heat_supply, rest
 from vaillant_eebus.rooms.testrun import Phase, TestInputs, TestRun, TestState, advance
 from vaillant_eebus.rooms.thermostats import TrvModel, blocking, read, side_entities
 from vaillant_eebus.settings import Connection, MyVaillantEntities, OperatingMode, Room, SettingsStore
-from vaillant_eebus.write_gate import RoomGate, RoomReason, SetThermostatSetpoint, ThermostatLimits, WriteGate
+from vaillant_eebus.write_gate import (
+    RoomGate,
+    RoomReason,
+    SetThermostatSetpoint,
+    ThermostatLimits,
+    WriteGate,
+    _Trv,
+)
 
 BUFFER = "sensor.buffer_temperature"
 T0 = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
@@ -1548,6 +1555,18 @@ async def test_sweeps_for_all_rooms_run_one_after_the_other_and_stop_together(wo
     texts = await messages(world.log, LogCategory.ROOMS)
     assert "Schneller Durchlauf für alle Räume nacheinander: Büro, Bad." in texts
     assert any(text.startswith("Schneller Durchlauf Bad abgebrochen (vom Nutzer abgebrochen)") for text in texts)
+
+
+async def test_a_sweep_whose_first_command_is_held_says_so_at_the_button(world: World) -> None:
+    # A paused thermostat holds the first command: the sweep ends at once and has no points to show.
+    world.gate._live[TRV_OFFICE] = _Trv(paused_until=world.clock.now + timedelta(hours=1))
+    await world.control.minute()
+    response = await world.http.post(f"/api/rooms/{OFFICE}/sweep", json={"action": "start", "confirm": True})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Der Durchlauf brach gleich ab: Befehl nicht gesendet (Thermostat pausiert)."
+    assert world.control._sweep is None
+    assert world.calls(TRV_OFFICE) == []
 
 
 async def test_a_sweep_needs_live_mode_and_no_test_run_going_on(world: World) -> None:

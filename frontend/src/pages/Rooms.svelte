@@ -6,6 +6,7 @@
   import StatusPill from '../components/StatusPill.svelte';
   import ThermostatPanel from '../components/ThermostatPanel.svelte';
   import { ApiError, getRooms } from '../lib/api';
+  import { ask } from '../lib/confirm.svelte';
   import { duration, formatNumber, maybe, moment, signed } from '../lib/format';
   import { live } from '../lib/live.svelte';
   import { FLOW_HINT_LABELS, SUPPLY_LABELS, type Tone } from '../lib/texts';
@@ -68,8 +69,8 @@
     { key: 'overshoot_k', label: 'Überschwingen', show: (room) => maybe(room.model?.overshoot_k, 1, 'K') },
   ];
 
-  function startEdit(entityId: string): void {
-    if (editing !== null && editing !== entityId && hasUnsaved() && !window.confirm('Änderungen am anderen Raum verwerfen?')) {
+  async function startEdit(entityId: string): Promise<void> {
+    if (editing !== null && editing !== entityId && hasUnsaved() && !(await ask('Änderungen am anderen Raum verwerfen?', 'Verwerfen'))) {
       return;
     }
     editing = entityId;
@@ -289,7 +290,7 @@
                   onCancel={() => (editing = null)}
                 />
               {:else}
-                <div><button type="button" class="button small" onclick={() => startEdit(room.entity_id)}>Bearbeiten</button></div>
+                <div><button type="button" class="button small" onclick={() => void startEdit(room.entity_id)}>Bearbeiten</button></div>
               {/if}
             </article>
           {/each}

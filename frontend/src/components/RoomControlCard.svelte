@@ -1,5 +1,6 @@
 <script lang="ts">
   import { allRoomsSweep, ApiError, getAutomation, saveProbe, setMqttBaseTopic, setRoomControl } from '../lib/api';
+  import { ask } from '../lib/confirm.svelte';
   import { duration, maybe, moment } from '../lib/format';
   import { ROOM_CONTROL_HINTS, ROOM_CONTROL_LABELS } from '../lib/texts';
   import type { RoomControlMode, RoomControlStatus, RoomsPage } from '../lib/types';
@@ -54,10 +55,11 @@
   async function sweepAll(action: 'start' | 'cancel'): Promise<void> {
     let confirm = false;
     if (action === 'start') {
-      confirm = window.confirm(
+      confirm = await ask(
         'Schneller Durchlauf für alle Räume nacheinander: Jedes Thermostat mit Ventilstellung bekommt etwa 30 Minuten ' +
           'lang alle 2 Minuten einen neuen Sollwert (höchstens 20 Befehle je Raum, nicht im Tageskontingent) und ' +
           'danach wieder seinen alten. Räume mit offenem Fenster oder zu warm werden übersprungen. Starten?',
+        'Starten',
       );
       if (!confirm) {
         return;
@@ -77,9 +79,10 @@
   async function switchMode(mode: RoomControlMode): Promise<void> {
     let confirm = false;
     if (mode === 'control') {
-      confirm = window.confirm(
+      confirm = await ask(
         'Raumregelung auf „Steuern“: Räume, die selbst auf „Steuern“ stehen, bekommen ab jetzt ihre Sollwerte von der ' +
           'App. Bitte vorher die Notfall-Automation in Home Assistant anlegen. Fortfahren?',
+        'Auf „Steuern“',
       );
       if (!confirm) {
         return;

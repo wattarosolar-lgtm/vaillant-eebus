@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ApiError, roomTest, setRoomStage } from '../lib/api';
+  import { ask } from '../lib/confirm.svelte';
   import { duration, formatNumber, maybe, moment, signed } from '../lib/format';
   import { ROOM_CONTROL_LABELS, ROOM_STAGES } from '../lib/texts';
   import type { OperatingMode, RoomControlRoom, RoomsPage, RoomStage } from '../lib/types';
@@ -46,8 +47,9 @@
   async function changeStage(stage: RoomStage): Promise<void> {
     let confirm = false;
     if (stage === 'control') {
-      confirm = window.confirm(
+      confirm = await ask(
         `${room.name} auf „Steuern“: Die App stellt ab jetzt das Thermostat dieses Raums. Fortfahren?`,
+        'Auf „Steuern“',
       );
       if (!confirm) {
         return;
@@ -57,11 +59,12 @@
   }
 
   async function arm(): Promise<void> {
-    const confirm = window.confirm(
+    const confirm = await ask(
       `Testlauf ${room.name}: In der kommenden Nacht ab ${testStart} Uhr zuerst ein schneller Durchlauf (etwa 30 ` +
         'Minuten; entfällt, wenn einer jünger als 7 Tage ist), danach hält die App mit dem Fühlerpaar vier Stellungen ' +
         '(zu, etwa 30 %, 60 %, ganz offen) je 20 bis 40 Minuten, bis spätestens 5 Uhr. Der Raum kann dabei bis zu 1 K ' +
         'wärmer werden. Vormerken?',
+      'Vormerken',
     );
     if (confirm) {
       await act(() => roomTest(room.room_id, 'arm', true));

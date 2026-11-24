@@ -895,7 +895,7 @@ class RoomControl:
             problem = self._sweep_blocked(room, self._settings.current, now)
             if problem is not None:
                 raise WriteRejected(409, problem)
-            problem = await self._begin_sweep(room, now)
+            problem = await self._begin_sweep(room, now, report_end=True)
             if problem is not None:
                 raise WriteRejected(409, problem)
 
@@ -2082,9 +2082,17 @@ class RoomControl:
         return sweep_start_problem(self._sweep_inputs(room, now, settings))
 
     async def _begin_sweep(
-        self, room: Room, now: datetime, *, part_of_test: bool = False, before_c: float | None = None
+        self,
+        room: Room,
+        now: datetime,
+        *,
+        part_of_test: bool = False,
+        before_c: float | None = None,
+        report_end: bool = False,
     ) -> str | None:
-        """Start the room's sweep; why it cannot, else None."""
+        """Start the room's sweep; why it cannot, else None.
+
+        report_end: a sweep that ended at its first step counts as "cannot" too (the user's button)."""
         trv = room.details.trv_entity
         assert trv is not None
         inputs = self._sweep_inputs(room, now, self._settings.current)
@@ -2102,6 +2110,10 @@ class RoomControl:
         await self._sweep_action(sweep, room, action, now)
         self._save()
         self._notify()
+        if report_end and not sweep.active:
+            # The first command did not go out: without points the sweep leaves no trace in the room, so the
+            # user learns here why nothing happened.
+            return f"Der Durchlauf brach gleich ab: {sweep.message}."
         return None
 
     async def _advance_sweep(self, now: datetime) -> None:

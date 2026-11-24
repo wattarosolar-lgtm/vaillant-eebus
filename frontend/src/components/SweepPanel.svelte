@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ApiError, roomSweep } from '../lib/api';
+  import { ask } from '../lib/confirm.svelte';
   import { formatNumber, maybe, moment, signed } from '../lib/format';
   import type { OperatingMode, RoomControlRoom, RoomsPage, SweepPoint } from '../lib/types';
   import StatusPill from './StatusPill.svelte';
@@ -53,11 +54,12 @@
   );
 
   async function start(): Promise<void> {
-    const confirm = window.confirm(
+    const confirm = await ask(
       `Schneller Durchlauf ${room.name}: Die App stellt das Thermostat etwa eine halbe Stunde lang alle 2 Minuten ` +
         'um 0,5 bis 1 K höher und danach wieder tiefer (höchstens 20 Befehle, nicht im Tageskontingent) und lernt ' +
         'dabei, wie das Ventil reagiert. Danach geht der Sollwert zurück. Der Raum kann kurz etwas wärmer werden. ' +
         'Starten?',
+      'Starten',
     );
     if (confirm) {
       await act(() => roomSweep(room.room_id, 'start', true));
