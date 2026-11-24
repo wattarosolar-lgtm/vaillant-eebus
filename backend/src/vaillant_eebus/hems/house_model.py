@@ -211,7 +211,11 @@ def find_lag(heat_kwh: Mapping[datetime, float], difference_k: Mapping[datetime,
         r = _correlation(xs, ys)
         if r is not None and (best is None or r > best[0] + 0.005):
             best = (r, lag)
-    return float(best[1]) if best is not None and best[0] > 0.3 else None
+    if best is None or best[0] <= 0.3 or best[1] == MAX_LAG_H:
+        # The best fit at the end of the search is no result: the real delay may be longer, or there is none
+        # to find (K4, 24.11.2026: 8 h exactly). Then the demand follows the weather of the same hour.
+        return None
+    return float(best[1])
 
 
 def demand(

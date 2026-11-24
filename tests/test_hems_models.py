@@ -372,6 +372,14 @@ def test_the_delay_of_the_house_is_found() -> None:
     assert find_lag(heat, difference) == 3.0
 
 
+def test_a_delay_at_the_end_of_the_search_is_not_learned() -> None:
+    # K4 (24.11.2026): the learned 8 h was exactly the longest delay searched - no result.
+    difference = {T0 + timedelta(hours=hour): 15 + 5 * math.sin(hour / 7) for hour in range(10 * 24)}
+    heat = {hour + timedelta(hours=12): value * 0.15 for hour, value in difference.items()}
+
+    assert find_lag(heat, difference) is None
+
+
 def test_hourly_demand_is_split_by_the_zones_heat_loads() -> None:
     model = start_model(6000.0, -10.0)
     assert model is not None
