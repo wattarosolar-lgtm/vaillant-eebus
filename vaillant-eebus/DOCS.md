@@ -301,10 +301,10 @@ kommt später neu auf dieser Grundlage.
   (21 Tage). Daraus lernt sie, wie schnell der Raum ohne Heizung abkühlt, wie schnell er aufheizt, wie lange es nach
   einem Start der Wärmepumpe dauert, bis er nicht mehr fällt, und wie weit das Ventil für das Soll offen steht. Bis
   genug Phasen gesehen sind, steht „lernt noch“ da.
-- **Fenster (würde):** Fallen Temperatur und absolute Luftfeuchte gemeinsam schnell (etwa 0,3 K und 0,5 g/m³ in
-  10 Minuten) – ohne Feuchtesensor 0,5 K in 10 oder 0,8 K in 20 Minuten –, meldet die App ein offenes Fenster im
-  Protokoll (Kategorie „Räume“). So lässt sich prüfen, ob die Erkennung zu echtem Lüften passt. Räume, die in der
-  Raumregelung auf „Vorschau“ oder „Steuern“ stehen, meldet die Raumregelung selbst.
+- **Fenster (würde):** Erkennt die App ein offenes Fenster (Regeln unter „Raumregelung → Fenster offen“), meldet sie
+  es im Protokoll (Kategorie „Räume“) mit dem Signal, an dem sie es erkannt hat. So lässt sich prüfen, ob die
+  Erkennung zu echtem Lüften passt. Räume, die in der Raumregelung auf „Vorschau“ oder „Steuern“ stehen, meldet die
+  Raumregelung selbst.
 - **Versorgung (würde):** Steht das Ventil eines Raums seit 30 Minuten zu mindestens 90 % offen und ist der Raum
   0,3 K unter seinem Soll, gilt er als unterversorgt; hält er sein Soll mit wenig offenem Ventil, als überversorgt.
   Für die Heizkörper-Zone leitet die App daraus ab, ob der Vorlauf höher oder tiefer sein dürfte. Stehen Räume der
@@ -390,9 +390,9 @@ An die Wärmepumpe sendet die Raumregelung nichts.
 - **Vorschau:** Die App rechnet alle 5 Minuten den Sollwert jedes Thermostats und schreibt ins Protokoll, was sie
   senden würde („Vorschau, würde senden“), mit den Grenzen der Ventilschonung wie beim echten Senden.
 - **Steuern:** nur im Live-Betrieb, mit Bestätigung, und je Raum erst, wenn die App vom Thermostat **„zu“ und
-  „ganz offen“ bei warmem Wasser** kennt – aus einem Testlauf oder aus dem Alltag (seit 1.4.2; siehe
-  „Regelverhalten“). Die Seite zeigt beim Raum, was noch fehlt. Empfehlung: erst einige Tage Vorschau, dann ein
-  einzelner Raum (etwa das Bad), dann die übrigen.
+  „ganz offen“** kennt – aus einem **schnellen Durchlauf** (seit 1.4.3, etwa 30 Minuten, tagsüber per Knopf), einem
+  Testlauf oder aus dem Alltag (siehe „Regelverhalten“). Die Seite zeigt beim Raum, was noch fehlt. Empfehlung: erst
+  einige Tage Vorschau (die Regelgüte zeigt den Vergleich), dann ein einzelner Raum (etwa das Bad), dann die übrigen.
 
 Die Seite **Räume** aktualisiert sich live, sobald sich ein Thermostat, ein Ventil, ein Raumsensor oder das
 Fühlerpaar ändert oder die App etwas entscheidet oder sendet (sonst jede Minute).
@@ -405,16 +405,33 @@ Fühlerpaar ändert oder die App etwas entscheidet oder sendet (sonst jede Minut
   einstellbar). Sie erhöht nicht, wenn das Ventil schon zu mindestens 90 % offen ist (dann fehlt Wasser oder Vorlauf)
   oder kein warmes Wasser kommt, und senkt nicht, wenn das Ventil höchstens 5 % offen ist. Kennt sie das
   Regelverhalten des Thermostats („zu“ und „ganz offen“), rechnet sie genauer: welche Ventilöffnung der Raum braucht
-  und welche kleinste Abweichung (Sollwert über der Temperatur am Thermostat) diese Öffnung im jetzigen Zustand
-  erreicht hat – steigend oder fallend, bei so warmem Wasser wie jetzt. Bei einem PI-Thermostat (dessen Ventil bei
+  (seit 1.4.3: der gelernte **Bedarf** bei der Außentemperatur plus die **Verstärkung** des Raums je K zu kalt, minus
+  ein Drittel davon je K/h, um das der Raum gerade steigt; siehe „Regelung lernt mit“) und welche kleinste Abweichung
+  (Sollwert über der Temperatur am Thermostat) diese Öffnung im jetzigen Zustand erreicht hat – steigend oder fallend,
+  bei so warmem Wasser wie jetzt. Bei einem PI-Thermostat (dessen Ventil bei
   gleichem Sollwert weiterwandert, etwa der Comet) wartet sie nach jeder Änderung die gelernte Einschwingzeit ab
   (mindestens 30 Minuten) und legt nicht nach, solange das Ventil noch in die richtige Richtung läuft.
 - **Raum ohne eigenen Sensor** (Bad mit Comet): Raum-Soll + **fester Ausgleich** (Voreinstellung 0 K). Ist es gefühlt
   zu kühl, den Ausgleich z. B. auf +1 K stellen.
-- **Fenster offen** (Temperatur und Luftfeuchte fallen): Thermostat sofort auf den kleinsten Wert (Aqara 5 °C,
-  Comet 8 °C), nach dem Schließen sofort zurück. Die eigene Fenstererkennung der Thermostate sollte aus sein. In einem
-  Raum ohne eigenen Sensor (Bad) misst der Fühler am Heizkörper; dort gilt ein erkanntes Fenster 30 Minuten nach
-  einem Befehl der App und nach dem Schließen des Ventils nicht, weil der Fühler dann von selbst schnell fällt.
+- **Fenster offen:** Thermostat sofort auf den kleinsten Wert (Aqara 5 °C, Comet 8 °C), nach dem Schließen sofort
+  zurück – seit 1.4.3 in dem Augenblick, in dem die App das Fenster erkennt, nicht erst im 5-Minuten-Takt. Die eigene
+  Fenstererkennung der Thermostate sollte aus sein. So erkennt die App ein offenes Fenster (seit 1.4.3; die Raumsensoren
+  melden oft nur bei einer Änderung, deshalb vergleicht sie jede Meldung mit der letzten, auch wenn die älter ist):
+  - **Luftfeuchte** (Hauptsignal): Die absolute Feuchte fällt gegenüber der letzten Meldung (höchstens 90 Minuten alt)
+    um eine Schwelle, schnell genug (mindestens 1 g/m³ je Stunde) und ohne dass die Temperatur steigt. Die Schwelle
+    richtet sich nach dem Wetter: 0,2 × (Feuchte innen − Feuchte außen), 0,5 bis 1,0 g/m³; ist es draußen mild und
+    feucht (Unterschied unter 1,5 g/m³), zählt die Feuchte nicht. Die Seite zeigt die Schwelle je Raum.
+  - **Temperatur:** −0,5 K gegenüber einer Meldung, die höchstens 15 Minuten alt ist, oder −0,8 K bis 30 Minuten,
+    wenn der Raum mindestens 8 K wärmer ist als draußen.
+  - **Fühler am Thermostat:** fällt um 1 K gegenüber seinem höchsten Wert der letzten 8 Minuten, und der Raumsensor
+    ist seitdem nicht gestiegen (ohne Raumsensor 1,5 K). Nicht in den 30 Minuten nach einem Befehl der App oder dem
+    Schließen des Ventils, weil der Fühler am Heizkörper dann von selbst fällt.
+  - **Zu** gilt das Fenster frühestens 3 Minuten danach, wenn die Feuchte 0,3 g/m³, der Raum 0,2 K oder das
+    Thermostat 0,5 K über dem tiefsten Wert liegt, spätestens nach 30 Minuten.
+  - **Fensterkontakt** (optional je Raum, Bearbeiten → Fensterkontakt, ein `binary_sensor`): Mit Kontakt gilt nur er,
+    sofort beim Öffnen und Schließen. Meldet er sich 10 Minuten nicht, gelten wieder die Regeln (Hinweis beim Raum).
+
+  Das Protokoll nennt das Signal (etwa „Feuchte −1,3 g/m³ in 34 min“, „Thermostat −1,0 K“, „Fensterkontakt“).
 - **Handänderung** am Thermostat setzt die App beim nächsten Durchlauf zurück. Wärmer oder kühler stellen Sie in
   der App (Raum-Soll).
 - **Zu warm:** Steigt der Raum über Soll + Komfortband + 0,5 K, stellt sie das Thermostat sofort auf Soll − 0,5 K
@@ -430,8 +447,9 @@ zeigt die Seite **„Vorlauf höher nötig“**. Die App hebt den Vorlauf erst m
 können Sie ihn in myVAILLANT von Hand anheben.
 
 **Ventile schonen** (je Raum einstellbar, von der Schreibsperre erzwungen): kein Befehl unter der **Totzone**
-(0,5 K), höchstens alle **15 Minuten** und höchstens **24 Befehle** je Thermostat und Tag. Fenster, Handänderung,
-Sicherheit, Rückweg nach dem Testlauf und Rückfall gehen sofort hinaus; über der Höchstzahl nur noch Fenster,
+(0,5 K), höchstens alle **15 Minuten** und höchstens **24 Befehle** je Thermostat und Tag. Testlauf und schneller
+Durchlauf haben ein eigenes Budget (16 je Nacht, 20 je Durchlauf und 40 am Tag). Fenster, Handänderung,
+Sicherheit, Rückweg nach Testlauf oder Durchlauf und Rückfall gehen sofort hinaus; über der Höchstzahl nur noch Fenster,
 Sicherheit, Rückweg und Rückfall. Ein Wert, der noch zum Thermostat unterwegs ist, gilt schon als sein Sollwert. Jeder
 Sollwert gilt erst als bestätigt, wenn das Thermostat ihn meldet; meldet es ihn zweimal nicht, sendet die App ihm eine
 Stunde lang nur Fenster, Sicherheit, Rückweg und Rückfall. Die Seite zeigt Befehle und Ventilbewegungen je Tag.
@@ -444,7 +462,10 @@ getrennt nach steigender und fallender Abweichung und danach, wie warm das Wasse
 
 - im **Alltag** ab „Beobachten“, ohne Fühlerpaar: Stehen Sollwert und Abweichung 30 Minuten ruhig, kommt warmes
   Wasser an und ist die Ventilstellung aktuell, wird daraus ein Punkt (Median der letzten 10 Minuten);
-- in **Testläufen** aus jeder eingeschwungenen Stufe.
+- in **Testläufen** aus jeder eingeschwungenen Stufe;
+- im **schnellen Durchlauf** (seit 1.4.3) aus jedem Schritt: wie das Ventil sofort reagiert. Diese Punkte füllen nur
+  Lücken – wo es Punkte aus Alltag oder Testlauf gibt, zählen nur diese, weil sie eingeschwungen sind (wichtig beim
+  Comet, dessen Ventil nachläuft). Für „zu“ und „ganz offen“ und damit für „Steuern“ reichen sie.
 
 Dazu kommen aus jeder Änderung des Sollwerts (durch die App, von Hand oder durch einen Zeitplan) die **Sprungantwort**
 (nach wie vielen Minuten sich das Ventil bewegt, wie schnell, wann es steht), die **Reglerart** (auf/zu, P oder PI)
@@ -474,8 +495,29 @@ Zahl heute und das Topic.
   gilt eine Abfrage, die Home Assistant angenommen hat, als Bestätigung. Der Eurotronic Comet meldet seine Stellung
   mit seinen Nachrichten selbst (Zigbee2MQTT kann sie dort nicht abfragen).
 
-**Testlauf** (je Thermostat; nicht mehr Pflicht vor „Steuern“, aber der schnellste Weg zu „zu“ und „ganz offen“):
-Er misst, wie das Thermostat auf seinen Sollwert reagiert.
+**Schneller Durchlauf** (seit 1.4.3; je Thermostat mit Ventilstellung, der schnellste Weg zu „zu“ und „ganz offen“):
+Ohne Fühlerpaar und ohne warmes Wasser, zu jeder Tageszeit, etwa 25–35 Minuten.
+
+1. Beim Raum **„Schnellen Durchlauf starten“** (nur im Live-Betrieb, Raumregelung nicht „Aus“, mit Bestätigung) –
+   oder auf der Karte „Raumregelung“ **„Alle Räume nacheinander“**. Nicht bei offenem Fenster, nicht erreichbarem
+   Thermostat, Raum mehr als 1 K über Soll oder wenn schon ein Testlauf oder Durchlauf läuft (ein vorgemerkter
+   Nacht-Testlauf stört nicht; er wartet, bis der Durchlauf fertig ist).
+2. Die App merkt sich den Sollwert, stellt das Thermostat auf seine eigene Temperatur und dann **alle 2 Minuten** um
+   0,5 K höher – hat sich das Ventil um weniger als 10 Prozentpunkte bewegt, um 1 K –, bis es **ganz offen** ist
+   (höchstens 6 K über dem Start oder bis zur Grenze des Thermostats), dann ebenso tiefer, bis es **zu** ist
+   (höchstens 2 K unter die Temperatur am Thermostat), und zurück auf den Wert von vorher. Die Ventilstellung liest
+   sie jeweils nach dem Schritt (Comet meldet sie selbst, den W600 fragt sie eine Minute danach ab); kommt nach 4
+   Minuten keine frische, bricht sie ab.
+3. Höchstens **20 Befehle** je Durchlauf (sie zählen nicht zu den 24 am Tag); sind sie verbraucht, geht es mit dem
+   Gelernten zurück.
+4. Abbruch (sofort zurück auf den Wert von vorher): Fenster offen, Raum über Soll + 1 K, Thermostat nicht erreichbar,
+   Sollwert am Thermostat von Hand geändert, Knopf „Abbrechen“.
+
+Jeder Schritt wird ein Punkt im Regelverhalten und eine Sprungantwort. Beim Raum zeigt die Seite den Fortschritt und
+die **Kurve des letzten Durchlaufs** (Ventil über der Abweichung, steigend und fallend); im Protokoll stehen Start,
+Ende und eine Zusammenfassung, und sobald „zu“ und „ganz offen“ bekannt sind, dass „Steuern“ möglich ist.
+
+**Testlauf** (je Thermostat, mit dem Fühlerpaar; misst zusätzlich Vor- und Rücklauf und die Wärmeabgabe):
 
 1. Das **Fühlerpaar** an Vor- und Rücklauf des Heizkörpers befestigen (Anlegefühler, gut anliegend, mit Isolierung
    darüber; gut ist eine Auflösung von 0,1–0,2 K). Der **Vorlauf** ist das Rohr am Thermostatventil. Unter
@@ -490,9 +532,13 @@ Er misst, wie das Thermostat auf seinen Sollwert reagiert.
    eine Nacht, deren Startzeit beim Vormerken schon vorbei war, zählt nicht). Worauf er wartet, steht beim Raum
    („Wartet: …“) und – jeder neue Grund einmal je Nacht – im Protokoll; um 1 Uhr folgt „heute Nacht nicht
    gestartet: zuletzt …“.
-4. Die App stellt das Thermostat auf seine eigene Temperatur, dann höher, bis das Ventil **ganz offen** ist, danach
-   tiefer, bis es **zu** ist (höchstens bis 2 K unter die Temperatur am Thermostat), und zurück auf den Wert von
-   vorher – spätestens um 5 Uhr. Die **Schritte richten sich nach dem Ventil** (seit 1.4.2): der erste je Richtung
+4. Seit 1.4.3 beginnt er mit einem **schnellen Durchlauf** (etwa 30 Minuten; entfällt, wenn das Thermostat einen
+   vollständigen hat, der jünger als 7 Tage ist). Danach hält die App mit dem Fühlerpaar nur noch **vier Stellungen**
+   aus dem Gelernten – zu, etwa 30 %, etwa 60 % und ganz offen – je 20–40 Minuten (Spreizung, Wärme) und geht zurück
+   auf den Wert von vorher, spätestens um 5 Uhr. Kennt die App „zu“ und „ganz offen“ danach noch nicht, geht der Lauf
+   wie bisher vor: Er stellt das Thermostat auf seine eigene Temperatur, dann höher, bis das Ventil **ganz offen**
+   ist, danach tiefer, bis es **zu** ist (höchstens bis 2 K unter die Temperatur am Thermostat), und zurück auf den
+   Wert von vorher. Die **Schritte richten sich nach dem Ventil** (seit 1.4.2): der erste je Richtung
    1 K; hat sich das Ventil um weniger als 10 % je K bewegt, folgen 2 K, dann 3 K (größter Schritt); hat es sich um
    mehr als 40 Prozentpunkte bewegt, 0,5 K; sonst so viel, dass das Ventil etwa die nächste Marke erreicht (25, 50,
    75, 85 % aufwärts, 50, 25, 5 % abwärts). Reicht die Zeit bis 5 Uhr nicht für alle Marken, werden die Schritte
@@ -513,6 +559,40 @@ Jede eingeschwungene Stufe geht sofort ins Regelverhalten. Unter „Testläufe�
 mit Sollwert, Abweichung, Ventil, Vor- und Rücklauf und der geschätzten Wärmeabgabe. Vollständig ist ein Lauf, wenn
 das Ventil ganz offen und wieder zu war. Mit einem Fühlerpaar geht ein Lauf je Nacht; die übrigen Räume lernen im
 Alltag.
+
+**Regelung lernt mit** (seit 1.4.3; beim Raum aufklappbar, am Handy zugeklappt):
+
+- **Regelgüte** je Raum und Tag, ab „Vorschau“ (dann mit den Befehlen, die die App gesendet hätte – so ist die
+  Vorschau der Vergleich für später): mittlere Abweichung vom gültigen Soll mit Richtung („zu kalt“/„zu warm“) und
+  als Betrag, Anteil der Zeit unter und über dem Komfortband, **Überschwinger** (von unter Soll auf mehr als 0,3 K
+  darüber, mit dem größten Wert), **Hin und her** (Wechsel von 0,3 K zu kalt auf 0,3 K zu warm oder umgekehrt),
+  **Aufheizen** (nach jeder Erhöhung des Solls durch den Zeitplan oder das Vorheizen die Minuten, bis der Raum bis
+  auf 0,2 K dran ist, höchstens 3 Stunden – diese Zeit zählt nicht als Abweichung), Befehle, Ventilbewegungen,
+  mittlere Ventilöffnung und Zeit am Anschlag (mindestens 90 %: dann fehlt Wasser oder Vorlauf). Nicht gezählt:
+  Fenster offen und 30 Minuten danach, Testlauf und Durchlauf, Thermostat nicht erreichbar, Raumsensor fehlt. Im Bad
+  (am Thermostat gemessen) nur Befehle und Ventil. Die Seite zeigt heute und die letzten 7 Tage, gespeichert werden
+  30; kurz nach Mitternacht steht je Raum eine Zeile im Protokoll.
+- **Bedarf je Außentemperatur:** die Ventilöffnung, die den Raum am Soll hält, bei −10, −5, 0, 5, 10 und 15 °C.
+  Maßgeblich ist das Mittel der Außentemperatur der letzten 3 Stunden; dazwischen wird gemittelt. Den Startwert jeder
+  Stufe holt die App aus dem Verlauf der letzten 21 Tage (ruhige Stunden: Raum mindestens eine Stunde lang innerhalb
+  0,3 K am Soll; neuere zählen mehr), ab 5 ruhigen Stunden je Stufe; leere Stufen liegen auf der Geraden durch die
+  gelernten, sonst gilt der Bedarf aus dem Raummodell oder 30 %. **Nur in „Steuern“** führt sie ihn nach: liegt der
+  Raum 30 Minuten lang durchgehend mindestens 0,2 K daneben, 2 % mehr oder weniger, verteilt auf die beiden
+  Nachbarstufen – nicht bei einem Ventil am Anschlag, ohne Wärme, bei Fenster (und 30 Minuten danach), in den 30
+  Minuten nach einem neuen Soll, beim Aufheizen und als Spender; Grenzen 0–90 %. Kurz nach Mitternacht rückt jede
+  Stufe 20 % in Richtung des Medians ihrer ruhigen Stunden der letzten 7 Tage. Die Seite zeigt die **Bedarfskurve**
+  mit dem Punkt für jetzt (gefüllt: gelernt, hohl: Startwert); die Änderungen stehen gesammelt in der täglichen Zeile
+  („Bedarf bei 0 °C 34 → 38 %“).
+- **Verstärkung je Raum** (% Ventilöffnung je K zu kalt): Start aus dem Raummodell – die Öffnung, die 1 K in etwa
+  2 Stunden aufholt, begrenzt auf 20–40 %/K –, ohne gelernte Aufheizrate 30 %/K. Höchstens einmal am Tag, nach einem
+  Tag mit mindestens 12 Stunden in „Steuern“: ein Überschwinger über 0,5 K oder zweimal hin und her → ×0,8 („zu
+  nervös“); sonst mindestens 2 Stunden am Stück 0,3 K daneben, ohne dass die Abweichung um 0,1 K je Stunde sinkt,
+  Ventil nicht am Anschlag → ×1,2 („zu träge“); beides oder nichts → bleibt. Grenzen 10–60 %/K. Der Anteil für den
+  Trend ist die Verstärkung mal eine Drittelstunde (30 %/K → 10 % je K/h). Jede Änderung steht im Protokoll
+  („Büro: Verstärkung 30 → 24 %/K, zu nervös: 2 Überschwinger bis 0,7 K“); die Seite zeigt Startwert, letzte
+  Änderung und Grund.
+- **„Gelerntes der Regelung zurücksetzen“** (beim Raum): Der Bedarf wird neu aus dem Verlauf berechnet, die
+  Verstärkung geht auf ihren Startwert. Kennfeld und Regelgüte bleiben.
 
 **Absicherung:**
 
@@ -556,7 +636,9 @@ Die Seite **Protokoll** listet, neueste Einträge zuerst und nach Tagen geordnet
   myVAILLANT-App,
 - **Planer:** Stufe des Energiemanagements, der Plan der nächsten 12 Stunden in Kurzform, sobald er sich ändert,
   erkannte Abtauungen, Beginn und Ende des Frostschutzes und was der Vorlauf tun würde (Vorschau),
-- **Räume:** erkannte offene Fenster und unter- oder überversorgte Räume, jeweils als „würde“,
+- **Räume:** erkannte offene Fenster (mit dem Signal) und unter- oder überversorgte Räume, jeweils als „würde“;
+  die Raumregelung mit Fenstern, Testläufen, schnellen Durchläufen, Änderungen der Verstärkung und – kurz nach
+  Mitternacht – je Raum einer Zeile zur Regelgüte des Vortags,
 - **Verbindung:** Kopplung, Verbindungsaufbau und -abbrüche, auch die Verbindung zu Home Assistant,
 - **Modus:** Start der App mit ihrem Betrieb und jeder Wechsel zwischen Demo und Live,
 - **Einstellungen:** geänderte Räume und Raumdaten, Wärmesensoren, Export und Einstellungen des
