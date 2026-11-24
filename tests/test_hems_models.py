@@ -845,19 +845,34 @@ def test_the_room_model_learns_the_time_constant() -> None:
 def test_cooling_needs_a_spread_of_situations_and_otherwise_keeps_the_start_value() -> None:
     model = learn(temperature=[], outdoor=[], power=[])
 
-    assert model.tau_h.value == 30.0
+    assert model.tau_h.value == 150.0
     assert not model.tau_h.learned
     assert model.learning
     assert model.startup_min.value == 30.0
 
 
+def test_a_zone_switched_off_is_a_cooling_phase_whatever_the_valve() -> None:
+    # K5: with the zone off the valves open (the room gets colder), yet no heat comes - the room cools.
+    temperature, _valve, outdoor = cooling_series(150.0, 6)
+    open_valve = [(moment, 100.0) for moment, _ in temperature]
+    running = [(moment, 900.0) for moment, _ in temperature]
+    night = {moment for moment, _ in temperature if (moment - T0).total_seconds() % 86400 < 4 * 3600}
+    zone_off = [(moment, 1.0 if moment in night else 0.0) for moment, _ in temperature]
+
+    model = learn(temperature=temperature, outdoor=outdoor, power=running, valve=open_valve, zone_off=zone_off)
+    without = learn(temperature=temperature, outdoor=outdoor, power=running, valve=open_valve)
+
+    assert model.tau_h.learned and model.tau_h.value == pytest.approx(150.0, rel=0.15)
+    assert not without.tau_h.learned
+
+
 def test_minutes_until_the_lower_comfort_limit() -> None:
     model = learn(temperature=[], outdoor=[], power=[])
 
-    # tau 30 h: from 21 °C at 1 °C outside about 0.67 K/h, so 0.5 K in roughly 45 min.
+    # tau 150 h (K5): from 21 °C at 1 °C outside about 0.13 K/h, so 0.5 K in roughly 3 h 45 min.
     result = minutes_until(model, 21.0, 20.5, lambda _moment: 1.0, T0)
 
-    assert result == pytest.approx(45, abs=5)
+    assert result == pytest.approx(227, abs=10)
     assert minutes_until(model, 21.0, 20.5, lambda _moment: 21.0, T0) is None
 
 

@@ -24,8 +24,9 @@ type Series = Sequence[tuple[datetime, float]]
 
 # Phases needed before a value counts as learned.
 MIN_PHASES = 5
-# Start values until learned (assumptions, shown as such).
-START_TAU_H = 30.0
+# Start values until learned (assumptions, shown as such). The time constant: rooms of this house cool by
+# about 0.08-0.15 K/h (acceptance 1.3.0), 30 h made it 0.9 K/h (K5, 1.5.0).
+START_TAU_H = 150.0
 START_STARTUP_MIN = {"floor": 120.0, "radiator": 30.0}
 TAU_RANGE_H = (5.0, 500.0)
 # Sample spacing is 5 min; a step longer than this is a gap.
@@ -139,8 +140,10 @@ def learn(
     flow: Series = (),
     trv_setpoint: Series = (),
     setpoint: Series = (),
+    zone_off: Series = (),
     kind: str = "radiator",
 ) -> RoomModel:
+    """zone_off: 1 while the room's zone is switched off (no heat at all, whatever the valve; K5)."""
     times = [point[0] for point in temperature]
     temps = [point[1] for point in temperature]
     out = [at(outdoor, moment) for moment in times]
@@ -149,11 +152,14 @@ def learn(
     fl = [at(flow, moment) for moment in times] if flow else [None] * len(times)
     sp = [at(setpoint, moment) for moment in times] if setpoint else [None] * len(times)
     trv = [at(trv_setpoint, moment) for moment in times] if trv_setpoint else [None] * len(times)
+    off = [at(zone_off, moment) for moment in times] if zone_off else [None] * len(times)
 
-    # Cooling: valve (nearly) closed, or without valve data the heat pump standing still.
+    # Cooling: the zone switched off, the valve (nearly) closed, or without valve data the heat pump standing still.
     def no_heat(index: int) -> bool:
         if out[index] is None:
             return False
+        if off[index] == 1.0:
+            return True
         opening = vv[index]
         if opening is not None:
             return opening <= NO_HEAT_VALVE

@@ -895,6 +895,9 @@ class HemsService:
             for zone in heat_pump.zones:
                 if zone.setpoint is not None:
                     values[f"zone_setpoint:{zone.id}"] = zone.setpoint.value
+                if zone.mode is not None:
+                    # A zone switched off gives the room model clean cooling phases (K5).
+                    values[f"zone_off:{zone.id}"] = 1.0 if zone.mode == "off" else 0.0
         for zone_config in settings.hems.zones:
             for entity, series in (
                 (zone_config.flow_entity, f"flow:{zone_config.zone_id}"),
@@ -1311,6 +1314,7 @@ class HemsService:
                 room_series(room.entity_id, value) for value in ("temperature", "valve", "trv_setpoint", "setpoint")
             ]
         names += [f"flow:{zone.zone_id}" for zone in settings.hems.zones]
+        names += [f"zone_off:{zone_id}" for zone_id in {room.zone_id for room in settings.rooms if room.zone_id}]
         series = await self.samples.series_async(names, now - timedelta(days=21))
         models = {}
         for room in settings.rooms:
@@ -1323,6 +1327,7 @@ class HemsService:
                 flow=series.get(f"flow:{room.zone_id}", []),
                 trv_setpoint=series[room_series(room.entity_id, "trv_setpoint")],
                 setpoint=series[room_series(room.entity_id, "setpoint")],
+                zone_off=series.get(f"zone_off:{room.zone_id}", []),
                 kind=kind.value if kind is not None else "radiator",
             )
         self._models.rooms = models
